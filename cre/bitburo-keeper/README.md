@@ -6,7 +6,7 @@ Chainlink CRE-workflow die elk uur het Bitburo `Rebalancer`-contract op Base mai
 
 1. Leest `latestRoundData()` van de Chainlink L2 Sequencer Uptime-feed voor Base. Is `answer` niet 0 (sequencer down), of is de sequencer korter dan `sequencerGracePeriodSeconds` geleden teruggekomen (`now − startedAt`), dan stopt de run: de prijsfeeds zijn dan niet te vertrouwen.
 2. Leest `latestRoundData()` van de Chainlink cbBTC/USD-feed. Is die ouder dan `maxFeedAgeSeconds`, dan stopt de run: het contract zou toch reverten.
-3. Loopt `owners(offset, limit)` van het Rebalancer-contract af en vraagt per owner `isDue(owner)`.
+3. Leest `ownerCount()` en vraagt het Rebalancer-contract per pagina `dueOwners(offset, limit)`: één call per pagina, het contract filtert zelf met dezelfde regels als `isDue`. Zodra `maxOwnersPerReport` owners gevonden zijn stopt het bladeren; de rest komt in een volgende run.
 4. Codeert de due owners als `abi.encode(address[])`, laat het rapport door de DON tekenen en stuurt het via de KeystoneForwarder naar `Rebalancer.onReport(metadata, report)`.
 
 De workflow beslist niets over bedragen of richting. Dat doet het contract, met de instellingen van de gebruiker.
@@ -22,15 +22,15 @@ De workflow beslist niets over bedragen of richting. Dat doet het contract, met 
 | `sequencerGracePeriodSeconds` | Wachttijd na een sequencer-herstart voordat de run weer doorgaat (3600 s) |
 | `priceFeedAddress` | Chainlink cbBTC/USD op Base: `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` |
 | `maxFeedAgeSeconds` | Heartbeat 1200 s plus marge |
-| `ownersPageSize` | Aantal owners per `owners()`-call |
-| `maxOwnersPerReport` | Bovengrens per rapport, zodat `onReport` binnen `gasLimit` blijft |
+| `ownersPageSize` | Aantal owners per `dueOwners()`-call |
+| `maxOwnersPerReport` | Bovengrens per rapport (5): elke owner krijgt in `onReport` 700.000 gas, met reserve 750.000 passen er vijf in `gasLimit` |
 | `gasLimit` | Gaslimiet van de `onReport`-transactie (CRE-maximum is 5.000.000) |
 
 ## Contract-interface die de workflow verwacht
 
 ```solidity
-function owners(uint256 offset, uint256 limit) external view returns (address[] memory);
-function isDue(address owner) external view returns (bool due, int256 eurcDelta);
+function ownerCount() external view returns (uint256);
+function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory);
 function onReport(bytes calldata metadata, bytes calldata report) external; // report = abi.encode(address[] owners)
 ```
 

@@ -29,7 +29,7 @@ const baseConfig: Config = {
   priceFeedAddress: FEED,
   maxFeedAgeSeconds: 1500,
   ownersPageSize: 50,
-  maxOwnersPerReport: 20,
+  maxOwnersPerReport: 5,
   gasLimit: "4000000",
 };
 
@@ -136,8 +136,8 @@ describe("onCronTrigger", () => {
     mockFeed(evmMock, BigInt(NOW_MS / 1000) - 60n);
 
     const rebalancer = addContractMock(evmMock, { address: REBALANCER, abi: rebalancerAbi });
-    rebalancer.owners = (offset) => ((offset as bigint) === 0n ? [OWNER_A, OWNER_B] : []);
-    rebalancer.isDue = (owner) => [(owner as string).toLowerCase() === OWNER_B, 0n];
+    rebalancer.ownerCount = () => 2n;
+    rebalancer.dueOwners = (offset) => ((offset as bigint) === 0n ? [OWNER_B] : []);
     let reported: Address[] = [];
     rebalancer.writeReport = (input) => {
       const payload = input.report.rawReport.slice(input.report.rawReport.length - 96);
@@ -159,13 +159,39 @@ describe("onCronTrigger", () => {
     const evmMock = EvmMock.testInstance(chainSelector());
     mockFeed(evmMock, BigInt(NOW_MS / 1000) - 60n);
     const rebalancer = addContractMock(evmMock, { address: REBALANCER, abi: rebalancerAbi });
-    rebalancer.owners = (offset) => ((offset as bigint) === 0n ? [OWNER_A] : []);
-    rebalancer.isDue = () => [false, 0n];
+    rebalancer.ownerCount = () => 1n;
+    rebalancer.dueOwners = () => [];
 
     const result = onCronTrigger(runtime);
 
+    expect(result.ownersChecked).toBe(1);
     expect(result.dueOwners).toEqual([]);
     expect(result.txHash).toBe("");
+  });
+
+  test("pages through dueOwners and caps the report at maxOwnersPerReport", () => {
+    const config = { ...baseConfig, ownersPageSize: 2, maxOwnersPerReport: 3 };
+    const runtime = newTestRuntime<Config>(null, { timeProvider: () => NOW_MS }, config);
+    const evmMock = EvmMock.testInstance(chainSelector());
+    mockFeed(evmMock, BigInt(NOW_MS / 1000) - 60n);
+    const owners = Array.from({ length: 6 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address);
+    const rebalancer = addContractMock(evmMock, { address: REBALANCER, abi: rebalancerAbi });
+    rebalancer.ownerCount = () => 6n;
+    const requestedOffsets: bigint[] = [];
+    rebalancer.dueOwners = (offset, limit) => {
+      requestedOffsets.push(offset as bigint);
+      expect(limit).toBe(2n);
+      return owners.slice(Number(offset), Number(offset) + 2);
+    };
+    rebalancer.writeReport = () => ({ txStatus: "TX_STATUS_SUCCESS", txHash: new Uint8Array(32).fill(2) }) as never;
+
+    const result = onCronTrigger(runtime);
+
+    expect(result.ownersChecked).toBe(6);
+    expect(result.dueOwners).toEqual(owners.slice(0, 3));
+    // Na de tweede pagina is het rapport vol; de derde pagina wordt niet meer opgevraagd.
+    expect(requestedOffsets).toEqual([0n, 2n]);
+    expect(result.txHash).toBe(`0x${"02".repeat(32)}`);
   });
 });
 

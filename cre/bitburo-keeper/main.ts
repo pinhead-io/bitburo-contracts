@@ -26,9 +26,10 @@ import {
  * Bitburo keeper (Chainlink CRE).
  *
  * Elke run: (1) controleert of de Base-sequencer up is en de grace period voorbij is,
- * (2) controleert of de cbBTC/USD-feed vers is, (3) loopt alle owners van het
- * Rebalancer-contract af en vraagt per owner isDue(), (4) stuurt de lijst due owners als
- * ondertekend rapport naar Rebalancer.onReport via de KeystoneForwarder.
+ * (2) controleert of de cbBTC/USD-feed vers is, (3) vraagt het Rebalancer-contract per pagina
+ * dueOwners(offset, limit) (één call per pagina, het contract past dezelfde regels toe als isDue),
+ * (4) stuurt de lijst due owners als ondertekend rapport naar Rebalancer.onReport via de
+ * KeystoneForwarder.
  * De workflow beslist niets: het contract bepaalt zelf of en hoeveel er gehandeld wordt.
  */
 export type Config = {
@@ -58,8 +59,8 @@ export type RunSummary = {
 };
 
 export const rebalancerAbi = parseAbi([
-  "function owners(uint256 offset, uint256 limit) view returns (address[])",
-  "function isDue(address owner) view returns (bool due, int256 eurcDelta)",
+  "function ownerCount() view returns (uint256)",
+  "function dueOwners(uint256 offset, uint256 limit) view returns (address[])",
 ]);
 
 export const aggregatorAbi = parseAbi([
@@ -172,37 +173,30 @@ export const onCronTrigger = (runtime: Runtime<Config>): RunSummary => {
     return { sequencerUpSeconds, feedAgeSeconds, ownersChecked: 0, dueOwners: [], txHash: "", skippedReason };
   }
 
-  // 4. Owners aflopen en isDue() vragen.
+  // 4. Per pagina dueOwners() vragen; het contract filtert zelf met dezelfde regels als isDue().
+  //    Stoppen zodra het rapport vol is: de rest komt in een volgende run aan de beurt.
+  const ownerCount = readContract(
+    runtime,
+    evmClient,
+    config.rebalancerAddress,
+    rebalancerAbi,
+    "ownerCount",
+  ) as bigint;
+  const ownersChecked = Number(ownerCount);
   const dueOwners: Address[] = [];
-  let ownersChecked = 0;
-  for (let offset = 0n; ; offset += BigInt(config.ownersPageSize)) {
+  for (let offset = 0n; offset < ownerCount && dueOwners.length < config.maxOwnersPerReport; offset += BigInt(config.ownersPageSize)) {
     const page = readContract(
       runtime,
       evmClient,
       config.rebalancerAddress,
       rebalancerAbi,
-      "owners",
+      "dueOwners",
       [offset, BigInt(config.ownersPageSize)],
     ) as readonly Address[];
-    if (page.length === 0) {
-      break;
-    }
     for (const owner of page) {
-      ownersChecked += 1;
-      const [due] = readContract(
-        runtime,
-        evmClient,
-        config.rebalancerAddress,
-        rebalancerAbi,
-        "isDue",
-        [owner],
-      ) as readonly [boolean, bigint];
-      if (due && dueOwners.length < config.maxOwnersPerReport) {
+      if (dueOwners.length < config.maxOwnersPerReport) {
         dueOwners.push(owner);
       }
-    }
-    if (page.length < config.ownersPageSize) {
-      break;
     }
   }
   runtime.log(`Owners gecontroleerd: ${ownersChecked}, due: ${dueOwners.length}`);
