@@ -21,14 +21,17 @@ contract DeployRebalancer is Script {
     address constant FEED_CBBTC_USD = 0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D;
     address constant FEED_EURC_USD = 0xDAe398520e2B67cd3f27aeF9Cf14D93D927f8250;
     address constant SEQUENCER_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
-    /// @dev KeystoneForwarder van Chainlink CRE op Base mainnet (simulatie: 0x5e342a8438b4f5d39e72875fcee6f76b39cce548).
+    /// @dev Uniswap v3 0,05%-pools, alleen gelezen voor de spot-vs-oracle-check.
+    address constant POOL_EURC_USDC = 0x7279c08A36333e12c3Fc81747963264c100D66fB;
+    address constant POOL_USDC_CBBTC = 0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef;
+    /// @dev KeystoneForwarder van Chainlink CRE op Base mainnet. Bewust niet via env te overschrijven: het
+    ///      contract is onveranderbaar en de forwarder is de enige poort voor CRE-rapporten.
     address constant CRE_FORWARDER = 0xF8344CFd5c43616a4366C34E3EEE75af79a74482;
 
     function run() external returns (Rebalancer rebalancer) {
         require(block.chainid == 8453, "alleen Base mainnet");
         address treasury = vm.envAddress("TREASURY");
         address workflowOwner = vm.envAddress("WORKFLOW_OWNER");
-        address forwarder = vm.envOr("CRE_FORWARDER", CRE_FORWARDER);
 
         vm.startBroadcast();
         rebalancer = new Rebalancer(
@@ -40,8 +43,10 @@ contract DeployRebalancer is Script {
                 feedCbbtcUsd: FEED_CBBTC_USD,
                 feedEurcUsd: FEED_EURC_USD,
                 sequencerFeed: SEQUENCER_FEED,
+                poolEurcUsdc: POOL_EURC_USDC,
+                poolUsdcCbbtc: POOL_USDC_CBBTC,
                 treasury: treasury,
-                forwarder: forwarder,
+                forwarder: CRE_FORWARDER,
                 workflowOwner: workflowOwner
             })
         );

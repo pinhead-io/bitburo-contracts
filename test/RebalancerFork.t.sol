@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {Rebalancer} from "../src/Rebalancer.sol";
+import {IAggregatorV3} from "../src/interfaces/IAggregatorV3.sol";
 
 /// @notice Integratie tegen Base mainnet (fork). Overslaan met RUN_FORK=false.
 contract RebalancerForkTest is Test {
@@ -33,6 +34,7 @@ contract RebalancerForkTest is Test {
             return;
         }
         vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
+        vm.etch(forwarder, hex"5f");
 
         r = new Rebalancer(
             Rebalancer.Deployment({
@@ -43,11 +45,76 @@ contract RebalancerForkTest is Test {
                 feedCbbtcUsd: FEED_CBBTC_USD,
                 feedEurcUsd: FEED_EURC_USD,
                 sequencerFeed: SEQUENCER,
+                poolEurcUsdc: POOL_EURC_USDC,
+                poolUsdcCbbtc: POOL_USDC_CBBTC,
                 treasury: treasury,
                 forwarder: forwarder,
                 workflowOwner: workflowOwner
             })
         );
+    }
+
+    /// @notice Meet de afwijking tussen pool-spot en feedkoers; hoort normaal ruim onder 1% te liggen.
+    function test_fork_spotMatchesOracle() public view {
+        uint256 oracle = r.quote();
+        uint256 spotPrice = r.spot();
+        uint256 diff = spotPrice > oracle ? spotPrice - oracle : oracle - spotPrice;
+        console.log("oracle EURC/cbBTC (6 dec):", oracle);
+        console.log("spot   EURC/cbBTC (6 dec):", spotPrice);
+        console.log("afwijking in bps:", diff * 10_000 / oracle);
+        assertApproxEqRel(spotPrice, oracle, 0.01e18, "spot wijkt meer dan 1% af van de feeds");
+        assertEq(r.quoteChecked(), oracle);
+    }
+
+    /// @notice Schuift de cbBTC/USD-feed 1% op: de spot wijkt dan te ver af, execute revert en isDue is false.
+    function test_fork_spotDeviationBlocksRun() public {
+        _fund(buyer, 1000e6, 0);
+        (bool due,) = r.isDue(buyer);
+        assertTrue(due);
+
+        (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound) =
+            IAggregatorV3(FEED_CBBTC_USD).latestRoundData();
+        vm.mockCall(
+            FEED_CBBTC_USD,
+            abi.encodeWithSelector(IAggregatorV3.latestRoundData.selector),
+            abi.encode(roundId, answer * 101 / 100, startedAt, updatedAt, answeredInRound)
+        );
+        uint256 oracle = r.quote();
+        uint256 spotPrice = r.spot();
+        assertLt(spotPrice * 10_000, oracle * (10_000 - 50), "opzet: spot moet meer dan 0,5% onder de feed liggen");
+
+        (due,) = r.isDue(buyer);
+        assertFalse(due);
+        assertEq(r.dueOwners(0, 10).length, 0);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, spotPrice, oracle));
+        r.execute(buyer, keeper);
+        vm.clearMockedCalls();
+
+        (due,) = r.isDue(buyer);
+        assertTrue(due);
+        address[] memory list = r.dueOwners(0, 10);
+        assertEq(list.length, 1);
+        assertEq(list[0], buyer);
+    }
+
+    /// @notice Bevestigt dat de gasconstanten van `onReport` ruim genoeg zijn voor een echte koop en verkoop.
+    function test_fork_onReportRunsBuyAndSellWithinGasBudget() public {
+        _fund(buyer, 1000e6, 0);
+        _fund(seller, 0, 2_000_000);
+        address[] memory list = new address[](2);
+        list[0] = buyer;
+        list[1] = seller;
+
+        vm.expectEmit(true, false, false, false, address(r));
+        emit Rebalancer.Executed(buyer, true, 0, 0, 0, treasury, 0, 0, 0, 0);
+        vm.expectEmit(true, false, false, false, address(r));
+        emit Rebalancer.Executed(seller, false, 0, 0, 0, treasury, 0, 0, 0, 0);
+        vm.prank(forwarder);
+        r.onReport(
+            abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), workflowOwner, bytes2(0x0001)), abi.encode(list)
+        );
+        assertEq(r.lastExecutedAt(buyer), uint64(block.timestamp));
+        assertEq(r.lastExecutedAt(seller), uint64(block.timestamp));
     }
 
     function _params() internal pure returns (Rebalancer.Params memory) {

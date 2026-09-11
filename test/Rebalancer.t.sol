@@ -11,6 +11,7 @@ import {IReceiver} from "../src/interfaces/IReceiver.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAggregator} from "./mocks/MockAggregator.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
+import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
 
 // ─── Gedeelde opzet ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,8 @@ abstract contract RebalancerTestBase is Test {
     MockAggregator internal feedEurc;
     MockAggregator internal sequencer;
     MockRouter internal router;
+    MockUniswapV3Pool internal poolEurcUsdc; // token0 = EURC, token1 = USDC, zoals op Base
+    MockUniswapV3Pool internal poolUsdcCbbtc; // token0 = USDC, token1 = cbBTC, zoals op Base
     Rebalancer internal r;
 
     address internal treasury = makeAddr("treasury");
@@ -37,6 +40,8 @@ abstract contract RebalancerTestBase is Test {
 
     function setUp() public virtual {
         vm.warp(START);
+        // De constructor eist dat de forwarder een contract is; de KeystoneForwarder is dat op Base ook.
+        vm.etch(forwarder, hex"5f");
 
         eurc = new MockERC20("Euro Coin", "EURC", 6);
         cbbtc = new MockERC20("Coinbase Wrapped BTC", "cbBTC", 8);
@@ -45,31 +50,45 @@ abstract contract RebalancerTestBase is Test {
         feedBtc = new MockAggregator(8, "cbBTC / USD");
         feedEurc = new MockAggregator(8, "EURC / USD");
         sequencer = new MockAggregator(0, "L2 Sequencer Uptime");
+        poolEurcUsdc = new MockUniswapV3Pool(address(eurc), address(usdc));
+        poolUsdcCbbtc = new MockUniswapV3Pool(address(usdc), address(cbbtc));
         _setPrice(PRICE);
         sequencer.set(0, START - 1 days, START - 1 days);
 
         router = new MockRouter(address(eurc), address(usdc), address(cbbtc), PRICE);
 
-        r = new Rebalancer(
-            Rebalancer.Deployment({
-                eurc: address(eurc),
-                cbbtc: address(cbbtc),
-                usdc: address(usdc),
-                router: address(router),
-                feedCbbtcUsd: address(feedBtc),
-                feedEurcUsd: address(feedEurc),
-                sequencerFeed: address(sequencer),
-                treasury: treasury,
-                forwarder: forwarder,
-                workflowOwner: workflowOwner
-            })
-        );
+        r = new Rebalancer(_deployment());
     }
 
-    /// @dev Zet de feeds zo dat `quote()` exact `price` EURC-basiseenheden per cbBTC geeft (EURC/USD = 1).
+    function _deployment() internal view returns (Rebalancer.Deployment memory) {
+        return Rebalancer.Deployment({
+            eurc: address(eurc),
+            cbbtc: address(cbbtc),
+            usdc: address(usdc),
+            router: address(router),
+            feedCbbtcUsd: address(feedBtc),
+            feedEurcUsd: address(feedEurc),
+            sequencerFeed: address(sequencer),
+            poolEurcUsdc: address(poolEurcUsdc),
+            poolUsdcCbbtc: address(poolUsdcCbbtc),
+            treasury: treasury,
+            forwarder: forwarder,
+            workflowOwner: workflowOwner
+        });
+    }
+
+    /// @dev Zet feeds én pools zo dat `quote()` en `spot()` (op afronding na) `price` EURC per cbBTC geven,
+    ///      met EURC/USD = 1.
     function _setPrice(uint256 price) internal {
         feedBtc.set(int256(price * 1e8 / 1e6), block.timestamp, block.timestamp);
         feedEurc.set(1e8, block.timestamp, block.timestamp);
+        _setSpot(price);
+    }
+
+    /// @dev Alleen de pools: EURC/USDC op 1:1, USDC/cbBTC op `price` USDC-basiseenheden per cbBTC.
+    function _setSpot(uint256 price) internal {
+        poolEurcUsdc.setPrice(1e6, 1e6);
+        poolUsdcCbbtc.setPrice(price, 1e8);
     }
 
     function _defaultParams() internal pure returns (Rebalancer.Params memory) {
@@ -154,9 +173,9 @@ contract RebalancerTest is RebalancerTestBase {
         r.setParams(p);
         p.interval = 1 hours;
         r.setParams(p);
-        p.maxSlippageBps = 1;
+        p.maxSlippageBps = 30;
         r.setParams(p);
-        p.maxSlippageBps = 300;
+        p.maxSlippageBps = 100;
         r.setParams(p);
         vm.stopPrank();
     }
@@ -213,7 +232,9 @@ contract RebalancerTest is RebalancerTestBase {
         Rebalancer.Params memory p = _defaultParams();
         p.maxSlippageBps = 0;
         _expectInvalid(p);
-        p.maxSlippageBps = 301;
+        p.maxSlippageBps = 29;
+        _expectInvalid(p);
+        p.maxSlippageBps = 101;
         _expectInvalid(p);
     }
 
@@ -549,6 +570,114 @@ contract RebalancerTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
+    function test_execute_revertsWhenQuoteRoundsToZero() public {
+        // cbBTC/USD = 1e-8 en EURC/USD = 1: 1 * 1e6 / 1e8 = 0. Beide answers zijn > 0, dus alleen de
+        // productcheck vangt dit.
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        feedBtc.set(1, START, START);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.InvalidFeedAnswer.selector, address(feedBtc)));
+        r.quote();
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.InvalidFeedAnswer.selector, address(feedBtc)));
+        r.execute(alice, keeper);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due);
+    }
+
+    // spot-vs-oracle ────────────────────────────────────────────────────────────────────────────────────
+
+    function test_spot_matchesFeedsAcrossBothPools() public {
+        // Zelfde koers, andere weg: EURC/USD 1,16 en USDC/cbBTC 92.800 USDC -> 80.000 EURC per cbBTC.
+        assertApproxEqAbs(r.spot(), PRICE, 1);
+        feedEurc.set(1.16e8, START, START);
+        feedBtc.set(92_800e8, START, START);
+        poolEurcUsdc.setPrice(1e6, 1.16e6);
+        poolUsdcCbbtc.setPrice(92_800e6, 1e8);
+        assertEq(r.quote(), PRICE);
+        assertApproxEqAbs(r.spot(), PRICE, 1);
+        assertEq(r.quoteChecked(), PRICE);
+    }
+
+    function test_spot_pairsWithReversedTokenOrder() public {
+        // Pools met omgekeerde token0/token1 geven dezelfde spot.
+        MockUniswapV3Pool reversedEurc = new MockUniswapV3Pool(address(usdc), address(eurc));
+        MockUniswapV3Pool reversedBtc = new MockUniswapV3Pool(address(cbbtc), address(usdc));
+        reversedEurc.setPrice(1e6, 1e6);
+        reversedBtc.setPrice(1e8, PRICE);
+        Rebalancer.Deployment memory d = _deployment();
+        d.poolEurcUsdc = address(reversedEurc);
+        d.poolUsdcCbbtc = address(reversedBtc);
+        Rebalancer r2 = new Rebalancer(d);
+        assertApproxEqAbs(r2.spot(), PRICE, 1);
+        assertEq(r2.quoteChecked(), PRICE);
+    }
+
+    function test_execute_revertsWhenSpotDeviatesFromOracle() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+
+        _setSpot(PRICE * (BPS + 51) / BPS);
+        uint256 spotUp = r.spot();
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, spotUp, PRICE));
+        r.execute(alice, keeper);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, spotUp, PRICE));
+        r.quoteChecked();
+        (bool due, int256 delta) = r.isDue(alice);
+        assertFalse(due);
+        assertEq(delta, 0);
+        assertEq(r.dueOwners(0, 10).length, 0);
+        assertEq(r.lastExecutedAt(alice), 0);
+
+        _setSpot(PRICE * (BPS - 51) / BPS);
+        uint256 spotDown = r.spot();
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, spotDown, PRICE));
+        r.execute(alice, keeper);
+        (due,) = r.isDue(alice);
+        assertFalse(due);
+
+        // Precies op de grens (0,5%) mag wel; de sqrt-afronding maakt de spot hooguit 1 eenheid lager.
+        _setSpot(PRICE * (BPS + 50) / BPS);
+        (due,) = r.isDue(alice);
+        assertTrue(due);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 900e6);
+    }
+
+    function test_execute_spotCheckIgnoresPoolFeesOnly() public {
+        // Alleen de EURC/USDC-pool 0,4% verschoven: onder de grens, run gaat door.
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        poolEurcUsdc.setPrice(1e6, 1.004e6);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 900e6);
+    }
+
+    // sweep en rewardTo ────────────────────────────────────────────────────────────────────────────────
+
+    function test_sweep_sendsFullBalanceToTreasury() public {
+        eurc.mint(address(r), 123e6);
+        cbbtc.mint(address(r), 4_567);
+        vm.prank(bob);
+        r.sweep(eurc);
+        assertEq(eurc.balanceOf(address(r)), 0);
+        assertEq(eurc.balanceOf(treasury), 123e6);
+        assertEq(cbbtc.balanceOf(address(r)), 4_567);
+        r.sweep(cbbtc);
+        assertEq(cbbtc.balanceOf(address(r)), 0);
+        assertEq(cbbtc.balanceOf(treasury), 4_567);
+        // Leeg saldo: geen transfer, geen revert.
+        r.sweep(eurc);
+        assertEq(eurc.balanceOf(treasury), 123e6);
+    }
+
+    function test_execute_rewardToSelfGoesToTreasury() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.Executed(
+            alice, true, 100e6, 250_000, 0, address(0), Math.mulDiv(99_750_000, 1e8, PRICE), PRICE, 1000e6, 0
+        );
+        r.execute(alice, address(r));
+        assertEq(eurc.balanceOf(address(r)), 0);
+        assertEq(eurc.balanceOf(treasury), 250_000);
+    }
+
     function test_execute_revertsOnSlippageBuy() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         router.setSlippageBps(101);
@@ -693,6 +822,59 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(delta, -100e6);
     }
 
+    // dueOwners ─────────────────────────────────────────────────────────────────────────────────────────
+
+    function test_dueOwners_filtersAndPaginatesLikeIsDue() public {
+        address[6] memory users;
+        for (uint256 i = 0; i < 6; i++) {
+            users[i] = makeAddr(string(abi.encodePacked("due", i)));
+        }
+        _setUser(users[0], 1000e6, 0, _defaultParams()); // due: kopen
+        _setUser(users[1], 200e6, 1_000_000, _defaultParams()); // binnen band
+        _setUser(users[2], 0, 1_250_000, _defaultParams()); // due: verkopen
+        Rebalancer.Params memory inactive = _defaultParams();
+        inactive.active = false;
+        _setUser(users[3], 1000e6, 0, inactive); // inactief
+        _setUser(users[4], 1000e6, 0, _defaultParams()); // net uitgevoerd -> niet due
+        r.execute(users[4], keeper);
+        _setUser(users[5], 1000e6, 0, _defaultParams()); // due, maar allowance 0
+        vm.prank(users[5]);
+        eurc.approve(address(r), 0);
+
+        address[] memory due = r.dueOwners(0, 100);
+        assertEq(due.length, 2);
+        assertEq(due[0], users[0]);
+        assertEq(due[1], users[2]);
+        for (uint256 i = 0; i < 6; i++) {
+            (bool isDueNow,) = r.isDue(users[i]);
+            assertEq(isDueNow, i == 0 || i == 2, "dueOwners wijkt af van isDue");
+        }
+
+        due = r.dueOwners(0, 2);
+        assertEq(due.length, 1);
+        assertEq(due[0], users[0]);
+        due = r.dueOwners(2, 2);
+        assertEq(due.length, 1);
+        assertEq(due[0], users[2]);
+        assertEq(r.dueOwners(3, 3).length, 0);
+        assertEq(r.dueOwners(6, 10).length, 0);
+        assertEq(r.dueOwners(0, 0).length, 0);
+    }
+
+    function test_dueOwners_emptyOnFeedFailureNeverReverts() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        assertEq(r.dueOwners(0, 10).length, 1);
+        sequencer.set(1, START - 1 days, START - 1 days);
+        assertEq(r.dueOwners(0, 10).length, 0);
+        sequencer.set(0, START - 1 days, START - 1 days);
+        feedBtc.set(80_000e8, START, START - 2000);
+        assertEq(r.dueOwners(0, 10).length, 0);
+    }
+
+    function test_dueOwners_emptyRegistry() public view {
+        assertEq(r.dueOwners(0, 10).length, 0);
+    }
+
     // quote ─────────────────────────────────────────────────────────────────────────────────────────────
 
     function test_quote_usesBothFeeds() public {
@@ -755,6 +937,51 @@ contract RebalancerTest is RebalancerTestBase {
         r.onReport(_metadata(workflowOwner), abi.encode(new address[](0)));
     }
 
+    function test_onReport_stopsCleanlyWhenGasRunsOut() public {
+        address[5] memory users;
+        address[] memory list = new address[](5);
+        for (uint256 i = 0; i < 5; i++) {
+            users[i] = makeAddr(string(abi.encodePacked("gas", i)));
+            _setUser(users[i], 1000e6, 0, _defaultParams());
+            list[i] = users[i];
+        }
+
+        // Genoeg voor de eerste owner en de reserve-check, te weinig voor een tweede: de lus breekt af,
+        // de call slaagt en de rest blijft voor een volgend rapport.
+        uint256 tightGas = r.EXECUTE_GAS_RESERVE() + 300_000;
+        vm.prank(forwarder);
+        r.onReport{gas: tightGas}(_metadata(workflowOwner), abi.encode(list));
+        assertEq(r.lastExecutedAt(users[0]), uint64(START), "eerste owner uitgevoerd");
+        assertEq(r.lastExecutedAt(users[1]), 0, "tweede owner overgeslagen door gasgebrek");
+        assertEq(r.lastExecutedAt(users[4]), 0);
+
+        // Met ruim gas gaan alle resterende owners in één rapport mee.
+        vm.prank(forwarder);
+        r.onReport{gas: 4_000_000}(_metadata(workflowOwner), abi.encode(list));
+        for (uint256 i = 1; i < 5; i++) {
+            assertEq(r.lastExecutedAt(users[i]), uint64(START));
+        }
+    }
+
+    function test_onReport_executeGasBudgetIsPerOwner() public {
+        // Een owner die meer dan EXECUTE_GAS zou vragen, wordt overgeslagen zonder de rest te raken.
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        _setUser(bob, 1000e6, 0, _defaultParams());
+        address[] memory list = new address[](2);
+        list[0] = alice;
+        list[1] = bob;
+        router.setGasBurn(r.EXECUTE_GAS());
+
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(alice, "");
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(bob, "");
+        vm.prank(forwarder);
+        r.onReport{gas: 4_000_000}(_metadata(workflowOwner), abi.encode(list));
+        assertEq(r.lastExecutedAt(alice), 0);
+        assertEq(r.lastExecutedAt(bob), 0);
+    }
+
     function test_onReport_skipsOnSwapFailure() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         router.setSlippageBps(200);
@@ -777,24 +1004,58 @@ contract RebalancerTest is RebalancerTestBase {
     // constructor ───────────────────────────────────────────────────────────────────────────────────────
 
     function test_constructor_rejectsZeroAddress() public {
-        Rebalancer.Deployment memory d = Rebalancer.Deployment({
-            eurc: address(eurc),
-            cbbtc: address(cbbtc),
-            usdc: address(usdc),
-            router: address(router),
-            feedCbbtcUsd: address(feedBtc),
-            feedEurcUsd: address(feedEurc),
-            sequencerFeed: address(sequencer),
-            treasury: treasury,
-            forwarder: forwarder,
-            workflowOwner: workflowOwner
-        });
+        Rebalancer.Deployment memory d = _deployment();
         d.treasury = address(0);
         vm.expectRevert(Rebalancer.ZeroAddress.selector);
         new Rebalancer(d);
-        d.treasury = treasury;
+        d = _deployment();
         d.workflowOwner = address(0);
         vm.expectRevert(Rebalancer.ZeroAddress.selector);
+        new Rebalancer(d);
+        d = _deployment();
+        d.router = address(0);
+        vm.expectRevert(Rebalancer.ZeroAddress.selector);
+        new Rebalancer(d);
+        d = _deployment();
+        d.poolUsdcCbbtc = address(0);
+        vm.expectRevert(Rebalancer.ZeroAddress.selector);
+        new Rebalancer(d);
+    }
+
+    function test_constructor_rejectsNonContracts() public {
+        address eoa = makeAddr("eoa");
+        Rebalancer.Deployment memory d;
+        for (uint256 i = 0; i < 10; i++) {
+            d = _deployment();
+            if (i == 0) d.eurc = eoa;
+            if (i == 1) d.cbbtc = eoa;
+            if (i == 2) d.usdc = eoa;
+            if (i == 3) d.router = eoa;
+            if (i == 4) d.feedCbbtcUsd = eoa;
+            if (i == 5) d.feedEurcUsd = eoa;
+            if (i == 6) d.sequencerFeed = eoa;
+            if (i == 7) d.poolEurcUsdc = eoa;
+            if (i == 8) d.poolUsdcCbbtc = eoa;
+            if (i == 9) d.forwarder = eoa;
+            vm.expectRevert(abi.encodeWithSelector(Rebalancer.NotAContract.selector, eoa));
+            new Rebalancer(d);
+        }
+        // Treasury en workflow-owner mogen EOA's zijn.
+        d = _deployment();
+        d.treasury = eoa;
+        d.workflowOwner = eoa;
+        new Rebalancer(d);
+    }
+
+    function test_constructor_rejectsPoolWithWrongTokens() public {
+        MockUniswapV3Pool wrong = new MockUniswapV3Pool(address(eurc), address(cbbtc));
+        Rebalancer.Deployment memory d = _deployment();
+        d.poolEurcUsdc = address(wrong);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedPoolTokens.selector, address(wrong)));
+        new Rebalancer(d);
+        d = _deployment();
+        d.poolUsdcCbbtc = address(wrong);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedPoolTokens.selector, address(wrong)));
         new Rebalancer(d);
     }
 
@@ -965,7 +1226,7 @@ contract RebalancerTest is RebalancerTestBase {
             maxSlippageBps: slip
         });
         bool valid = target >= 500 && target <= 9500 && target % 100 == 0 && band >= 1 && band <= 9999 && cap >= 1
-            && cap <= 10_000 && minTrade > 0 && interval >= 1 hours && slip >= 1 && slip <= 300;
+            && cap <= 10_000 && minTrade > 0 && interval >= 1 hours && slip >= 30 && slip <= 100;
         if (!valid) vm.expectRevert(Rebalancer.InvalidParams.selector);
         vm.prank(alice);
         r.setParams(p);
@@ -982,6 +1243,8 @@ contract RebalancerHandler is Test {
     MockAggregator public feedBtc;
     MockAggregator public feedEurc;
     MockRouter public router;
+    MockUniswapV3Pool public poolEurcUsdc;
+    MockUniswapV3Pool public poolUsdcCbbtc;
     address public treasury;
 
     address[] public actors;
@@ -1000,6 +1263,8 @@ contract RebalancerHandler is Test {
         MockAggregator feedBtc_,
         MockAggregator feedEurc_,
         MockRouter router_,
+        MockUniswapV3Pool poolEurcUsdc_,
+        MockUniswapV3Pool poolUsdcCbbtc_,
         address treasury_
     ) {
         r = r_;
@@ -1008,6 +1273,8 @@ contract RebalancerHandler is Test {
         feedBtc = feedBtc_;
         feedEurc = feedEurc_;
         router = router_;
+        poolEurcUsdc = poolEurcUsdc_;
+        poolUsdcCbbtc = poolUsdcCbbtc_;
         treasury = treasury_;
         actors.push(makeAddr("actor0"));
         actors.push(makeAddr("actor1"));
@@ -1041,7 +1308,7 @@ contract RebalancerHandler is Test {
             maxCorrectionBps: uint16(bound(cap, 1, 10_000)),
             minTradeEurc: uint64(bound(minTrade, 1, 100e6)),
             interval: 1 hours,
-            maxSlippageBps: uint16(bound(slip, 1, 300))
+            maxSlippageBps: uint16(bound(slip, 30, 100))
         });
         vm.prank(_actor(seed));
         r.setParams(p);
@@ -1073,7 +1340,14 @@ contract RebalancerHandler is Test {
         price = bound(price, 20_000e6, 200_000e6);
         feedBtc.set(int256(price * 1e8 / 1e6), block.timestamp, block.timestamp);
         feedEurc.set(1e8, block.timestamp, block.timestamp);
+        poolEurcUsdc.setPrice(1e6, 1e6);
+        poolUsdcCbbtc.setPrice(price, 1e8);
         router.setPrice(price);
+    }
+
+    /// @dev Iedereen mag vegen; het contract mag daardoor nooit saldo overhouden en de treasury daalt nooit.
+    function sweep(bool eurcToken) external afterCall {
+        r.sweep(eurcToken ? eurc : cbbtc);
     }
 
     function execute(uint256 seed, uint256 rewardSeed) external afterCall {
@@ -1102,7 +1376,8 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
 
     function setUp() public override {
         super.setUp();
-        handler = new RebalancerHandler(r, eurc, cbbtc, feedBtc, feedEurc, router, treasury);
+        handler =
+            new RebalancerHandler(r, eurc, cbbtc, feedBtc, feedEurc, router, poolEurcUsdc, poolUsdcCbbtc, treasury);
         targetContract(address(handler));
     }
 

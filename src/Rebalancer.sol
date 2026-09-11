@@ -9,6 +9,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 import {IReceiver} from "./interfaces/IReceiver.sol";
+import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
 import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
 
 /**
@@ -25,6 +26,15 @@ import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
  *      Geen admin, geen upgrade, geen pauzeknop. `execute` is permissionless; de aanroeper kan alleen kiezen
  *      wanneer, nooit wat of hoeveel. De fee is vast en gaat altijd in EURC naar de treasury, met een vaste
  *      beloning voor de aanroeper.
+ *
+ *      Sandwich-bescherming: vóór elke swap wordt de spotkoers van de twee Uniswap-pools (EURC/USDC en
+ *      USDC/cbBTC, via slot0) vergeleken met de Chainlink-koers. Wijkt de spot meer dan MAX_SPOT_DEVIATION_BPS
+ *      af, dan revert de run. Dat begrenst wat een aanroeper door de pool te verplaatsen kan onttrekken tot
+ *      ongeveer 0,5% van het run-bedrag, plus de slippage die de gebruiker zelf toestaat (maxSlippageBps,
+ *      minimaal 0,3%, maximaal 1%). Het maakt een run niet gratis te manipuleren, maar ook niet onmogelijk:
+ *      wie de pool binnen die 0,5% verschuift, verdient dat deel. De EURC/USDC-pool is dun; runs boven ongeveer
+ *      10.000 EURC per keer zijn onverstandig zolang de route Uniswap v3 is, omdat de eigen prijsimpact dan al
+ *      in de buurt van de toegestane afwijking komt.
  */
 contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
@@ -43,11 +53,23 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     address public immutable FORWARDER;
     /// @notice Adres van de CRE-workflow-eigenaar (de sleutel die de Bitburo-workflow uitrolt).
     address public immutable WORKFLOW_OWNER;
+    /// @notice Uniswap v3-pool EURC/USDC (0,05%), alleen gelezen voor de spot-vs-oracle-check.
+    IUniswapV3Pool public immutable POOL_EURC_USDC;
+    /// @notice Uniswap v3-pool USDC/cbBTC (0,05%), alleen gelezen voor de spot-vs-oracle-check.
+    IUniswapV3Pool public immutable POOL_USDC_CBBTC;
+    bool private immutable _eurcIsToken0;
+    bool private immutable _usdcIsToken0;
 
     uint24 public constant POOL_FEE = 500; // 0,05% op beide hops
     uint16 public constant FEE_BPS = 25;
     uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0,05 EURC
-    uint16 public constant MAX_SLIPPAGE_BPS = 300;
+    uint16 public constant MAX_SLIPPAGE_BPS = 100;
+    uint16 public constant MIN_SLIPPAGE_BPS = 30;
+    uint16 public constant MAX_SPOT_DEVIATION_BPS = 50;
+    /// @notice Gas dat `onReport` aan één `execute` meegeeft; gemeten op de fork (zie README) met ruime marge.
+    uint256 public constant EXECUTE_GAS = 700_000;
+    /// @notice Onder dit restgas stopt `onReport` met de rest van het rapport in plaats van te reverten.
+    uint256 public constant EXECUTE_GAS_RESERVE = 750_000;
     uint16 public constant MIN_TARGET_BPS = 500;
     uint16 public constant MAX_TARGET_BPS = 9500;
     uint32 public constant MIN_INTERVAL = 1 hours;
@@ -58,6 +80,7 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     uint256 private constant WAD = 1e18;
     uint256 private constant EURC_UNIT = 1e6;
     uint256 private constant CBBTC_UNIT = 1e8;
+    uint256 private constant Q96 = 1 << 96;
 
     // ─── Per gebruiker ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -68,7 +91,7 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         uint16 maxCorrectionBps; // 1–10000, aandeel van de totale waarde per run
         uint64 minTradeEurc; // EURC-basiseenheden
         uint32 interval; // minimale tijd tussen runs, >= MIN_INTERVAL
-        uint16 maxSlippageBps; // 1–MAX_SLIPPAGE_BPS
+        uint16 maxSlippageBps; // MIN_SLIPPAGE_BPS–MAX_SLIPPAGE_BPS
     }
 
     mapping(address owner => Params) public params;
@@ -103,6 +126,9 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     error UnauthorizedForwarder(address caller);
     error UnauthorizedWorkflowOwner(address owner);
     error ZeroAddress();
+    error NotAContract(address account);
+    error UnexpectedPoolTokens(address pool);
+    error SpotDeviatesFromOracle(uint256 spot, uint256 oracle);
 
     // ─── Constructor ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -114,19 +140,26 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         address feedCbbtcUsd;
         address feedEurcUsd;
         address sequencerFeed;
+        address poolEurcUsdc;
+        address poolUsdcCbbtc;
         address treasury;
         address forwarder;
         address workflowOwner;
     }
 
     constructor(Deployment memory d) {
-        if (
-            d.eurc == address(0) || d.cbbtc == address(0) || d.usdc == address(0) || d.router == address(0)
-                || d.feedCbbtcUsd == address(0) || d.feedEurcUsd == address(0) || d.sequencerFeed == address(0)
-                || d.treasury == address(0) || d.forwarder == address(0) || d.workflowOwner == address(0)
-        ) {
-            revert ZeroAddress();
-        }
+        if (d.treasury == address(0) || d.workflowOwner == address(0)) revert ZeroAddress();
+        _requireContract(d.eurc);
+        _requireContract(d.cbbtc);
+        _requireContract(d.usdc);
+        _requireContract(d.router);
+        _requireContract(d.feedCbbtcUsd);
+        _requireContract(d.feedEurcUsd);
+        _requireContract(d.sequencerFeed);
+        _requireContract(d.poolEurcUsdc);
+        _requireContract(d.poolUsdcCbbtc);
+        _requireContract(d.forwarder);
+
         EURC = IERC20(d.eurc);
         CBBTC = IERC20(d.cbbtc);
         USDC = d.usdc;
@@ -134,9 +167,28 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         FEED_CBBTC_USD = IAggregatorV3(d.feedCbbtcUsd);
         FEED_EURC_USD = IAggregatorV3(d.feedEurcUsd);
         SEQUENCER_FEED = IAggregatorV3(d.sequencerFeed);
+        POOL_EURC_USDC = IUniswapV3Pool(d.poolEurcUsdc);
+        POOL_USDC_CBBTC = IUniswapV3Pool(d.poolUsdcCbbtc);
         TREASURY = d.treasury;
         FORWARDER = d.forwarder;
         WORKFLOW_OWNER = d.workflowOwner;
+
+        _eurcIsToken0 = _poolOrder(POOL_EURC_USDC, d.eurc, d.usdc);
+        _usdcIsToken0 = _poolOrder(POOL_USDC_CBBTC, d.usdc, d.cbbtc);
+    }
+
+    function _requireContract(address account) private view {
+        if (account == address(0)) revert ZeroAddress();
+        if (account.code.length == 0) revert NotAContract(account);
+    }
+
+    /// @return aIsToken0 True als `a` token0 van de pool is; revert als de pool niet precies {a, b} bevat.
+    function _poolOrder(IUniswapV3Pool pool, address a, address b) private view returns (bool aIsToken0) {
+        address token0 = pool.token0();
+        address token1 = pool.token1();
+        if (token0 == a && token1 == b) return true;
+        if (token0 == b && token1 == a) return false;
+        revert UnexpectedPoolTokens(address(pool));
     }
 
     // ─── Gebruiker ──────────────────────────────────────────────────────────────────────────────────────────
@@ -146,7 +198,8 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         if (
             p.targetBps < MIN_TARGET_BPS || p.targetBps > MAX_TARGET_BPS || p.targetBps % 100 != 0 || p.bandBps == 0
                 || p.bandBps >= BPS || p.maxCorrectionBps == 0 || p.maxCorrectionBps > BPS || p.minTradeEurc == 0
-                || p.interval < MIN_INTERVAL || p.maxSlippageBps == 0 || p.maxSlippageBps > MAX_SLIPPAGE_BPS
+                || p.interval < MIN_INTERVAL || p.maxSlippageBps < MIN_SLIPPAGE_BPS
+                || p.maxSlippageBps > MAX_SLIPPAGE_BPS
         ) {
             revert InvalidParams();
         }
@@ -178,7 +231,7 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     }
 
     /// @notice Zou `execute(owner, …)` nu iets doen? `eurcDelta` > 0 = kopen voor dat bedrag, < 0 = verkopen.
-    /// @dev Revert nooit: een storing in de feeds of sequencer geeft (false, 0).
+    /// @dev Revert nooit: een storing in de feeds of sequencer, of een te grote spot-afwijking, geeft (false, 0).
     function isDue(address owner) external view returns (bool due, int256 eurcDelta) {
         Params memory p = params[owner];
         if (!p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) {
@@ -188,6 +241,40 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         if (!ok) {
             return (false, 0);
         }
+        return _dueAt(owner, p, price);
+    }
+
+    /// @notice Pagina uit de owner-lijst, gefilterd op wie nu due is (zelfde regels als `isDue`). Revert nooit.
+    function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory due) {
+        uint256 total = _owners.length;
+        if (offset >= total) {
+            return new address[](0);
+        }
+        (bool ok, uint256 price) = _tryQuote();
+        if (!ok) {
+            return new address[](0);
+        }
+        uint256 end = Math.min(offset + limit, total);
+        address[] memory candidates = new address[](end - offset);
+        uint256 n;
+        for (uint256 i = offset; i < end; i++) {
+            address owner = _owners[i];
+            Params memory p = params[owner];
+            if (!p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) {
+                continue;
+            }
+            (bool isDueNow,) = _dueAt(owner, p, price);
+            if (isDueNow) {
+                candidates[n++] = owner;
+            }
+        }
+        due = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            due[i] = candidates[i];
+        }
+    }
+
+    function _dueAt(address owner, Params memory p, uint256 price) internal view returns (bool due, int256 eurcDelta) {
         (bool isBuy, uint256 amountIn, uint256 correctionEurc,,) = _plan(owner, p, price);
         if (amountIn == 0) {
             return (false, 0);
@@ -204,8 +291,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         Params memory p = params[owner];
         if (!p.active) revert Inactive();
         if (block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) revert NotDue();
+        // Een beloning aan het contract zelf zou blijven hangen; dan liever de hele fee naar de treasury.
+        if (rewardTo == address(this)) rewardTo = address(0);
 
-        uint256 price = _quote();
+        uint256 price = _quoteChecked();
         (bool isBuy, uint256 amountIn, uint256 correctionEurc, uint256 total, uint256 fractionBps) =
             _plan(owner, p, price);
         if (amountIn == 0) revert NothingToDo();
@@ -227,6 +316,9 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     }
 
     /// @notice Ingang voor Chainlink CRE: `report` = abi.encode(address[] owners). Per owner try/catch.
+    /// @dev Elke owner krijgt precies EXECUTE_GAS; is er minder dan EXECUTE_GAS_RESERVE over, dan stopt de lus
+    ///      en blijven de overige owners voor een volgend rapport. De hele call revert dus nooit op gasgebrek
+    ///      van één owner.
     function onReport(bytes calldata metadata, bytes calldata report) external override {
         if (msg.sender != FORWARDER) revert UnauthorizedForwarder(msg.sender);
         (,, address workflowOwner) = _decodeMetadata(metadata);
@@ -234,11 +326,19 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
 
         address[] memory list = abi.decode(report, (address[]));
         for (uint256 i = 0; i < list.length; i++) {
-            try this.execute(list[i], TREASURY) {}
+            if (gasleft() < EXECUTE_GAS_RESERVE) break;
+            try this.execute{gas: EXECUTE_GAS}(list[i], TREASURY) {}
             catch (bytes memory reason) {
                 emit ReportSkipped(list[i], reason);
             }
         }
+    }
+
+    /// @notice Stuurt het volledige saldo van `token` in dit contract naar de treasury. Iedereen mag dit
+    ///         aanroepen; het contract hoort buiten een transactie nooit saldo te hebben.
+    function sweep(IERC20 token) external nonReentrant {
+        uint256 balance = token.balanceOf(address(this));
+        if (balance > 0) token.safeTransfer(TREASURY, balance);
     }
 
     function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
@@ -255,6 +355,31 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         uint256 cbbtcUsd = _readFeed(FEED_CBBTC_USD, MAX_AGE_CBBTC);
         uint256 eurcUsd = _readFeed(FEED_EURC_USD, MAX_AGE_EURC);
         price = Math.mulDiv(cbbtcUsd, EURC_UNIT, eurcUsd);
+        if (price == 0) revert InvalidFeedAnswer(address(FEED_CBBTC_USD));
+    }
+
+    /// @dev Oracle-koers, geweigerd als de pool-spot er meer dan MAX_SPOT_DEVIATION_BPS van afwijkt.
+    function _quoteChecked() internal view returns (uint256 price) {
+        price = _quote();
+        uint256 spotPrice = _spot();
+        uint256 diff = spotPrice > price ? spotPrice - price : price - spotPrice;
+        if (diff * BPS > price * MAX_SPOT_DEVIATION_BPS) revert SpotDeviatesFromOracle(spotPrice, price);
+    }
+
+    /// @return price EURC-basiseenheden (6 dec) per 1 cbBTC volgens de huidige spot van beide pools (midprijs,
+    ///               zonder poolfees).
+    function _spot() internal view returns (uint256 price) {
+        uint256 usdcPerBtc = _spotOut(POOL_USDC_CBBTC, !_usdcIsToken0, CBBTC_UNIT);
+        price = _spotOut(POOL_EURC_USDC, !_eurcIsToken0, usdcPerBtc);
+    }
+
+    /// @dev Hoeveel basiseenheden van het andere token `amountIn` basiseenheden waard zijn op de spot van
+    ///      `pool`. `inIsToken0` zegt of het inputtoken token0 is. Rekent via ratioX96 = sqrtPriceX96² / 2^96
+    ///      (past in uint256 voor elke uint160 sqrtPriceX96), zoals Uniswaps OracleLibrary.getQuoteAtTick.
+    function _spotOut(IUniswapV3Pool pool, bool inIsToken0, uint256 amountIn) internal view returns (uint256) {
+        (uint160 sqrtPriceX96,,,,,,) = pool.slot0();
+        uint256 ratioX96 = Math.mulDiv(sqrtPriceX96, sqrtPriceX96, Q96);
+        return inIsToken0 ? Math.mulDiv(amountIn, ratioX96, Q96) : Math.mulDiv(amountIn, Q96, ratioX96);
     }
 
     function _readFeed(IAggregatorV3 feed, uint256 maxAge) internal view returns (uint256) {
@@ -268,16 +393,27 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     }
 
     function _tryQuote() internal view returns (bool ok, uint256 price) {
-        try this.quote() returns (uint256 p) {
+        try this.quoteChecked() returns (uint256 p) {
             return (true, p);
         } catch {
             return (false, 0);
         }
     }
 
-    /// @notice Actuele koers volgens de feeds, met dezelfde checks als `execute`. Revert bij storing.
+    /// @notice Actuele koers volgens de feeds (EURC-basiseenheden per cbBTC). Revert bij storing.
     function quote() external view returns (uint256) {
         return _quote();
+    }
+
+    /// @notice Actuele koers volgens de feeds, met álle checks van `execute`: revert ook als de pool-spot te
+    ///         ver van de feeds afwijkt.
+    function quoteChecked() external view returns (uint256) {
+        return _quoteChecked();
+    }
+
+    /// @notice Spotkoers van de twee Uniswap-pools (EURC-basiseenheden per cbBTC, midprijs zonder fees).
+    function spot() external view returns (uint256) {
+        return _spot();
     }
 
     // ─── Intern: rekenregel ─────────────────────────────────────────────────────────────────────────────────

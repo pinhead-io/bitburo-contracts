@@ -17,6 +17,7 @@ contract MockRouter is IV3SwapRouter {
 
     uint256 public price;
     uint256 public slippageBps;
+    uint256 public gasBurn;
     uint256 public calls;
     bytes public lastPath;
     address public lastRecipient;
@@ -38,7 +39,14 @@ contract MockRouter is IV3SwapRouter {
         slippageBps = bps;
     }
 
+    /// @notice Laat elke swap minstens `gas` gas verbruiken (om gasbudgetten te testen).
+    function setGasBurn(uint256 gas) external {
+        gasBurn = gas;
+    }
+
     function exactInput(ExactInputParams calldata p) external payable override returns (uint256 amountOut) {
+        uint256 stopAt = gasleft() > gasBurn ? gasleft() - gasBurn : 0;
+        while (gasleft() > stopAt) {}
         require(p.path.length == 66, "MockRouter: path length");
         address tokenIn = address(bytes20(p.path[0:20]));
         uint24 fee1 = uint24(bytes3(p.path[20:23]));
