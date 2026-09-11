@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+import {Script, console} from "forge-std/Script.sol";
+import {Rebalancer} from "../src/Rebalancer.sol";
+
+/**
+ * @notice Deploy van Rebalancer op Base mainnet (chain id 8453).
+ * @dev Alle adressen zijn on-chain geverifieerd op 11 september 2026. Uitrollen alleen na akkoord van Arjan:
+ *
+ *   BASE_RPC_URL=… TREASURY=0x… WORKFLOW_OWNER=0x… \
+ *   ~/.foundry/bin/forge script script/Deploy.s.sol --rpc-url base --broadcast --verify --private-key $DEPLOYER_KEY
+ *
+ * Zonder --broadcast is dit een droge run.
+ */
+contract DeployRebalancer is Script {
+    address constant EURC = 0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42;
+    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address constant SWAP_ROUTER_02 = 0x2626664c2603336E57B271c5C0b26F421741e481;
+    address constant FEED_CBBTC_USD = 0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D;
+    address constant FEED_EURC_USD = 0xDAe398520e2B67cd3f27aeF9Cf14D93D927f8250;
+    address constant SEQUENCER_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
+    /// @dev KeystoneForwarder van Chainlink CRE op Base mainnet (simulatie: 0x5e342a8438b4f5d39e72875fcee6f76b39cce548).
+    address constant CRE_FORWARDER = 0xF8344CFd5c43616a4366C34E3EEE75af79a74482;
+
+    function run() external returns (Rebalancer rebalancer) {
+        require(block.chainid == 8453, "alleen Base mainnet");
+        address treasury = vm.envAddress("TREASURY");
+        address workflowOwner = vm.envAddress("WORKFLOW_OWNER");
+        address forwarder = vm.envOr("CRE_FORWARDER", CRE_FORWARDER);
+
+        vm.startBroadcast();
+        rebalancer = new Rebalancer(
+            Rebalancer.Deployment({
+                eurc: EURC,
+                cbbtc: CBBTC,
+                usdc: USDC,
+                router: SWAP_ROUTER_02,
+                feedCbbtcUsd: FEED_CBBTC_USD,
+                feedEurcUsd: FEED_EURC_USD,
+                sequencerFeed: SEQUENCER_FEED,
+                treasury: treasury,
+                forwarder: forwarder,
+                workflowOwner: workflowOwner
+            })
+        );
+        vm.stopBroadcast();
+
+        console.log("Rebalancer:", address(rebalancer));
+    }
+}

@@ -1,0 +1,23 @@
+# Foundry
+out/
+cache/
+broadcast/
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# Node / Bun
+node_modules/
+dist/
+*.wasm
+.cre_build_tmp.*
+
+# OS / editors
+.DS_Store
+
+# Agent-skills (lokaal, niet in de repo)
+.agents/
+.claude/
+skills-lock.json
