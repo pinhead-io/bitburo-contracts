@@ -4,9 +4,10 @@ Chainlink CRE-workflow die elk uur het Bitburo `Rebalancer`-contract op Base mai
 
 ## Wat hij doet
 
-1. Leest `latestRoundData()` van de Chainlink cbBTC/USD-feed. Is die ouder dan `maxFeedAgeSeconds`, dan stopt de run: het contract zou toch reverten.
-2. Loopt `owners(offset, limit)` van het Rebalancer-contract af en vraagt per owner `isDue(owner)`.
-3. Codeert de due owners als `abi.encode(address[])`, laat het rapport door de DON tekenen en stuurt het via de KeystoneForwarder naar `Rebalancer.onReport(metadata, report)`.
+1. Leest `latestRoundData()` van de Chainlink L2 Sequencer Uptime-feed voor Base. Is `answer` niet 0 (sequencer down), of is de sequencer korter dan `sequencerGracePeriodSeconds` geleden teruggekomen (`now − startedAt`), dan stopt de run: de prijsfeeds zijn dan niet te vertrouwen.
+2. Leest `latestRoundData()` van de Chainlink cbBTC/USD-feed. Is die ouder dan `maxFeedAgeSeconds`, dan stopt de run: het contract zou toch reverten.
+3. Loopt `owners(offset, limit)` van het Rebalancer-contract af en vraagt per owner `isDue(owner)`.
+4. Codeert de due owners als `abi.encode(address[])`, laat het rapport door de DON tekenen en stuurt het via de KeystoneForwarder naar `Rebalancer.onReport(metadata, report)`.
 
 De workflow beslist niets over bedragen of richting. Dat doet het contract, met de instellingen van de gebruiker.
 
@@ -17,6 +18,8 @@ De workflow beslist niets over bedragen of richting. Dat doet het contract, met 
 | `schedule` | Cron met seconden; `0 0 * * * *` = elk heel uur |
 | `chainSelectorName` | `ethereum-mainnet-base-1` (Base, chain id 8453) |
 | `rebalancerAddress` | Adres van het Rebalancer-contract; nuladres zolang het niet is uitgerold |
+| `sequencerFeedAddress` | Chainlink L2 Sequencer Uptime-feed op Base: `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` |
+| `sequencerGracePeriodSeconds` | Wachttijd na een sequencer-herstart voordat de run weer doorgaat (3600 s) |
 | `priceFeedAddress` | Chainlink cbBTC/USD op Base: `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` |
 | `maxFeedAgeSeconds` | Heartbeat 1200 s plus marge |
 | `ownersPageSize` | Aantal owners per `owners()`-call |

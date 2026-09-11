@@ -2,6 +2,8 @@
   "schedule": "0 0 * * * *",
   "chainSelectorName": "ethereum-mainnet-base-1",
   "rebalancerAddress": "0x0000000000000000000000000000000000000000",
+  "sequencerFeedAddress": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
+  "sequencerGracePeriodSeconds": 3600,
   "priceFeedAddress": "0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D",
   "maxFeedAgeSeconds": 1500,
   "ownersPageSize": 50,

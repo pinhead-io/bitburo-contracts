@@ -25,8 +25,9 @@ import {
 /**
  * Bitburo keeper (Chainlink CRE).
  *
- * Elke run: (1) controleert of de cbBTC/USD-feed vers is, (2) loopt alle owners van het
- * Rebalancer-contract af en vraagt per owner isDue(), (3) stuurt de lijst due owners als
+ * Elke run: (1) controleert of de Base-sequencer up is en de grace period voorbij is,
+ * (2) controleert of de cbBTC/USD-feed vers is, (3) loopt alle owners van het
+ * Rebalancer-contract af en vraagt per owner isDue(), (4) stuurt de lijst due owners als
  * ondertekend rapport naar Rebalancer.onReport via de KeystoneForwarder.
  * De workflow beslist niets: het contract bepaalt zelf of en hoeveel er gehandeld wordt.
  */
@@ -34,6 +35,8 @@ export type Config = {
   schedule: string;
   chainSelectorName: string;
   rebalancerAddress: Address;
+  sequencerFeedAddress: Address;
+  sequencerGracePeriodSeconds: number;
   priceFeedAddress: Address;
   maxFeedAgeSeconds: number;
   ownersPageSize: number;
@@ -42,6 +45,9 @@ export type Config = {
 };
 
 export type RunSummary = {
+  /** Seconden sinds de sequencer voor het laatst van status wisselde. */
+  sequencerUpSeconds: number;
+  /** 0 als de run al bij de sequencer-controle is gestopt. */
   feedAgeSeconds: number;
   ownersChecked: number;
   dueOwners: Address[];
@@ -68,6 +74,18 @@ export const isFeedFresh = (
   nowSeconds: bigint,
   maxAgeSeconds: number,
 ): boolean => nowSeconds - updatedAtSeconds <= BigInt(maxAgeSeconds);
+
+/**
+ * Chainlink L2 Sequencer Uptime-feed: answer 0 = up, 1 = down. Na een herstart moet de
+ * grace period verstreken zijn (startedAt = moment van de laatste statuswissel), anders
+ * kunnen prijsfeeds nog niet bijgewerkt zijn.
+ */
+export const isSequencerReady = (
+  answer: bigint,
+  startedAtSeconds: bigint,
+  nowSeconds: bigint,
+  gracePeriodSeconds: number,
+): boolean => answer === 0n && nowSeconds - startedAtSeconds >= BigInt(gracePeriodSeconds);
 
 const readContract = <TFunctionName extends string>(
   runtime: Runtime<Config>,
@@ -105,7 +123,30 @@ export const onCronTrigger = (runtime: Runtime<Config>): RunSummary => {
   }
   const evmClient = new EVMClient(network.chainSelector.selector);
 
-  // 1. Feed-controle: als de koers oud is, revert het contract toch; sla de run dan over.
+  const nowSeconds = BigInt(Math.floor(runtime.now().getTime() / 1000));
+
+  // 1. Sequencer-controle: is de Base-sequencer down of net terug, dan zijn de prijsfeeds
+  //    niet te vertrouwen; sla de run dan over.
+  const [, sequencerAnswer, sequencerStartedAt] = readContract(
+    runtime,
+    evmClient,
+    config.sequencerFeedAddress,
+    aggregatorAbi,
+    "latestRoundData",
+  ) as readonly [bigint, bigint, bigint, bigint, bigint];
+  const sequencerUpSeconds = Number(nowSeconds - sequencerStartedAt);
+  runtime.log(`Sequencer uptime feed: answer=${sequencerAnswer.toString()} sinds=${sequencerUpSeconds}s`);
+
+  if (!isSequencerReady(sequencerAnswer, sequencerStartedAt, nowSeconds, config.sequencerGracePeriodSeconds)) {
+    const skippedReason =
+      sequencerAnswer === 0n
+        ? `sequencer net terug (${sequencerUpSeconds}s < grace period ${config.sequencerGracePeriodSeconds}s)`
+        : `sequencer down (answer=${sequencerAnswer.toString()})`;
+    runtime.log(`Overgeslagen: ${skippedReason}`);
+    return { sequencerUpSeconds, feedAgeSeconds: 0, ownersChecked: 0, dueOwners: [], txHash: "", skippedReason };
+  }
+
+  // 2. Feed-controle: als de koers oud is, revert het contract toch; sla de run dan over.
   const [, answer, , updatedAt] = readContract(
     runtime,
     evmClient,
@@ -113,24 +154,23 @@ export const onCronTrigger = (runtime: Runtime<Config>): RunSummary => {
     aggregatorAbi,
     "latestRoundData",
   ) as readonly [bigint, bigint, bigint, bigint, bigint];
-  const nowSeconds = BigInt(Math.floor(runtime.now().getTime() / 1000));
   const feedAgeSeconds = Number(nowSeconds - updatedAt);
   runtime.log(`cbBTC/USD feed: answer=${answer.toString()} age=${feedAgeSeconds}s`);
 
   if (!isFeedFresh(updatedAt, nowSeconds, config.maxFeedAgeSeconds)) {
     const skippedReason = `feed te oud (${feedAgeSeconds}s > ${config.maxFeedAgeSeconds}s)`;
     runtime.log(`Overgeslagen: ${skippedReason}`);
-    return { feedAgeSeconds, ownersChecked: 0, dueOwners: [], txHash: "", skippedReason };
+    return { sequencerUpSeconds, feedAgeSeconds, ownersChecked: 0, dueOwners: [], txHash: "", skippedReason };
   }
 
-  // 2. Nog geen contract uitgerold: niets te doen.
+  // 3. Nog geen contract uitgerold: niets te doen.
   if (isAddressEqual(config.rebalancerAddress, zeroAddress)) {
     const skippedReason = "rebalancerAddress is het nuladres; contract nog niet uitgerold";
     runtime.log(`Overgeslagen: ${skippedReason}`);
-    return { feedAgeSeconds, ownersChecked: 0, dueOwners: [], txHash: "", skippedReason };
+    return { sequencerUpSeconds, feedAgeSeconds, ownersChecked: 0, dueOwners: [], txHash: "", skippedReason };
   }
 
-  // 3. Owners aflopen en isDue() vragen.
+  // 4. Owners aflopen en isDue() vragen.
   const dueOwners: Address[] = [];
   let ownersChecked = 0;
   for (let offset = 0n; ; offset += BigInt(config.ownersPageSize)) {
@@ -167,10 +207,17 @@ export const onCronTrigger = (runtime: Runtime<Config>): RunSummary => {
 
   if (dueOwners.length === 0) {
     runtime.log("Geen owner is due; geen rapport verstuurd");
-    return { feedAgeSeconds, ownersChecked, dueOwners, txHash: "", skippedReason: "geen owner is due" };
+    return {
+      sequencerUpSeconds,
+      feedAgeSeconds,
+      ownersChecked,
+      dueOwners,
+      txHash: "",
+      skippedReason: "geen owner is due",
+    };
   }
 
-  // 4. Rapport tekenen en naar Rebalancer.onReport sturen.
+  // 5. Rapport tekenen en naar Rebalancer.onReport sturen.
   const signedReport = runtime.report(prepareReportRequest(encodeOwnersReport(dueOwners))).result();
   const txResult = evmClient
     .writeReport(runtime, {
@@ -186,7 +233,7 @@ export const onCronTrigger = (runtime: Runtime<Config>): RunSummary => {
   const txHash = bytesToHex(txResult.txHash ?? new Uint8Array(32));
   runtime.log(`onReport verstuurd: tx=${txHash} owners=${dueOwners.length}`);
 
-  return { feedAgeSeconds, ownersChecked, dueOwners, txHash, skippedReason: "" };
+  return { sequencerUpSeconds, feedAgeSeconds, ownersChecked, dueOwners, txHash, skippedReason: "" };
 };
 
 export const initWorkflow = (config: Config) => {

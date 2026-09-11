@@ -8,11 +8,13 @@ import {
   encodeOwnersReport,
   initWorkflow,
   isFeedFresh,
+  isSequencerReady,
   onCronTrigger,
   rebalancerAbi,
 } from "./main";
 
 const REBALANCER = "0x1111111111111111111111111111111111111111" as Address;
+const SEQUENCER_FEED = "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433" as Address;
 const FEED = "0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D" as Address;
 const OWNER_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
 const OWNER_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
@@ -22,6 +24,8 @@ const baseConfig: Config = {
   schedule: "0 0 * * * *",
   chainSelectorName: "ethereum-mainnet-base-1",
   rebalancerAddress: REBALANCER,
+  sequencerFeedAddress: SEQUENCER_FEED,
+  sequencerGracePeriodSeconds: 3600,
   priceFeedAddress: FEED,
   maxFeedAgeSeconds: 1500,
   ownersPageSize: 50,
@@ -35,12 +39,28 @@ const chainSelector = (): bigint => {
   return network.chainSelector.selector;
 };
 
+const NOW_SECONDS = BigInt(NOW_MS / 1000);
+
+/** answer 0 = up, 1 = down; startedAt = moment van de laatste statuswissel. */
+const mockSequencer = (evmMock: EvmMock, answer: bigint, startedAtSeconds: bigint) => {
+  const sequencer = addContractMock(evmMock, { address: SEQUENCER_FEED, abi: aggregatorAbi });
+  sequencer.latestRoundData = () => [1n, answer, startedAtSeconds, startedAtSeconds, 1n];
+};
+
+/** Prijsfeed met een sequencer die al ruim buiten de grace period up is. */
 const mockFeed = (evmMock: EvmMock, updatedAtSeconds: bigint) => {
+  mockSequencer(evmMock, 0n, NOW_SECONDS - 86_400n);
   const feed = addContractMock(evmMock, { address: FEED, abi: aggregatorAbi });
   feed.latestRoundData = () => [1n, 7_945_898_000_000n, updatedAtSeconds, updatedAtSeconds, 1n];
 };
 
 describe("pure helpers", () => {
+  test("isSequencerReady requires answer 0 and an elapsed grace period", () => {
+    expect(isSequencerReady(0n, 1000n, 4600n, 3600)).toBe(true);
+    expect(isSequencerReady(0n, 1000n, 4599n, 3600)).toBe(false);
+    expect(isSequencerReady(1n, 1000n, 4600n, 3600)).toBe(false);
+  });
+
   test("encodeOwnersReport encodes an address[] the contract can abi.decode", () => {
     const encoded = encodeOwnersReport([OWNER_A, OWNER_B]);
     const [decoded] = decodeAbiParameters(parseAbiParameters("address[]"), encoded);
@@ -54,6 +74,41 @@ describe("pure helpers", () => {
 });
 
 describe("onCronTrigger", () => {
+  test("skips when the sequencer is down", () => {
+    const runtime = newTestRuntime<Config>(null, { timeProvider: () => NOW_MS }, baseConfig);
+    mockSequencer(EvmMock.testInstance(chainSelector()), 1n, NOW_SECONDS - 600n);
+
+    const result = onCronTrigger(runtime);
+
+    expect(result.skippedReason).toContain("sequencer down");
+    expect(result.feedAgeSeconds).toBe(0);
+    expect(result.txHash).toBe("");
+  });
+
+  test("skips when the sequencer came back within the grace period", () => {
+    const runtime = newTestRuntime<Config>(null, { timeProvider: () => NOW_MS }, baseConfig);
+    mockSequencer(EvmMock.testInstance(chainSelector()), 0n, NOW_SECONDS - 3599n);
+
+    const result = onCronTrigger(runtime);
+
+    expect(result.skippedReason).toContain("sequencer net terug");
+    expect(result.sequencerUpSeconds).toBe(3599);
+    expect(result.txHash).toBe("");
+  });
+
+  test("continues to the price feed check when the sequencer is up past the grace period", () => {
+    const runtime = newTestRuntime<Config>(null, { timeProvider: () => NOW_MS }, baseConfig);
+    const evmMock = EvmMock.testInstance(chainSelector());
+    mockSequencer(evmMock, 0n, NOW_SECONDS - 3600n);
+    const feed = addContractMock(evmMock, { address: FEED, abi: aggregatorAbi });
+    feed.latestRoundData = () => [1n, 7_945_898_000_000n, NOW_SECONDS - 5000n, NOW_SECONDS - 5000n, 1n];
+
+    const result = onCronTrigger(runtime);
+
+    expect(result.sequencerUpSeconds).toBe(3600);
+    expect(result.skippedReason).toContain("feed te oud");
+  });
+
   test("skips when the price feed is stale", () => {
     const runtime = newTestRuntime<Config>(null, { timeProvider: () => NOW_MS }, baseConfig);
     mockFeed(EvmMock.testInstance(chainSelector()), BigInt(NOW_MS / 1000) - 5000n);
