@@ -1,0 +1,18 @@
+{
+  "name": "bitburo-keeper-script",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Open keeper-script: roept Rebalancer.execute(owner, rewardTo) aan voor elke owner die due is. Iedereen mag dit draaien.",
+  "scripts": {
+    "keeper": "bun run keeper.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/bun": "latest"
+  }
+}
