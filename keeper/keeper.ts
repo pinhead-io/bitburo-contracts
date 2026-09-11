@@ -1,8 +1,9 @@
 /**
  * Bitburo keeper-script. Iedereen mag dit draaien; Bitburo is niet nodig.
  *
- * Loopt alle owners van het Rebalancer-contract af, vraagt isDue(owner) en roept execute(owner, rewardTo)
- * aan voor wie due is. De beloning (0,05 EURC per run) gaat naar REWARD_TO, standaard het eigen adres.
+ * Vraagt het Rebalancer-contract per pagina dueOwners(offset, limit) en roept execute(owner, rewardTo) aan
+ * voor wie due is. isDue(owner) wordt alleen nog voor die owners gelezen, voor de richting en het bedrag in het
+ * logbericht. De beloning (0,05 EURC per run) gaat naar REWARD_TO, standaard het eigen adres.
  * Het script beslist niets: het contract bepaalt of, wat en hoeveel.
  *
  * Gebruik:
@@ -14,7 +15,8 @@ import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 
 const abi = parseAbi([
-  "function owners(uint256 offset, uint256 limit) view returns (address[])",
+  "function ownerCount() view returns (uint256)",
+  "function dueOwners(uint256 offset, uint256 limit) view returns (address[])",
   "function isDue(address owner) view returns (bool due, int256 eurcDelta)",
   "function execute(address owner, address rewardTo)",
 ]);
@@ -36,21 +38,17 @@ const account = dryRun ? undefined : privateKeyToAccount(env("KEEPER_PRIVATE_KEY
 const rewardTo = (process.env.REWARD_TO ?? account?.address ?? "0x0000000000000000000000000000000000000000") as Address;
 const walletClient = account ? createWalletClient({ account, chain: base, transport: http(rpcUrl) }) : undefined;
 
-const read = <T>(functionName: "owners" | "isDue", args: readonly unknown[]) =>
+const read = <T>(functionName: "ownerCount" | "dueOwners" | "isDue", args: readonly unknown[] = []) =>
   // biome-ignore lint/suspicious/noExplicitAny: viem's ABI-generics zijn te strikt voor een gedeelde helper
   publicClient.readContract({ address: rebalancer, abi, functionName, args } as any) as Promise<T>;
 
-let checked = 0;
+const checked = await read<bigint>("ownerCount");
 let executed = 0;
-for (let offset = 0n; ; offset += pageSize) {
-  const page = await read<readonly Address[]>("owners", [offset, pageSize]);
-  if (page.length === 0) break;
+for (let offset = 0n; offset < checked; offset += pageSize) {
+  const page = await read<readonly Address[]>("dueOwners", [offset, pageSize]);
 
   for (const owner of page) {
-    checked += 1;
-    const [due, eurcDelta] = await read<readonly [boolean, bigint]>("isDue", [owner]);
-    if (!due) continue;
-
+    const [, eurcDelta] = await read<readonly [boolean, bigint]>("isDue", [owner]);
     const direction = eurcDelta > 0n ? "koop" : "verkoop";
     const eurc = (eurcDelta < 0n ? -eurcDelta : eurcDelta) / 1_000_000n;
     if (dryRun || !walletClient) {
@@ -66,7 +64,6 @@ for (let offset = 0n; ; offset += pageSize) {
       console.error(`${owner}: execute mislukt: ${(error as Error).message.split("\n")[0]}`);
     }
   }
-  if (page.length < Number(pageSize)) break;
 }
 
 console.log(`Klaar: ${checked} owners gecontroleerd, ${executed} uitgevoerd${dryRun ? " (dry-run)" : ""}.`);
