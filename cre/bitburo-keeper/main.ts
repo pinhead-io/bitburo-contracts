@@ -1,7 +1,7 @@
 import {
   CronCapability,
   EVMClient,
-  LAST_FINALIZED_BLOCK_NUMBER,
+  LATEST_BLOCK_NUMBER,
   Runner,
   TxStatus,
   bytesToHex,
@@ -103,7 +103,9 @@ const readContract = <TFunctionName extends string>(
         // biome-ignore lint/suspicious/noExplicitAny: viem's generic ABI typing is too strict for a shared helper
         data: encodeFunctionData({ abi, functionName, args } as any),
       }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+      // Laatste blok, niet het gefinaliseerde: dat loopt op Base tientallen minuten achter en zou elke
+      // feed "te oud" maken. Het contract controleert de versheid zelf opnieuw bij uitvoering.
+      blockNumber: LATEST_BLOCK_NUMBER,
     })
     .result();
 
