@@ -8,32 +8,46 @@ De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBT
 
 | Functie | Wat |
 |---|---|
-| `setParams(Params)` | Eigen instellingen zetten of wijzigen (`maxSlippageBps` 30–100). |
-| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. |
-| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn. Zelfde regels als `isDue`; revert nooit. Dit is wat de wekkers gebruiken. |
-| `execute(owner, rewardTo)` | Eén rebalance-stap; iedereen mag dit aanroepen. `rewardTo` = contract zelf telt als `address(0)`. |
-| `onReport(metadata, report)` | Ingang voor Chainlink CRE; `report` = `abi.encode(address[])`. Elke owner krijgt `EXECUTE_GAS` (700.000); onder `EXECUTE_GAS_RESERVE` (750.000) restgas stopt de lus netjes. |
-| `sweep(token)` | Stuurt een per ongeluk achtergebleven saldo naar de treasury. Permissionless. |
+| `setParams(Params)` | Eigen instellingen zetten of wijzigen. Grenzen: `minTradeEurc` ≥ `MIN_TRADE_FLOOR` (20 EURC), `maxCorrectionBps` 10–10000, `maxSlippageBps` 60–100, `interval` ≥ 1 uur. |
+| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. Kijkt niet naar `lastAttemptAt`. |
+| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn. Zelfde regels als `isDue`, plus: een owner met een mislukte `onReport`-poging korter dan zijn `interval` geleden wordt overgeslagen. Dit is wat de wekkers gebruiken. |
+| `lastAttemptAt(owner) → uint64` | Tijdstip van de laatste mislukte poging via `onReport` (0 = nooit). |
+| `execute(owner, rewardTo)` | Eén rebalance-stap; iedereen mag dit aanroepen. `rewardTo` = contract zelf telt als `address(0)`. Revert met `NoOutput` als de koop 0 cbBTC zou opleveren. |
+| `onReport(metadata, report)` | Ingang voor Chainlink CRE; `report` = `abi.encode(address[])`. Elke owner krijgt `EXECUTE_GAS` (1.000.000); onder `EXECUTE_GAS_RESERVE` (1.050.000) restgas stopt de lus netjes. Een mislukte owner krijgt `ReportSkipped(owner, reason)`, bij lege reden ook `ReportOutOfGas(owner)`, en `lastAttemptAt[owner]` wordt gezet. |
+| `sweep(token)` | Stuurt een achtergebleven saldo naar de treasury (per ongeluk gestuurde tokens, of fee die door een mislukte treasury-transfer is blijven staan). Permissionless. |
 | `quote()` / `spot()` / `quoteChecked()` | Feedkoers; poolspot; feedkoers mét de spot-check van `execute`. Alle drie in EURC-basiseenheden per cbBTC. |
+
+Constanten: `FEE_BPS` 25, `KEEPER_REWARD_EURC` 0,05 EURC, `MIN_TRADE_FLOOR` 20 EURC (fee van de kleinste run = precies de keeperbeloning), `MIN_CORRECTION_BPS` 10, `MIN_SLIPPAGE_BPS` 60 / `MAX_SLIPPAGE_BPS` 100, `MAX_SPOT_DEVIATION_BPS` 50, `MAX_AGE_CBBTC` 1500 s, `MAX_AGE_EURC` 4500 s (uurfeed `0x9867…01e0`), `FEED_DECIMALS` 8 (afgedwongen in de constructor).
+
+### Fee, beloning en maximaal verlies per run
+
+De fee is 25 bps van het EURC-been van elke run (bij kopen over het bruto bedrag, bij verkopen over het werkelijk ontvangen bedrag). Daaruit gaat `min(0,05 EURC, fee)` naar `rewardTo`, de rest naar de treasury. Beide transfers zijn niet-reverterend: faalt de beloning (bijvoorbeeld een geblacklist `rewardTo`), dan gaat de hele fee naar de treasury; faalt de treasury-transfer, dan blijft dat deel in het contract (`FeeRetained(amount)`) en haalt `sweep(EURC)` het later op. De rebalance zelf loopt dus nooit stuk op de fee-ontvanger.
+
+**Het maximale verlies per run ten opzichte van de Chainlink-koers is `FEE_BPS + maxSlippageBps`** (0,85–1,25%). De spot-check hieronder is daar geen extra bovengrens op. **De cap (`maxCorrectionBps`) geldt per run, niet per dag**: met `interval` van 1 uur en cap 10% kan een wallet tot 24 × 10% per dag verplaatsen. Wie een dagcap wil, zet `interval` op een dag.
 
 ### Spot-vs-oracle-check en wallet-limiet
 
-Vóór elke swap vergelijkt het contract de spotkoers van de Uniswap-pools EURC/USDC (`0x7279…66fb`) en USDC/cbBTC (`0xfbb6…43ef`) met de Chainlink-koers. Wijkt de spot meer dan `MAX_SPOT_DEVIATION_BPS` (0,5%) af, dan revert `execute` met `SpotDeviatesFromOracle` en geeft `isDue`/`dueOwners` niets terug. Op de fork van 11 september 2026 lag de afwijking op 4 bps.
+Vóór én ná elke swap vergelijkt het contract de spotkoers van de Uniswap-pools EURC/USDC (`0x7279…66fb`) en USDC/cbBTC (`0xfbb6…43ef`) met de Chainlink-koers. Wijkt de spot op een van beide momenten meer dan `MAX_SPOT_DEVIATION_BPS` (0,5%) af, dan revert `execute` met `SpotDeviatesFromOracle` en boekt niets; `isDue`/`dueOwners` geven bij een afwijking vooraf niets terug (de check achteraf kunnen ze niet voorspellen). Op de fork van 11 september 2026 lag de afwijking op 4 bps.
 
-Dit begrenst wat een aanroeper via de pool kan onttrekken tot ongeveer 0,5% van het run-bedrag plus de door de gebruiker toegestane slippage (0,3–1%). Het maakt manipulatie niet onmogelijk, alleen onaantrekkelijk. **De EURC/USDC-pool is dun: runs boven ongeveer 10.000 EURC per keer zijn onverstandig zolang de route Uniswap v3 is**, omdat de eigen prijsimpact dan al richting de toegestane afwijking gaat en de run vaker zal reverten of onnodig duur is. Grote wallets houden `maxCorrectionBps` dus laag.
+De check vooraf begrenst hoe ver een aanroeper de pool kan voorschuiven; de check achteraf dwingt af dat die voorschuiving plus de eigen prijsimpact van de run samen binnen 0,5% blijven. Dat sluit de winstruimte van een atomaire zelf-sandwich grotendeels, maar het maximale verlies per run blijft `FEE_BPS + maxSlippageBps` (zie hierboven). **De EURC/USDC-pool is dun: runs boven ongeveer 8.000 EURC per keer reverten vaker zolang de route Uniswap v3 is**, omdat de eigen prijsimpact dan zelf al richting de toegestane afwijking gaat. Grote wallets houden `maxCorrectionBps` dus laag.
 
-Gas van `execute` op de fork (11 september 2026): koop 404.653, verkoop 426.991. Daarop zijn `EXECUTE_GAS` en `EXECUTE_GAS_RESERVE` afgestemd; vijf owners passen in de 4.000.000 gas van het CRE-rapport (`maxOwnersPerReport` = 5).
+Gas van `execute` op de fork (audit 15 september 2026, tegen het 700k-budget van de vorige versie): koop 344k–548k en verkoop 404k–587k voor runs van 475 tot 9.500 EURC; ~19.000 EURC ging out-of-gas. Daarom is `EXECUTE_GAS` nu 1.000.000 en `EXECUTE_GAS_RESERVE` 1.050.000. Gevolg voor het CRE-rapport (`gasLimit` 4.000.000, waarvan na de forwarder ~3,55M overblijft): bij runs die het volle budget gebruiken passen **drie** owners gegarandeerd (`test_onReport_threeFullBudgetOwnersFitInForwarderMargin`); bij normale runs (~450k) passen er vijf. `maxOwnersPerReport` in de CRE-config moet dus naar 3, of `gasLimit` omhoog naar ~5,5M voor vijf owners op vol budget.
+
+### Wekker en mislukte pogingen
+
+`onReport` schrijft bij een mislukte `execute` `lastAttemptAt[owner]`; `dueOwners` slaat die owner daarna een `interval` lang over. Een owner die structureel revert (blacklist, te krappe slippage, out-of-gas) kost de CRE-wekker zo hooguit één slot per interval in plaats van elk rapport. `isDue` en `execute` kijken er niet naar, dus het keeper-script en handmatige runs kunnen eerder opnieuw proberen.
 
 ## Onderdelen
 
 | Map | Wat |
 |---|---|
 | `src/Rebalancer.sol` | Het contract. Solidity 0.8.28, OpenZeppelin 5.6.1, via-IR. |
+| `audit/` | Interne auditrapporten en PoC's per datum. |
 | `src/interfaces/` | Minimale interfaces: Chainlink AggregatorV3, Uniswap SwapRouter02, CRE IReceiver. |
 | `test/` | Unit-, fuzz- en invarianttests met mocks; fork-tests tegen Base mainnet. |
 | `script/Deploy.s.sol` | Deploy-script met de geverifieerde Base-adressen. |
-| `cre/` | Chainlink CRE-workflow `bitburo-keeper` (cron, elk uur). Beoogde primaire wekker. |
-| `keeper/` | Open keeper-script in TypeScript. Iedereen kan het draaien, zonder Bitburo. |
+| `cre/` | Chainlink CRE-workflow `bitburo-keeper` (cron, elk uur). Beoogde primaire wekker. Roterend startpunt, filter op run-omvang (`minRunEurc`/`maxRunEurc`) en simulatie vooraf; zie `cre/bitburo-keeper/README.md`. |
+| `keeper/` | Open keeper-script in TypeScript. Iedereen kan het draaien, zonder Bitburo. Zelfde ondergrens, simulatie vooraf en een cool-down per owner na een mislukking. |
 
 ## Commando's
 
@@ -44,7 +58,10 @@ Foundry staat in `~/.foundry/bin` (het `forge` in PATH kan de Laravel Forge CLI 
 ~/.foundry/bin/forge test -vv                      # unit + fuzz + invariant + fork (BASE_RPC_URL optioneel)
 ~/.foundry/bin/forge test --gas-report --match-contract RebalancerFork
 RUN_FORK=false ~/.foundry/bin/forge test              # zonder fork
+~/.foundry/bin/forge test --no-match-path "test/RebalancerFork.t.sol"   # idem, zonder RPC-aanroep
 ```
+
+`test/AuditMath.t.sol` bevat de fuzz-, invariant- en PoC-tests uit de interne audit van 15 september 2026 (`audit/2026-09-15/`). Let op bij tijdreeksen onder `via_ir`: Solidity cachet `block.timestamp` binnen een testfunctie, gebruik na `vm.warp` dus `vm.getBlockTimestamp()`.
 
 CRE-workflow simuleren (vanuit `cre/`):
 
@@ -57,7 +74,10 @@ Keeper-script (vanuit `keeper/`):
 ```bash
 bun install
 RPC_URL=https://mainnet.base.org REBALANCER=0x… DRY_RUN=1 bun run keeper.ts
+bun test            # selectie- en cool-down-logica
 ```
+
+Het script leest per due owner `isDue`, slaat runs onder `MIN_RUN_EURC` (standaard 20 EURC) over, simuleert `execute` eerst met `eth_call` en stuurt pas daarna de transactie. Een owner waarvan de simulatie of de transactie mislukt krijgt een cool-down die per opeenvolgende mislukking verdubbelt (`COOLDOWN_SECONDS`, standaard 3600 s, tot `COOLDOWN_MAX_SECONDS`, standaard 86.400 s), bijgehouden in `COOLDOWN_FILE` (standaard `./keeper-cooldowns.json`, staat in `.gitignore`). Zo blijft een owner die structureel revert (het contract zet `lastExecutedAt` alleen bij succes) niet elke run gas kosten. Het script heeft geen gascap: owners die te groot zijn voor de 700.000 gas van `onReport` bedient het wel, de CRE-workflow slaat die over (`maxRunEurc`).
 
 ## Vaste regels
 

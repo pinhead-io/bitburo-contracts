@@ -7,7 +7,7 @@
   "priceFeedAddress": "0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D",
   "maxFeedAgeSeconds": 1500,
   "ownersPageSize": 50,
-  "maxOwnersPerReport": 5,
+  "maxOwnersPerReport": 3,
   "maxCandidatesPerRun": 25,
   "minRunEurc": 20,
   "maxRunEurc": 8000,
