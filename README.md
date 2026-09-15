@@ -2,19 +2,21 @@
 
 Het onveranderbare `Rebalancer`-contract van Bitburo op Base mainnet, plus de twee externe wekkers.
 
-De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBTC en zet zijn eigen instellingen. Het contract rebalancet vanuit de wallet van de gebruiker naar de gekozen verdeling; het geld blijft in de wallet. Bitburo heeft geen sleutel en kan niets wijzigen. Ontwerp en besluiten: zie de overdracht (privé artifact, bij Arjan).
+De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBTC en zet zijn eigen instellingen. Het contract rebalancet vanuit de wallet van de gebruiker naar de gekozen verdeling; het geld blijft in de wallet. Bitburo heeft geen sleutel waarmee het instellingen of fondsen kan aanraken; de enige bevoegdheid van de treasury is de eenmalige uitschakelaar `retire()` (zie [Contract buiten gebruik stellen](#contract-buiten-gebruik-stellen)). Ontwerp en besluiten: zie de overdracht (privé artifact, bij Arjan).
 
 ## Contract-interface
 
 | Functie | Wat |
 |---|---|
-| `setParams(Params)` | Eigen instellingen zetten of wijzigen. Grenzen: `minTradeEurc` ≥ `MIN_TRADE_FLOOR` (20 EURC), `maxCorrectionBps` 10–10000, `maxSlippageBps` 60–100, `interval` ≥ 1 uur. |
-| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. Kijkt niet naar `lastAttemptAt`. |
-| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn. Zelfde regels als `isDue`, plus: een owner met een mislukte `onReport`-poging korter dan zijn `interval` geleden wordt overgeslagen. Dit is wat de wekkers gebruiken. |
+| `setParams(Params)` | Eigen instellingen zetten of wijzigen. Grenzen: `minTradeEurc` ≥ `MIN_TRADE_FLOOR` (20 EURC), `maxCorrectionBps` 10–10000, `maxSlippageBps` 60–100, `interval` ≥ 1 uur. Na `retire` alleen nog met `active = false` (mandaat intrekken); anders `ContractRetired`. |
+| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. Kijkt niet naar `lastAttemptAt`. Na `retire` altijd `(false, 0)`. |
+| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn. Zelfde regels als `isDue`, plus: een owner met een mislukte `onReport`-poging korter dan zijn `interval` geleden wordt overgeslagen. Dit is wat de wekkers gebruiken. Na `retire` altijd leeg. |
 | `lastAttemptAt(owner) → uint64` | Tijdstip van de laatste mislukte poging via `onReport` (0 = nooit). |
-| `execute(owner, rewardTo)` | Eén rebalance-stap; iedereen mag dit aanroepen. `rewardTo` = contract zelf telt als `address(0)`. Revert met `NoOutput` als de koop 0 cbBTC zou opleveren. |
-| `onReport(metadata, report)` | Ingang voor Chainlink CRE; `report` = `abi.encode(address[])`. Elke owner krijgt `EXECUTE_GAS` (1.000.000); onder `EXECUTE_GAS_RESERVE` (1.050.000) restgas stopt de lus netjes. Een mislukte owner krijgt `ReportSkipped(owner, reason)`, bij lege reden ook `ReportOutOfGas(owner)`, en `lastAttemptAt[owner]` wordt gezet. |
-| `sweep(token)` | Stuurt een achtergebleven saldo naar de treasury (per ongeluk gestuurde tokens, of fee die door een mislukte treasury-transfer is blijven staan). Permissionless. |
+| `execute(owner, rewardTo)` | Eén rebalance-stap; iedereen mag dit aanroepen. `rewardTo` = contract zelf telt als `address(0)`. Revert met `NoOutput` als de koop 0 cbBTC zou opleveren, en met `ContractRetired` na `retire`. |
+| `onReport(metadata, report)` | Ingang voor Chainlink CRE; `report` = `abi.encode(address[])`. Elke owner krijgt `EXECUTE_GAS` (1.000.000); onder `EXECUTE_GAS_RESERVE` (1.050.000) restgas stopt de lus netjes. Een mislukte owner krijgt `ReportSkipped(owner, reason)`, bij lege reden ook `ReportOutOfGas(owner)`, en `lastAttemptAt[owner]` wordt gezet. Na `retire` krijgt elke owner `ReportSkipped(owner, ContractRetired)` zonder dat `execute` wordt geprobeerd; de call zelf revert niet. |
+| `sweep(token)` | Stuurt een achtergebleven saldo naar de treasury (per ongeluk gestuurde tokens, of fee die door een mislukte treasury-transfer is blijven staan). Permissionless. Werkt ook na `retire`. |
+| `retire()` | Eenmalige, onomkeerbare uitschakelaar. Alleen `TREASURY`; tweede aanroep revert met `AlreadyRetired`. Zet `retired = true` en emit `Retired()`. Kan niets met fondsen of instellingen. |
+| `retired() → bool` | Staat het contract buiten gebruik? |
 | `quote()` / `spot()` / `quoteChecked()` | Feedkoers; poolspot; feedkoers mét de spot-check van `execute`. Alle drie in EURC-basiseenheden per cbBTC. |
 
 Constanten: `FEE_BPS` 25, `KEEPER_REWARD_EURC` 0,05 EURC, `MIN_TRADE_FLOOR` 20 EURC (fee van de kleinste run = precies de keeperbeloning), `MIN_CORRECTION_BPS` 10, `MIN_SLIPPAGE_BPS` 60 / `MAX_SLIPPAGE_BPS` 100, `MAX_SPOT_DEVIATION_BPS` 50, `MAX_AGE_CBBTC` 1500 s, `MAX_AGE_EURC` 4500 s (uurfeed `0x9867…01e0`), `FEED_DECIMALS` 8 (afgedwongen in de constructor).
@@ -36,6 +38,24 @@ Gas van `execute` op de fork (audit 15 september 2026, tegen het 700k-budget van
 ### Wekker en mislukte pogingen
 
 `onReport` schrijft bij een mislukte `execute` `lastAttemptAt[owner]`; `dueOwners` slaat die owner daarna een `interval` lang over. Een owner die structureel revert (blacklist, te krappe slippage, out-of-gas) kost de CRE-wekker zo hooguit één slot per interval in plaats van elk rapport. `isDue` en `execute` kijken er niet naar, dus het keeper-script en handmatige runs kunnen eerder opnieuw proberen.
+
+## Contract buiten gebruik stellen
+
+Het contract heeft geen admin, upgrade of pauzeknop, wel één eenmalige en onomkeerbare uitschakelaar: `retire()`, alleen aan te roepen met de sleutel van `TREASURY`. Dit is het antwoord op audit-bevinding M-8/M-9 (oude mandaten die na een redeploy onzichtbaar actief blijven, en het ontbreken van een noodstop). Er is geen weg terug en geen `unretire`.
+
+Wat het doet: `execute` revert daarna met `ContractRetired`, `isDue` geeft `(false, 0)`, `dueOwners` is leeg (de CRE-wekker en het keeper-script vinden dus vanzelf niets meer), `onReport` slaat elke owner over met `ReportSkipped`, en `setParams` accepteert alleen nog `active = false`. `sweep` blijft werken om achtergebleven fee op te halen.
+
+Wat het niet kan: fondsen verplaatsen. Het contract houdt nooit gebruikersfondsen; het mandaat is een ERC-20-allowance die in de tokencontracten bij de gebruiker staat en waar `retire` niets aan verandert. Het enige pad dat die allowance ooit gebruikte (`execute`) is na `retire` dicht.
+
+Uitvoeren met de treasury-sleutel (eerst simuleren met `cast call`, dan pas `cast send`):
+
+```bash
+cast call <adres> "retire()" --rpc-url https://mainnet.base.org --from <treasury-adres>
+cast send <adres> "retire()" --rpc-url https://mainnet.base.org --private-key <treasury-private-key>
+cast call <adres> "retired()(bool)" --rpc-url https://mainnet.base.org   # true
+```
+
+Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit audit M-8), zodat gebruikers hun oude mandaat via de app kunnen intrekken. Dat intrekken is `setParams` met `active = false` (werkt na `retire` gewoon; `active = true` revert) en `approve(0)` op EURC en cbBTC voor het oude adres. Beide zijn voor de veiligheid niet nodig — er is niets meer dat de allowance kan gebruiken — maar ze zetten het mandaat op inactief en halen de allowance uit de tokenstate, zodat de wallet ook zonder kennis van `retire` als schoon te lezen is.
 
 ## Onderdelen
 
