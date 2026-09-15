@@ -41,7 +41,7 @@ if [ "$MODE" = "verify" ]; then
   export BASESCAN_API_KEY="${BASESCAN_API_KEY:-${ETHERSCAN_API_KEY:-}}"
   if [ -z "$BASESCAN_API_KEY" ]; then echo "Geen ETHERSCAN_API_KEY/BASESCAN_API_KEY geladen." >&2; exit 1; fi
   echo "== Broncode verifiëren op Basescan voor de laatste broadcast"
-  "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" --private-key "$DEPLOYER_PRIVATE_KEY" --resume --verify
+  "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" --private-key "$DEPLOYER_PRIVATE_KEY" --broadcast --resume --verify
   exit 0
 fi
 
