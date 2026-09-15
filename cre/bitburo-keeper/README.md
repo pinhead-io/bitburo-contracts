@@ -2,6 +2,8 @@
 
 Chainlink CRE-workflow die elk uur het Bitburo `Rebalancer`-contract op Base mainnet wekt.
 
+> **Status: geparkeerd.** Deze workflow is niet uitgerold en heeft op mainnet nooit een rapport verwerkt; Chainlink Automation is medio 2026 gestopt en CRE Early Access is niet toegekend. De primaire wekker is de keeper in de Bitburo Laravel-app (`bitburo:run-keeper`), die hetzelfde register via `dueOwners` pagineert; het open script in `keeper/` is de terugvaloptie voor iedereen zonder Bitburo. De beschrijving hieronder blijft staan voor als CRE alsnog in beeld komt.
+
 ## Wat hij doet
 
 1. Leest `latestRoundData()` van de Chainlink L2 Sequencer Uptime-feed voor Base. Is `answer` niet 0 (sequencer down), of is de sequencer korter dan `sequencerGracePeriodSeconds` geleden teruggekomen (`now − startedAt`), dan stopt de run: de prijsfeeds zijn dan niet te vertrouwen.

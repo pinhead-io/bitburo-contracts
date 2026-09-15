@@ -66,8 +66,8 @@ Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit au
 | `src/interfaces/` | Minimale interfaces: Chainlink AggregatorV3, Uniswap SwapRouter02, CRE IReceiver. |
 | `test/` | Unit-, fuzz- en invarianttests met mocks; fork-tests tegen Base mainnet. |
 | `script/Deploy.s.sol` | Deploy-script met de geverifieerde Base-adressen. |
-| `cre/` | Chainlink CRE-workflow `bitburo-keeper` (cron, elk uur). Beoogde primaire wekker. Roterend startpunt, filter op run-omvang (`minRunEurc`/`maxRunEurc`) en simulatie vooraf; zie `cre/bitburo-keeper/README.md`. |
-| `keeper/` | Open keeper-script in TypeScript. Iedereen kan het draaien, zonder Bitburo. Zelfde ondergrens, simulatie vooraf en een cool-down per owner na een mislukking. |
+| `cre/` | Chainlink CRE-workflow `bitburo-keeper` (cron, elk uur). **Geparkeerd, niet uitgerold:** Chainlink Automation is medio 2026 gestopt en het CRE-pad heeft op mainnet nooit een rapport verwerkt. De primaire wekker is de keeper in de Bitburo Laravel-app (`bitburo:run-keeper`), die het register via `dueOwners` pagineert. Roterend startpunt, filter op run-omvang (`minRunEurc`/`maxRunEurc`) en simulatie vooraf; zie `cre/bitburo-keeper/README.md`. |
+| `keeper/` | Open keeper-script in TypeScript. Iedereen kan het draaien, zonder Bitburo; de terugvaloptie naast de Laravel-keeper. Zelfde ondergrens, simulatie vooraf en een cool-down per owner na een mislukking. |
 
 ## Commando's
 
