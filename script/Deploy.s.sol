@@ -6,7 +6,9 @@ import {Rebalancer} from "../src/Rebalancer.sol";
 
 /**
  * @notice Deploy van Rebalancer op Base mainnet (chain id 8453).
- * @dev Alle adressen zijn on-chain geverifieerd op 11 september 2026. Uitrollen alleen na akkoord van Arjan:
+ * @dev Alle adressen zijn on-chain geverifieerd op 11 september 2026 (EURC/USD-feed opnieuw op 15 september
+ *      2026). De constructor dwingt af dat beide prijsfeeds 8 decimalen hebben. Uitrollen alleen na akkoord van
+ *      Arjan:
  *
  *   BASE_RPC_URL=… TREASURY=0x… WORKFLOW_OWNER=0x… \
  *   ~/.foundry/bin/forge script script/Deploy.s.sol --rpc-url base --broadcast --verify --private-key $DEPLOYER_KEY
@@ -19,7 +21,11 @@ contract DeployRebalancer is Script {
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant SWAP_ROUTER_02 = 0x2626664c2603336E57B271c5C0b26F421741e481;
     address constant FEED_CBBTC_USD = 0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D;
-    address constant FEED_EURC_USD = 0xDAe398520e2B67cd3f27aeF9Cf14D93D927f8250;
+    /// @dev EURC/USD (DualAggregator, heartbeat 3600 s, deviatie 0,1%) uit Chainlinks referentiedirectory voor
+    ///      Base. Op 15 september 2026 via cast geverifieerd: description() "EURC / USD", decimals() 8,
+    ///      latestRoundData() ronde van 1.443 s oud. De vorige feed 0xDAe398…8250 (24 u) staat niet meer in de
+    ///      directory (audit M-2); het contract eist MAX_AGE_EURC = 4500 s, dus die feed zou direct StaleFeed geven.
+    address constant FEED_EURC_USD = 0x9867186e52d2F1C2c565CDA6E747101Fa56501e0;
     address constant SEQUENCER_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
     /// @dev Uniswap v3 0,05%-pools, alleen gelezen voor de spot-vs-oracle-check.
     address constant POOL_EURC_USDC = 0x7279c08A36333e12c3Fc81747963264c100D66fB;
