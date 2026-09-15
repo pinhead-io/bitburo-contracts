@@ -21,3 +21,5 @@ dist/
 .agents/
 .claude/
 skills-lock.json
+
+*.sh
