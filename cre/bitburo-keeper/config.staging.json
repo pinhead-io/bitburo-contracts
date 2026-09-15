@@ -1,7 +1,7 @@
 {
   "schedule": "0 0 * * * *",
   "chainSelectorName": "ethereum-mainnet-base-1",
-  "rebalancerAddress": "0xED47d549345b0dBB5A9b44E57Ff3AB4E6Ed0e6e5",
+  "rebalancerAddress": "0xE577D68948883FDF8e2694e38dF656D2D9CA2104",
   "sequencerFeedAddress": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
   "sequencerGracePeriodSeconds": 3600,
   "priceFeedAddress": "0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D",
