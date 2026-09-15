@@ -6,6 +6,7 @@
   "description": "Open keeper-script: roept Rebalancer.execute(owner, rewardTo) aan voor elke owner die due is. Iedereen mag dit draaien.",
   "scripts": {
     "keeper": "bun run keeper.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
