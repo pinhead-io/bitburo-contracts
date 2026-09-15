@@ -25,7 +25,8 @@ import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
  *
  *      Geen admin, geen upgrade, geen pauzeknop. `execute` is permissionless; de aanroeper kan alleen kiezen
  *      wanneer, nooit wat of hoeveel. De fee is vast en gaat altijd in EURC naar de treasury, met een vaste
- *      beloning voor de aanroeper.
+ *      beloning voor de aanroeper. De enige bevoegdheid van de treasury is `retire`: een eenmalige,
+ *      onomkeerbare uitschakelaar die het contract definitief stopt (zie daar). Die kan niets met fondsen.
  *
  *      Sandwich-bescherming: vóór én na elke swap wordt de spotkoers van de twee Uniswap-pools (EURC/USDC en
  *      USDC/cbBTC, via slot0) vergeleken met de Chainlink-koers. Wijkt de spot op een van beide momenten meer
@@ -125,10 +126,16 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     mapping(address owner => uint64) public lastAttemptAt;
     address[] private _owners;
     mapping(address owner => bool) private _isRegistered;
+    /// @notice True zodra de treasury `retire` heeft aangeroepen. Onomkeerbaar: daarna doet `execute` niets meer,
+    ///         geven `isDue`/`dueOwners` niets terug, slaat `onReport` elke owner over en kan `setParams` alleen
+    ///         nog een mandaat intrekken (`active = false`). `sweep` blijft werken.
+    bool public retired;
 
     // ─── Events en errors ───────────────────────────────────────────────────────────────────────────────────
 
     event ParamsUpdated(address indexed owner, Params params);
+    /// @notice Het contract is definitief buiten gebruik gesteld door de treasury.
+    event Retired();
     event Executed(
         address indexed owner,
         bool isBuy,
@@ -162,6 +169,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     error SpotDeviatesFromOracle(uint256 spot, uint256 oracle);
     error UnexpectedFeedDecimals(address feed);
     error NoOutput();
+    /// @notice Het contract is buiten gebruik gesteld; alleen `setParams` met `active = false` en `sweep` kunnen nog.
+    error ContractRetired();
+    error AlreadyRetired();
+    error NotTreasury(address caller);
 
     // ─── Constructor ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -232,7 +243,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
 
     /// @notice Zet of wijzigt de eigen instellingen. Alleen msg.sender kan zijn eigen instellingen wijzigen.
     /// @dev Economische ondergrenzen: `minTradeEurc >= MIN_TRADE_FLOOR` en `maxCorrectionBps >= MIN_CORRECTION_BPS`.
+    ///      Na `retire` is alleen `active = false` nog toegestaan (mandaat intrekken); een actief mandaat zetten
+    ///      revert dan met `ContractRetired`.
     function setParams(Params calldata p) external {
+        if (retired && p.active) revert ContractRetired();
         if (
             p.targetBps < MIN_TARGET_BPS || p.targetBps > MAX_TARGET_BPS || p.targetBps % 100 != 0 || p.bandBps == 0
                 || p.bandBps >= BPS || p.maxCorrectionBps < MIN_CORRECTION_BPS || p.maxCorrectionBps > BPS
@@ -270,9 +284,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
 
     /// @notice Zou `execute(owner, …)` nu iets doen? `eurcDelta` > 0 = kopen voor dat bedrag, < 0 = verkopen.
     /// @dev Revert nooit: een storing in de feeds of sequencer, of een te grote spot-afwijking, geeft (false, 0).
+    ///      Na `retire` altijd (false, 0).
     function isDue(address owner) external view returns (bool due, int256 eurcDelta) {
         Params memory p = params[owner];
-        if (!p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) {
+        if (retired || !p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) {
             return (false, 0);
         }
         (bool ok, uint256 price) = _tryQuote();
@@ -287,9 +302,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     ///      (`lastAttemptAt`) wordt overgeslagen. Een mislukte poging telt voor de wekker dus als een run, zodat een
     ///      structureel revertende owner (blacklist, te krappe slippage, out-of-gas) niet elk rapport opnieuw
     ///      een slot en EXECUTE_GAS kost. Handmatig of via het keeper-script blijft `execute` gewoon mogelijk.
+    ///      Na `retire` altijd een lege lijst.
     function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory due) {
         uint256 total = _owners.length;
-        if (offset >= total) {
+        if (retired || offset >= total) {
             return new address[](0);
         }
         (bool ok, uint256 price) = _tryQuote();
@@ -332,7 +348,9 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
 
     /// @notice Voert één rebalance-stap uit voor `owner`. Iedereen mag dit aanroepen.
     /// @param rewardTo Ontvanger van de beloning uit de fee; address(0) = hele fee naar de treasury.
+    /// @dev Revert met `ContractRetired` zodra de treasury `retire` heeft aangeroepen.
     function execute(address owner, address rewardTo) external nonReentrant {
+        if (retired) revert ContractRetired();
         Params memory p = params[owner];
         if (!p.active) revert Inactive();
         if (block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) revert NotDue();
@@ -363,13 +381,21 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     ///      en blijven de overige owners voor een volgend rapport. De hele call revert dus nooit op gasgebrek
     ///      van één owner. Een mislukte poging zet `lastAttemptAt[owner]`, waarna `dueOwners` die owner een
     ///      `interval` lang overslaat. Een lege revert-reden is vrijwel zeker out-of-gas binnen EXECUTE_GAS en
-    ///      wordt apart gemeld met `ReportOutOfGas`.
+    ///      wordt apart gemeld met `ReportOutOfGas`. Na `retire` wordt elke owner overgeslagen met
+    ///      `ReportSkipped(owner, ContractRetired)`, zonder `execute` te proberen; de call zelf revert niet.
     function onReport(bytes calldata metadata, bytes calldata report) external override {
         if (msg.sender != FORWARDER) revert UnauthorizedForwarder(msg.sender);
         (,, address workflowOwner) = _decodeMetadata(metadata);
         if (workflowOwner != WORKFLOW_OWNER) revert UnauthorizedWorkflowOwner(workflowOwner);
 
         address[] memory list = abi.decode(report, (address[]));
+        if (retired) {
+            bytes memory reason = abi.encodeWithSelector(ContractRetired.selector);
+            for (uint256 i = 0; i < list.length; i++) {
+                emit ReportSkipped(list[i], reason);
+            }
+            return;
+        }
         for (uint256 i = 0; i < list.length; i++) {
             if (gasleft() < EXECUTE_GAS_RESERVE) break;
             address owner = list[i];
@@ -388,6 +414,27 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     function sweep(IERC20 token) external nonReentrant {
         uint256 balance = token.balanceOf(address(this));
         if (balance > 0) token.safeTransfer(TREASURY, balance);
+    }
+
+    /// @notice Stelt het contract eenmalig en onomkeerbaar buiten gebruik. Alleen de treasury mag dit.
+    /// @dev Dit is de enige bevoegdheid van de treasury en de enige vlag die het gedrag van het contract kan
+    ///      veranderen; er is geen weg terug en geen tegenhanger (`unretire`). Na `retire`:
+    ///      - `execute` revert met `ContractRetired`, dus er wordt nooit meer een swap of fee geboekt;
+    ///      - `isDue` geeft (false, 0) en `dueOwners` een lege lijst, zodat wekkers vanzelf stoppen;
+    ///      - `onReport` slaat elke owner over met `ReportSkipped(owner, ContractRetired)`;
+    ///      - `setParams` accepteert alleen nog `active = false`, zodat gebruikers hun mandaat kunnen intrekken;
+    ///      - `sweep` blijft werken om achtergebleven fee naar de treasury te halen.
+    ///
+    ///      Non-custodial blijft dit: het contract houdt nooit gebruikersfondsen. Het mandaat is een ERC-20-
+    ///      allowance die in de tokencontracten bij de gebruiker staat; `retire` verandert daar niets aan en kan
+    ///      er niets mee. Het enige pad dat die allowance ooit gebruikte (`execute`) is na `retire` dicht, dus de
+    ///      treasury kan met deze knop geen fondsen verplaatsen, alleen het contract stilzetten. De gebruiker
+    ///      houdt zelf de controle: `approve(0)` op EURC/cbBTC en/of `setParams` met `active = false`.
+    function retire() external {
+        if (msg.sender != TREASURY) revert NotTreasury(msg.sender);
+        if (retired) revert AlreadyRetired();
+        retired = true;
+        emit Retired();
     }
 
     function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
