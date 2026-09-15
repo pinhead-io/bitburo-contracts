@@ -1458,6 +1458,148 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.lastExecutedAt(alice), 0);
     }
 
+    // retire ────────────────────────────────────────────────────────────────────────────────────────────
+
+    function test_retire_revertsForNonTreasury() public {
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.NotTreasury.selector, alice));
+        vm.prank(alice);
+        r.retire();
+        assertFalse(r.retired());
+    }
+
+    function test_retire_setsFlagAndEmits() public {
+        assertFalse(r.retired());
+        vm.expectEmit(false, false, false, true, address(r));
+        emit Rebalancer.Retired();
+        vm.prank(treasury);
+        r.retire();
+        assertTrue(r.retired());
+    }
+
+    function test_retire_secondCallReverts() public {
+        vm.startPrank(treasury);
+        r.retire();
+        vm.expectRevert(Rebalancer.AlreadyRetired.selector);
+        r.retire();
+        vm.stopPrank();
+        assertTrue(r.retired());
+    }
+
+    function test_retire_executeReverts() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        (bool due,) = r.isDue(alice);
+        assertTrue(due);
+        vm.prank(treasury);
+        r.retire();
+        vm.expectRevert(Rebalancer.ContractRetired.selector);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 1000e6, "geen fondsen bewogen");
+        assertEq(r.lastExecutedAt(alice), 0);
+        // De allowance staat nog bij de gebruiker; er is alleen niets meer dat hem kan gebruiken.
+        assertEq(eurc.allowance(alice, address(r)), type(uint256).max);
+    }
+
+    function test_retire_isDueFalseAndDueOwnersEmpty() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        _setUser(bob, 1000e6, 0, _defaultParams());
+        assertEq(r.dueOwners(0, 10).length, 2);
+        vm.prank(treasury);
+        r.retire();
+        (bool due, int256 delta) = r.isDue(alice);
+        assertFalse(due);
+        assertEq(delta, 0);
+        assertEq(r.dueOwners(0, 10).length, 0);
+        // De registratie zelf blijft leesbaar.
+        assertEq(r.ownerCount(), 2);
+    }
+
+    function test_retire_onReportSkipsEveryOwnerWithoutReverting() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        _setUser(bob, 1000e6, 0, _defaultParams());
+        vm.prank(treasury);
+        r.retire();
+        address[] memory list = new address[](2);
+        list[0] = alice;
+        list[1] = bob;
+        bytes memory reason = abi.encodeWithSelector(Rebalancer.ContractRetired.selector);
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(alice, reason);
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(bob, reason);
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        assertEq(eurc.balanceOf(alice), 1000e6);
+        assertEq(eurc.balanceOf(bob), 1000e6);
+        assertEq(r.lastExecutedAt(alice), 0);
+        assertEq(r.lastAttemptAt(alice), 0, "geen cool-down: er wordt niets meer geprobeerd");
+    }
+
+    function test_retire_onReportStillChecksForwarderAndWorkflowOwner() public {
+        vm.prank(treasury);
+        r.retire();
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedForwarder.selector, bob));
+        vm.prank(bob);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedWorkflowOwner.selector, bob));
+        vm.prank(forwarder);
+        r.onReport(_metadata(bob), abi.encode(list));
+    }
+
+    function test_retire_setParamsCanOnlyDeactivate() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        vm.prank(treasury);
+        r.retire();
+
+        // Intrekken werkt, ook voor iemand die nog nooit instellingen had.
+        Rebalancer.Params memory p = _defaultParams();
+        p.active = false;
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ParamsUpdated(alice, p);
+        vm.prank(alice);
+        r.setParams(p);
+        (bool active,,,,,,) = r.params(alice);
+        assertFalse(active);
+        vm.prank(bob);
+        r.setParams(p);
+        assertEq(r.ownerCount(), 2);
+
+        // Een actief mandaat zetten (nieuw of opnieuw) revert.
+        p.active = true;
+        vm.expectRevert(Rebalancer.ContractRetired.selector);
+        vm.prank(alice);
+        r.setParams(p);
+        vm.expectRevert(Rebalancer.ContractRetired.selector);
+        vm.prank(keeper);
+        r.setParams(p);
+
+        // Inactieve instellingen worden nog steeds gevalideerd.
+        p.active = false;
+        p.bandBps = 0;
+        vm.expectRevert(Rebalancer.InvalidParams.selector);
+        vm.prank(alice);
+        r.setParams(p);
+    }
+
+    function test_retire_sweepStillWorks() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        eurc.setBlacklisted(treasury, true);
+        r.execute(alice, keeper); // 0,20 EURC treasury-deel blijft achter (FeeRetained)
+        assertEq(eurc.balanceOf(address(r)), 200_000);
+        vm.prank(treasury);
+        r.retire();
+        eurc.setBlacklisted(treasury, false);
+        cbbtc.mint(address(r), 4_567);
+        vm.prank(bob);
+        r.sweep(eurc);
+        r.sweep(cbbtc);
+        assertEq(eurc.balanceOf(address(r)), 0);
+        assertEq(cbbtc.balanceOf(address(r)), 0);
+        assertEq(eurc.balanceOf(treasury), 200_000);
+        assertEq(cbbtc.balanceOf(treasury), 4_567);
+    }
+
     function test_supportsInterface() public view {
         assertTrue(r.supportsInterface(type(IReceiver).interfaceId));
         assertTrue(r.supportsInterface(type(IERC165).interfaceId));
@@ -1754,7 +1896,11 @@ contract RebalancerHandler is Test {
     uint256 public revertsNotDue;
     uint256 public revertsSpot;
     uint256 public revertsSlippage;
+    uint256 public revertsRetired;
     uint256 public revertsOther;
+    /// @dev Retire-ghosts: is er na `retire` nog een `Executed`-event gezien (in welke handler-actie dan ook)?
+    uint256 public retires;
+    bool public executedAfterRetire;
 
     constructor(
         Rebalancer r_,
@@ -1786,7 +1932,17 @@ contract RebalancerHandler is Test {
     }
 
     modifier afterCall() {
+        bool wasRetired = r.retired();
+        vm.recordLogs();
         _;
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        if (wasRetired) {
+            for (uint256 i = 0; i < logs.length; i++) {
+                if (logs[i].emitter == address(r) && logs[i].topics[0] == Rebalancer.Executed.selector) {
+                    executedAfterRetire = true;
+                }
+            }
+        }
         if (eurc.balanceOf(address(r)) != 0 || cbbtc.balanceOf(address(r)) != 0) contractHeldBalance = true;
         uint256 t = eurc.balanceOf(treasury);
         if (t < lastTreasury) treasuryDecreased = true;
@@ -1860,6 +2016,15 @@ contract RebalancerHandler is Test {
         r.sweep(eurcToken ? eurc : cbbtc);
     }
 
+    /// @dev De treasury zet het contract stil. Eén keer per run; daarna mag geen execute meer slagen. Gegate op
+    ///      de seed (1 op 8), zodat de meeste runs de gewone paden blijven raken en een derde retired eindigt.
+    function retire(uint256 seed) external afterCall {
+        if (r.retired() || seed % 8 != 0) return;
+        vm.prank(treasury);
+        r.retire();
+        retires++;
+    }
+
     function execute(uint256 seed, uint256 rewardSeed) external afterCall {
         address owner = _actor(seed);
         address rewardTo = rewardSeed % 3 == 0 ? address(0) : (rewardSeed % 3 == 1 ? _actor(rewardSeed) : treasury);
@@ -1872,6 +2037,7 @@ contract RebalancerHandler is Test {
             else if (sel == Rebalancer.Inactive.selector) revertsInactive++;
             else if (sel == Rebalancer.NotDue.selector) revertsNotDue++;
             else if (sel == Rebalancer.SpotDeviatesFromOracle.selector) revertsSpot++;
+            else if (sel == Rebalancer.ContractRetired.selector) revertsRetired++;
             else if (sel == bytes4(keccak256("Error(string)"))) revertsSlippage++;
             else revertsOther++;
         }
@@ -1920,15 +2086,25 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
     }
 
     /// @dev Zonder router-slippage en met de spot binnen ±1% mag een execute alleen falen op NothingToDo, Inactive,
-    ///      NotDue of de spot-check; "Too little received" of iets anders zou liveness-uitval zijn.
+    ///      NotDue, de spot-check of ContractRetired; "Too little received" of iets anders zou liveness-uitval zijn.
     function invariant_executeFailsOnlyForKnownReasons() public view {
         assertEq(handler.revertsSlippage(), 0, "router-slippage zonder oorzaak");
         assertEq(handler.revertsOther(), 0, "onbekende revert-reden");
         assertEq(
             handler.executes(),
             handler.executesSucceeded() + handler.revertsNothingToDo() + handler.revertsInactive()
-                + handler.revertsNotDue() + handler.revertsSpot()
+                + handler.revertsNotDue() + handler.revertsSpot() + handler.revertsRetired()
         );
+    }
+
+    /// @dev Na retire vindt geen Executed-event meer plaats, en de vlag gaat nooit meer terug.
+    function invariant_noExecutedAfterRetire() public view {
+        assertFalse(handler.executedAfterRetire(), "Executed na retire");
+        assertLe(handler.retires(), 1, "retire slaagde meer dan eens");
+        assertEq(r.retired(), handler.retires() == 1, "retired-vlag wijkt af van de handler");
+        if (r.retired()) {
+            assertEq(r.dueOwners(0, handler.actorCount()).length, 0, "dueOwners niet leeg na retire");
+        }
     }
 }
 
