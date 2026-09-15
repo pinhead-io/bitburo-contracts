@@ -5,7 +5,7 @@
 #   set -a; source ~/Code/bitburo/.env; set +a; bash ~/Code/bitburo-contracts/deploy-mainnet.sh dry
 #   set -a; source ~/Code/bitburo/.env; set +a; bash ~/Code/bitburo-contracts/deploy-mainnet.sh go
 #
-# "dry" simuleert alleen, "go" deployt echt en verifieert op Basescan als BASESCAN_API_KEY gezet is.
+# "dry" simuleert alleen, "go" deployt echt, "verify" verifieert de laatste broadcast op Basescan (ETHERSCAN_API_KEY).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -37,5 +37,13 @@ if [ "$MODE" = "go" ]; then
   exit 0
 fi
 
-echo "Onbekende stand '$MODE'; gebruik 'dry' of 'go'." >&2
+if [ "$MODE" = "verify" ]; then
+  export BASESCAN_API_KEY="${BASESCAN_API_KEY:-${ETHERSCAN_API_KEY:-}}"
+  if [ -z "$BASESCAN_API_KEY" ]; then echo "Geen ETHERSCAN_API_KEY/BASESCAN_API_KEY geladen." >&2; exit 1; fi
+  echo "== Broncode verifiëren op Basescan voor de laatste broadcast"
+  "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" --private-key "$DEPLOYER_PRIVATE_KEY" --resume --verify
+  exit 0
+fi
+
+echo "Onbekende stand '$MODE'; gebruik 'dry', 'go' of 'verify'." >&2
 exit 1
