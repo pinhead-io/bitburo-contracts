@@ -8,5 +8,9 @@
   "maxFeedAgeSeconds": 1500,
   "ownersPageSize": 50,
   "maxOwnersPerReport": 5,
+  "maxCandidatesPerRun": 25,
+  "minRunEurc": 20,
+  "maxRunEurc": 8000,
+  "executeGasBudget": "700000",
   "gasLimit": "4000000"
 }
