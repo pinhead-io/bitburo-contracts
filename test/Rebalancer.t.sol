@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -97,7 +98,7 @@ abstract contract RebalancerTestBase is Test {
             targetBps: 8000,
             bandBps: 500,
             maxCorrectionBps: 1000,
-            minTradeEurc: 5e6,
+            minTradeEurc: 20e6,
             interval: 1 days,
             maxSlippageBps: 100
         });
@@ -132,7 +133,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(target, 8000);
         assertEq(band, 500);
         assertEq(cap, 1000);
-        assertEq(minTrade, 5e6);
+        assertEq(minTrade, 20e6);
         assertEq(interval, 1 days);
         assertEq(slip, 100);
         assertEq(r.ownerCount(), 1);
@@ -165,15 +166,15 @@ contract RebalancerTest is RebalancerTestBase {
         r.setParams(p);
         p.bandBps = 9999;
         r.setParams(p);
-        p.maxCorrectionBps = 1;
+        p.maxCorrectionBps = 10;
         r.setParams(p);
         p.maxCorrectionBps = 10_000;
         r.setParams(p);
-        p.minTradeEurc = 1;
+        p.minTradeEurc = 20e6;
         r.setParams(p);
         p.interval = 1 hours;
         r.setParams(p);
-        p.maxSlippageBps = 30;
+        p.maxSlippageBps = 60;
         r.setParams(p);
         p.maxSlippageBps = 100;
         r.setParams(p);
@@ -210,14 +211,25 @@ contract RebalancerTest is RebalancerTestBase {
         Rebalancer.Params memory p = _defaultParams();
         p.maxCorrectionBps = 0;
         _expectInvalid(p);
+        p.maxCorrectionBps = 9; // onder MIN_CORRECTION_BPS
+        _expectInvalid(p);
         p.maxCorrectionBps = 10_001;
         _expectInvalid(p);
     }
 
-    function test_setParams_rejectsMinTradeZero() public {
+    /// @dev H-2 / L-1: de dust-configuratie uit de audit (minTrade 1, cap 1 bps) is niet meer te zetten.
+    function test_setParams_rejectsMinTradeBelowFloor() public {
         Rebalancer.Params memory p = _defaultParams();
         p.minTradeEurc = 0;
         _expectInvalid(p);
+        p.minTradeEurc = 1;
+        _expectInvalid(p);
+        p.minTradeEurc = 20e6 - 1;
+        _expectInvalid(p);
+        assertEq(r.MIN_TRADE_FLOOR(), 20e6);
+        assertEq(r.MIN_CORRECTION_BPS(), 10);
+        // De kleinste toegestane run dekt precies de keeperbeloning.
+        assertEq(uint256(r.MIN_TRADE_FLOOR()) * r.FEE_BPS() / BPS, r.KEEPER_REWARD_EURC());
     }
 
     function test_setParams_rejectsIntervalBelowOneHour() public {
@@ -232,7 +244,9 @@ contract RebalancerTest is RebalancerTestBase {
         Rebalancer.Params memory p = _defaultParams();
         p.maxSlippageBps = 0;
         _expectInvalid(p);
-        p.maxSlippageBps = 29;
+        p.maxSlippageBps = 30; // oude ondergrens, nu onder MIN_SLIPPAGE_BPS (60)
+        _expectInvalid(p);
+        p.maxSlippageBps = 59;
         _expectInvalid(p);
         p.maxSlippageBps = 101;
         _expectInvalid(p);
@@ -351,10 +365,14 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_rewardCappedByFee() public {
-        // 100 EURC -> amountIn 10 EURC, fee 25_000 < 50_000: hele fee naar rewardTo.
-        _setUser(alice, 100e6, 0, _defaultParams());
+        // Sinds MIN_TRADE_FLOOR is een fee onder de beloning alleen nog via verkoop-slippage mogelijk:
+        // 150 EURC in cbBTC, cap 10% = 15 < vloer 20 -> verkoop 25_000 sats (20 EURC); router levert 1% minder
+        // (19,8 EURC), fee 49_500 < 50_000: hele fee naar rewardTo.
+        _setUser(alice, 0, 187_500, _defaultParams());
+        router.setSlippageBps(100);
         r.execute(alice, keeper);
-        assertEq(eurc.balanceOf(keeper), 25_000);
+        assertEq(cbbtc.balanceOf(alice), 187_500 - 25_000);
+        assertEq(eurc.balanceOf(keeper), 49_500);
         assertEq(eurc.balanceOf(treasury), 0);
     }
 
@@ -423,7 +441,7 @@ contract RebalancerTest is RebalancerTestBase {
     function test_execute_allowanceBelowMinTradeIsNothingToDo() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         vm.prank(alice);
-        eurc.approve(address(r), 4_999_999);
+        eurc.approve(address(r), 20e6 - 1);
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         r.execute(alice, address(0));
     }
@@ -489,8 +507,8 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_revertsNothingToDoBelowMinTrade() public {
-        // 3 EURC + 7 EURC cbBTC: correctie 1 EURC < min 5.
-        _setUser(alice, 3e6, 8_750, _defaultParams());
+        // 30 EURC + 70 EURC cbBTC: correctie 10 EURC < min 20.
+        _setUser(alice, 30e6, 87_500, _defaultParams());
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         r.execute(alice, keeper);
     }
@@ -513,6 +531,22 @@ contract RebalancerTest is RebalancerTestBase {
         _setUser(alice, 1000e6, 0, _defaultParams());
         sequencer.set(1, START - 1 days, START - 1 days);
         vm.expectRevert(Rebalancer.SequencerDown.selector);
+        r.execute(alice, keeper);
+    }
+
+    /// @dev L-9: een niet-geïnitialiseerde ronde (startedAt == 0) van de uptime-feed telt niet als "up".
+    function test_execute_revertsSequencerDownWhenStartedAtZero() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        sequencer.set(0, 0, 0);
+        vm.expectRevert(Rebalancer.SequencerDown.selector);
+        r.execute(alice, keeper);
+        vm.expectRevert(Rebalancer.SequencerDown.selector);
+        r.quote();
+        (bool due,) = r.isDue(alice);
+        assertFalse(due);
+        assertEq(r.dueOwners(0, 10).length, 0);
+
+        sequencer.set(0, START - 1 days, START - 1 days);
         r.execute(alice, keeper);
     }
 
@@ -549,12 +583,14 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_revertsStaleFeedEurc() public {
+        // M-2: uurfeed (0x9867…01e0) met 15 minuten marge.
+        assertEq(r.MAX_AGE_EURC(), 4500);
         _setUser(alice, 1000e6, 0, _defaultParams());
-        feedEurc.set(1e8, START, START - 90_001);
+        feedEurc.set(1e8, START, START - 4501);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.StaleFeed.selector, address(feedEurc)));
         r.execute(alice, keeper);
 
-        feedEurc.set(1e8, START, START - 90_000);
+        feedEurc.set(1e8, START, START - 4500);
         r.execute(alice, keeper);
     }
 
@@ -649,6 +685,113 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(alice), 900e6);
     }
 
+    /// @dev Testgat oracle 4: alleen de EURC/USDC-pool meer dan 0,5% verschoven (de dunne pool, de echte
+    ///      aanvalsroute) blokkeert de run ook.
+    function test_execute_revertsWhenOnlyEurcPoolDeviates() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        poolEurcUsdc.setPrice(1e6, 1.006e6);
+        uint256 spotPrice = r.spot();
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, spotPrice, PRICE));
+        r.execute(alice, keeper);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due);
+
+        poolEurcUsdc.setPrice(1.006e6, 1e6);
+        spotPrice = r.spot();
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, spotPrice, PRICE));
+        r.execute(alice, keeper);
+    }
+
+    /// @dev Testgat oracle 5 (ORC-3): feed en spot bewegen los van elkaar. Feed +0,3% en spot -0,3% is samen
+    ///      0,6% en blokkeert; feed +0,3% met spot +0,1% (nieuwe EURC-feed, deviatie 0,1%) niet.
+    function test_execute_feedAndSpotDivergeIndependently() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        feedBtc.set(int256(PRICE * 1e8 / 1e6) * 1003 / 1000, START, START);
+        _setSpot(PRICE * 997 / 1000);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due, "0,6% uit elkaar: geblokkeerd");
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, r.spot(), r.quote()));
+        r.execute(alice, keeper);
+
+        _setSpot(PRICE * 1001 / 1000);
+        (due,) = r.isDue(alice);
+        assertTrue(due, "0,2% uit elkaar: toegestaan");
+        r.execute(alice, keeper);
+    }
+
+    /// @dev M-1: de spot wordt ook ná de swap gecontroleerd. Een run waarvan de eigen prijsimpact (of een
+    ///      voorschuiving plus impact) de spot buiten 0,5% van de oracle brengt, revert alsnog en boekt niets.
+    function test_execute_revertsWhenSpotDeviatesAfterSwap() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        // Vooraf +0,4% (toegestaan); de swap zelf schuift de pool naar +0,6%.
+        poolEurcUsdc.setPrice(1e6, 1.004e6);
+        router.setPoolShift(poolEurcUsdc, 1e6, 1.006e6);
+        (bool due,) = r.isDue(alice);
+        assertTrue(due, "vooraf binnen de grens");
+        vm.expectPartialRevert(Rebalancer.SpotDeviatesFromOracle.selector);
+        r.execute(alice, keeper);
+        assertEq(r.lastExecutedAt(alice), 0);
+        assertEq(eurc.balanceOf(alice), 1000e6, "niets geboekt");
+
+        // Verkoopkant: zelfde regel.
+        _setUser(bob, 0, 1_250_000, _defaultParams());
+        router.setPoolShift(poolEurcUsdc, 1.006e6, 1e6);
+        vm.expectPartialRevert(Rebalancer.SpotDeviatesFromOracle.selector);
+        r.execute(bob, keeper);
+        assertEq(cbbtc.balanceOf(bob), 1_250_000);
+
+        // Impact die binnen de grens blijft (0,4% -> 0,5%) mag wel.
+        router.setPoolShift(poolEurcUsdc, 1e6, 1.005e6);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 900e6);
+    }
+
+    /// @dev Testgat oracle 9: extreme sqrtPriceX96 (MIN/MAX_SQRT_RATIO van Uniswap) geeft geen Panic naar
+    ///      buiten via isDue/dueOwners; execute revert netjes.
+    function test_spot_extremeSqrtPriceNeverPanicsInViews() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        uint160[2] memory extremes =
+            [uint160(4_295_128_739), uint160(1461446703485210103287273052203988822378723970342)];
+        for (uint256 i = 0; i < 2; i++) {
+            poolUsdcCbbtc.setSqrtPriceX96(extremes[i]);
+            (bool due, int256 delta) = r.isDue(alice);
+            assertFalse(due);
+            assertEq(delta, 0);
+            assertEq(r.dueOwners(0, 10).length, 0);
+            vm.expectRevert();
+            r.execute(alice, keeper);
+            poolEurcUsdc.setSqrtPriceX96(extremes[i]);
+            (due,) = r.isDue(alice);
+            assertFalse(due);
+            assertEq(r.dueOwners(0, 10).length, 0);
+            _setSpot(PRICE);
+        }
+        (bool dueAgain,) = r.isDue(alice);
+        assertTrue(dueAgain);
+    }
+
+    /// @dev Testgat oracle 8 (ORC-7): bij een EURC-depeg (feed 0,90 USD, pool volgt) stijgt de koers in EURC,
+    ///      stijgt het cbBTC-aandeel en verkoopt de volgende run cbBTC voor de gedepegde EURC. Ontwerpkeuze
+    ///      (EURC als numeraire); hier vastgelegd zodat het niet ongemerkt verandert.
+    function test_isDue_eurcDepegTurnsHoldIntoSell() public {
+        // 2.000 EURC + 0,1 cbBTC: exact 80/20 bij EURC/USD = 1, band 1%.
+        Rebalancer.Params memory p = _defaultParams();
+        p.bandBps = 100;
+        _setUser(alice, 2000e6, 10_000_000, p);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due);
+
+        feedEurc.set(0.9e8, START, START);
+        poolEurcUsdc.setPrice(1e6, 0.9e6);
+        uint256 price = r.quote();
+        assertEq(price, Math.mulDiv(80_000e8, 1e6, 0.9e8), "koers in EURC stijgt ~11%");
+        assertEq(r.quoteChecked(), price);
+        int256 delta;
+        (due, delta) = r.isDue(alice);
+        assertTrue(due);
+        assertLt(delta, 0, "verkoopt cbBTC voor gedepegde EURC");
+    }
+
     // sweep en rewardTo ────────────────────────────────────────────────────────────────────────────────
 
     function test_sweep_sendsFullBalanceToTreasury() public {
@@ -667,6 +810,102 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(treasury), 123e6);
     }
 
+    /// @dev M-6: een geblacklist TREASURY laat de rebalance doorgaan; het treasury-deel van de fee blijft in het
+    ///      contract (FeeRetained) en `sweep` haalt het op zodra de blacklist is opgeheven.
+    function test_execute_continuesWhenTreasuryBlacklistedAndSweepRecoversFee() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        eurc.setBlacklisted(treasury, true);
+
+        uint256 amountOut = Math.mulDiv(99_750_000, 1e8, PRICE);
+        vm.expectEmit(false, false, false, true, address(r));
+        emit Rebalancer.FeeRetained(200_000);
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.Executed(alice, true, 100e6, 250_000, 50_000, keeper, amountOut, PRICE, 1000e6, 0);
+        r.execute(alice, keeper);
+
+        assertEq(eurc.balanceOf(alice), 900e6, "run is doorgegaan");
+        assertEq(cbbtc.balanceOf(alice), amountOut);
+        assertEq(eurc.balanceOf(keeper), 50_000, "beloning gewoon betaald");
+        assertEq(eurc.balanceOf(treasury), 0);
+        assertEq(eurc.balanceOf(address(r)), 200_000, "treasury-deel blijft in het contract");
+        assertEq(r.lastExecutedAt(alice), uint64(START));
+
+        // Zolang de treasury geblacklist is, kan sweep het niet kwijt; daarna wel.
+        vm.expectRevert("Blacklistable: account is blacklisted");
+        r.sweep(eurc);
+        eurc.setBlacklisted(treasury, false);
+        r.sweep(eurc);
+        assertEq(eurc.balanceOf(address(r)), 0);
+        assertEq(eurc.balanceOf(treasury), 200_000);
+    }
+
+    /// @dev M-6, verkoopkant en rewardTo == address(0): de volledige fee blijft achter, de owner krijgt exact
+    ///      received - fee.
+    function test_execute_sellRetainsWholeFeeWhenTreasuryBlacklisted() public {
+        _setUser(alice, 0, 1_250_000, _defaultParams());
+        eurc.setBlacklisted(treasury, true);
+        vm.expectEmit(false, false, false, true, address(r));
+        emit Rebalancer.FeeRetained(250_000);
+        r.execute(alice, address(0));
+        assertEq(eurc.balanceOf(alice), 99_750_000);
+        assertEq(eurc.balanceOf(address(r)), 250_000);
+        assertEq(eurc.balanceOf(treasury), 0);
+
+        // Een volgende run telt het achtergebleven saldo niet mee als "ontvangen".
+        vm.warp(START + 1 days);
+        _setPrice(PRICE);
+        eurc.setBlacklisted(treasury, false);
+        _setUser(bob, 0, 1_250_000, _defaultParams());
+        r.execute(bob, address(0));
+        assertEq(eurc.balanceOf(bob), 99_750_000);
+        assertEq(eurc.balanceOf(address(r)), 250_000, "restant van alice staat er nog");
+        assertEq(eurc.balanceOf(treasury), 250_000, "fee van bob is wel aangekomen");
+    }
+
+    /// @dev M-6: een geblacklist rewardTo kost de aanroeper zijn beloning, niet de owner zijn run; de hele fee
+    ///      gaat dan naar de treasury en het event meldt reward 0.
+    function test_execute_rewardFallsBackToTreasuryWhenRewardToBlacklisted() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        eurc.setBlacklisted(keeper, true);
+        uint256 amountOut = Math.mulDiv(99_750_000, 1e8, PRICE);
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.Executed(alice, true, 100e6, 250_000, 0, keeper, amountOut, PRICE, 1000e6, 0);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(keeper), 0);
+        assertEq(eurc.balanceOf(treasury), 250_000);
+        assertEq(eurc.balanceOf(address(r)), 0);
+    }
+
+    /// @dev M-6 via CRE: onReport geeft TREASURY als rewardTo; is die geblacklist, dan falen beloning én
+    ///      treasury-transfer en blijft de hele fee in het contract. De run wordt wél geboekt.
+    function test_onReport_continuesWhenTreasuryBlacklisted() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        eurc.setBlacklisted(treasury, true);
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        vm.expectEmit(false, false, false, true, address(r));
+        emit Rebalancer.FeeRetained(250_000);
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        assertEq(r.lastExecutedAt(alice), uint64(START));
+        assertEq(r.lastAttemptAt(alice), 0);
+        assertEq(eurc.balanceOf(address(r)), 250_000);
+    }
+
+    /// @dev Testgat execute 7: `sweep` roept willekeurige code aan met msg.sender = Rebalancer. `balanceOf` gaat
+    ///      via STATICCALL (view in IERC20), dus een nep-token kan zelfs geen owner registreren: de poging revert
+    ///      en er verandert niets.
+    function test_sweep_maliciousTokenCannotChangeState() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        MaliciousSweepToken evil = new MaliciousSweepToken(r);
+        vm.expectRevert();
+        r.sweep(IERC20(address(evil)));
+        assertEq(r.ownerCount(), 1);
+        assertEq(eurc.balanceOf(alice), 1000e6);
+        assertEq(eurc.balanceOf(address(r)), 0);
+        assertEq(eurc.balanceOf(treasury), 0);
+    }
+
     function test_execute_rewardToSelfGoesToTreasury() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         vm.expectEmit(true, false, false, true, address(r));
@@ -676,6 +915,41 @@ contract RebalancerTest is RebalancerTestBase {
         r.execute(alice, address(r));
         assertEq(eurc.balanceOf(address(r)), 0);
         assertEq(eurc.balanceOf(treasury), 250_000);
+    }
+
+    /// @dev L-2: spot op +0,5% (toegestaan) en 0,1% poolfees is samen 0,6% t.o.v. de oracle; met de nieuwe
+    ///      ondergrens van 60 bps is zo'n run precies nog uitvoerbaar. Met 30 bps zou hij structureel reverten.
+    function test_execute_minSlippageCoversSpotDeviationPlusPoolFees() public {
+        Rebalancer.Params memory p = _defaultParams();
+        p.maxSlippageBps = r.MIN_SLIPPAGE_BPS();
+        assertEq(p.maxSlippageBps, 60);
+        _setUser(alice, 1000e6, 0, p);
+        _setSpot(PRICE * (BPS + 50) / BPS);
+        router.setSlippageBps(60);
+        (bool due,) = r.isDue(alice);
+        assertTrue(due);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 900e6);
+
+        router.setSlippageBps(61);
+        _setUser(bob, 1000e6, 0, p);
+        vm.expectRevert("Too little received");
+        r.execute(bob, keeper);
+    }
+
+    /// @dev L-1: levert de router 0 cbBTC op (alleen mogelijk als amountOutMinimum door afronding 0 is), dan
+    ///      revert de koop in plaats van EURC weg te geven. Hier geforceerd met een absurde koers.
+    function test_execute_revertsNoOutputWhenBuyYieldsZero() public {
+        uint256 hugePrice = 1e16; // 10 miljard EURC per cbBTC: 99,75 EURC koopt 0 sats
+        _setPrice(hugePrice);
+        router.setPrice(hugePrice);
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        (bool due,) = r.isDue(alice);
+        assertTrue(due);
+        vm.expectRevert(Rebalancer.NoOutput.selector);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 1000e6);
+        assertEq(r.lastExecutedAt(alice), 0);
     }
 
     function test_execute_revertsOnSlippageBuy() public {
@@ -715,6 +989,11 @@ contract RebalancerTest is RebalancerTestBase {
         vm.expectRevert("Blacklistable: account is blacklisted");
         r.execute(alice, keeper);
         assertEq(r.lastExecutedAt(alice), 0);
+        // Een handmatige revert houdt de owner due (isDue/dueOwners kennen de reden niet); alleen een mislukte
+        // onReport-poging zet de cool-down (zie test_onReport_failedAttemptSetsCoolDown).
+        (bool due,) = r.isDue(alice);
+        assertTrue(due);
+        assertEq(r.dueOwners(0, 10).length, 1);
     }
 
     function test_execute_lastExecutedAtNotSetOnRevert() public {
@@ -786,7 +1065,7 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_isDue_falseBelowMinTradeAndZeroAllowance() public {
-        _setUser(alice, 3e6, 8_750, _defaultParams());
+        _setUser(alice, 30e6, 87_500, _defaultParams());
         (bool due, int256 delta) = r.isDue(alice);
         assertFalse(due);
         assertEq(delta, 0);
@@ -816,7 +1095,7 @@ contract RebalancerTest is RebalancerTestBase {
     function test_isDue_deltaIsCorrectionBeforeAllowanceBound() public {
         _setUser(alice, 0, 1_250_000, _defaultParams());
         vm.prank(alice);
-        cbbtc.approve(address(r), 10_000);
+        cbbtc.approve(address(r), 30_000); // 24 EURC: boven de vloer, ver onder de correctie
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
         assertEq(delta, -100e6);
@@ -930,6 +1209,191 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(bob), 200e6);
         assertEq(r.lastExecutedAt(alice), uint64(START));
         assertEq(r.lastExecutedAt(bob), 0);
+    }
+
+    /// @dev M-4: een mislukte poging via onReport zet lastAttemptAt; dueOwners slaat de owner een interval lang
+    ///      over, isDue en execute niet. Na het interval staat hij weer in de lijst.
+    function test_onReport_failedAttemptSetsCoolDown() public {
+        Rebalancer.Params memory p = _defaultParams();
+        p.interval = 1 hours;
+        _setUser(alice, 1000e6, 0, p);
+        _setUser(bob, 1000e6, 0, p);
+        router.setSlippageBps(200);
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+
+        assertEq(r.lastAttemptAt(alice), uint64(START));
+        assertEq(r.lastExecutedAt(alice), 0);
+        (bool due,) = r.isDue(alice);
+        assertTrue(due, "isDue negeert de cool-down");
+        address[] memory dueList = r.dueOwners(0, 10);
+        assertEq(dueList.length, 1, "alice zit in cool-down, bob niet");
+        assertEq(dueList[0], bob);
+
+        vm.warp(START + 1 hours - 1);
+        _setPrice(PRICE);
+        assertEq(r.dueOwners(0, 10).length, 1);
+        vm.warp(START + 1 hours);
+        _setPrice(PRICE);
+        assertEq(r.dueOwners(0, 10).length, 2, "na het interval weer due");
+
+        // Handmatig uitvoeren kan tijdens de cool-down gewoon.
+        vm.warp(START);
+        _setPrice(PRICE);
+        router.setSlippageBps(0);
+        r.execute(alice, keeper);
+        assertEq(r.lastExecutedAt(alice), uint64(START));
+    }
+
+    /// @dev M-4: een geslaagde run zet lastAttemptAt niet.
+    function test_onReport_successDoesNotSetLastAttemptAt() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        assertEq(r.lastAttemptAt(alice), 0);
+        assertEq(r.lastExecutedAt(alice), uint64(START));
+    }
+
+    /// @dev Testgat cre 2 + M-3/M-4: isDue is true terwijl execute binnen EXECUTE_GAS out-of-gas gaat. Het
+    ///      rapport meldt dat met ReportOutOfGas en de owner verdwijnt een interval uit dueOwners in plaats van
+    ///      elk uur opnieuw het volle budget te verbranden.
+    function test_onReport_outOfGasEmitsEventAndCoolsDown() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        router.setGasBurn(r.EXECUTE_GAS());
+        (bool due,) = r.isDue(alice);
+        assertTrue(due, "isDue simuleert de swap niet");
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(alice, "");
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportOutOfGas(alice);
+        vm.prank(forwarder);
+        r.onReport{gas: 4_000_000}(_metadata(workflowOwner), abi.encode(list));
+        assertEq(r.lastAttemptAt(alice), uint64(START));
+        assertEq(r.dueOwners(0, 10).length, 0);
+        (due,) = r.isDue(alice);
+        assertTrue(due);
+    }
+
+    /// @dev Een revert mét reden krijgt geen ReportOutOfGas.
+    function test_onReport_revertWithReasonIsNotReportedAsOutOfGas() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        router.setSlippageBps(200);
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        vm.recordLogs();
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != Rebalancer.ReportOutOfGas.selector, "ReportOutOfGas ten onrechte");
+        }
+    }
+
+    /// @dev Testgat execute 6 / cre 6: een owner die dubbel in het rapport staat (of een tweede levering van
+    ///      hetzelfde rapport) krijgt NotDue; de rest van de lijst loopt door.
+    function test_onReport_duplicateAndReplayGiveNotDue() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        _setUser(bob, 1000e6, 0, _defaultParams());
+        address[] memory list = new address[](3);
+        list[0] = alice;
+        list[1] = alice;
+        list[2] = bob;
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(alice, abi.encodeWithSelector(Rebalancer.NotDue.selector));
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        assertEq(eurc.balanceOf(alice), 900e6, "een keer uitgevoerd");
+        assertEq(eurc.balanceOf(bob), 900e6, "rest van de lijst loopt door");
+
+        // Replay van hetzelfde rapport: alles NotDue, niets verandert.
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(alice, abi.encodeWithSelector(Rebalancer.NotDue.selector));
+        vm.expectEmit(true, false, false, true, address(r));
+        emit Rebalancer.ReportSkipped(bob, abi.encodeWithSelector(Rebalancer.NotDue.selector));
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        assertEq(eurc.balanceOf(alice), 900e6);
+        assertEq(eurc.balanceOf(bob), 900e6);
+    }
+
+    /// @dev Testgat cre 5: metadata korter dan 62 bytes of een rapport dat niet als address[] decodeert laat
+    ///      de hele call reverten (de afzender is dan per definitie een misvormd forwarder-rapport).
+    function test_onReport_revertsOnMalformedMetadataOrReport() public {
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        bytes memory shortMetadata = abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), bytes20(workflowOwner));
+        shortMetadata = bytes.concat(shortMetadata); // 62 bytes: precies genoeg
+        vm.prank(forwarder);
+        r.onReport(shortMetadata, abi.encode(list));
+
+        bytes memory tooShort = abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), bytes19(0));
+        vm.expectRevert();
+        vm.prank(forwarder);
+        r.onReport(tooShort, abi.encode(list));
+
+        vm.expectRevert();
+        vm.prank(forwarder);
+        r.onReport(_metadata(workflowOwner), hex"deadbeef");
+    }
+
+    /// @dev Testgat cre 9: alleen de owner-slice (bytes 42–62) telt; workflowId, naam en reportId zijn vrij.
+    function testFuzz_onReport_metadataOnlyOwnerMatters(
+        bytes32 workflowId,
+        bytes10 name,
+        bytes2 reportId,
+        address other
+    ) public {
+        vm.assume(other != workflowOwner);
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        address[] memory list = new address[](1);
+        list[0] = alice;
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedWorkflowOwner.selector, other));
+        vm.prank(forwarder);
+        r.onReport(abi.encodePacked(workflowId, name, other, reportId), abi.encode(list));
+
+        vm.prank(forwarder);
+        r.onReport(abi.encodePacked(workflowId, name, workflowOwner, reportId), abi.encode(list));
+        assertEq(r.lastExecutedAt(alice), uint64(START));
+    }
+
+    /// @dev M-3 / testgat cre 7: met het gas dat de forwarder na eigen overhead uit een 4M-rapport overlaat
+    ///      (~3,55M) passen bij runs die bijna het volle EXECUTE_GAS gebruiken drie owners; de rest blijft netjes
+    ///      voor een volgend rapport. Bij normale runs (~450k) passen er vijf.
+    function test_onReport_threeFullBudgetOwnersFitInForwarderMargin() public {
+        address[] memory list = new address[](5);
+        for (uint256 i = 0; i < 5; i++) {
+            address u = makeAddr(string(abi.encodePacked("budget", i)));
+            _setUser(u, 1000e6, 0, _defaultParams());
+            list[i] = u;
+        }
+        // Eerst één gewone run zodat de opslag van de mock-router warm is; daarna gebruikt elke run bijna het
+        // volle EXECUTE_GAS (~0,87M) en slaagt.
+        _setUser(bob, 1000e6, 0, _defaultParams());
+        r.execute(bob, keeper);
+        router.setGasKeep(150_000);
+        vm.prank(forwarder);
+        r.onReport{gas: 3_550_000}(_metadata(workflowOwner), abi.encode(list));
+        uint256 executed;
+        for (uint256 i = 0; i < 5; i++) {
+            if (r.lastExecutedAt(list[i]) != 0) executed++;
+        }
+        assertEq(executed, 3, "drie owners op vol budget");
+        for (uint256 i = 0; i < 5; i++) {
+            assertEq(r.lastAttemptAt(list[i]), 0, "afgebroken door reserve, geen mislukte poging");
+        }
+
+        router.setGasKeep(0);
+        vm.prank(forwarder);
+        r.onReport{gas: 3_550_000}(_metadata(workflowOwner), abi.encode(list));
+        for (uint256 i = 0; i < 5; i++) {
+            assertEq(r.lastExecutedAt(list[i]), uint64(START));
+        }
     }
 
     function test_onReport_emptyReport() public {
@@ -1047,6 +1511,29 @@ contract RebalancerTest is RebalancerTestBase {
         new Rebalancer(d);
     }
 
+    /// @dev L-4: beide feeds moeten 8 decimalen hebben; de omrekening deelt ze op elkaar.
+    function test_constructor_rejectsFeedWithWrongDecimals() public {
+        MockAggregator feed18 = new MockAggregator(18, "EURC / USD");
+        Rebalancer.Deployment memory d = _deployment();
+        d.feedEurcUsd = address(feed18);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedFeedDecimals.selector, address(feed18)));
+        new Rebalancer(d);
+
+        MockAggregator feed6 = new MockAggregator(6, "cbBTC / USD");
+        d = _deployment();
+        d.feedCbbtcUsd = address(feed6);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedFeedDecimals.selector, address(feed6)));
+        new Rebalancer(d);
+
+        // Allebei 18 is ook fout: de constante is 8, niet "gelijk aan elkaar".
+        MockAggregator btc18 = new MockAggregator(18, "cbBTC / USD");
+        d = _deployment();
+        d.feedCbbtcUsd = address(btc18);
+        d.feedEurcUsd = address(feed18);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedFeedDecimals.selector, address(btc18)));
+        new Rebalancer(d);
+    }
+
     function test_constructor_rejectsPoolWithWrongTokens() public {
         MockUniswapV3Pool wrong = new MockUniswapV3Pool(address(eurc), address(cbbtc));
         Rebalancer.Deployment memory d = _deployment();
@@ -1074,21 +1561,24 @@ contract RebalancerTest is RebalancerTestBase {
     /// @dev Koers 100 EURC per cbBTC, zodat 1 sat == 1 EURC-basiseenheid en de positie exact omgezet wordt.
     uint256 internal constant VECTOR_PRICE = 100e6;
 
+    /// @dev Vectoren uit de PHP-referentie, met `minTrade` op de contractvloer van 20 EURC. Daardoor wijken v[4],
+    ///      v[6] en v[12] af van de oorspronkelijke PHP-set (minTrade 5): v[4] is ×10 geschaald, en bij v[6] en
+    ///      v[12] is de cap-vloer nu 20 in plaats van 10 (cap = max(total × 10%, minTrade)).
     function _vectors() internal pure returns (Vector[15] memory v) {
-        v[0] = Vector(200e6, 800e6, 8000, 500, 1000, 5e6, 0);
-        v[1] = Vector(500e6, 500e6, 8000, 500, 1000, 5e6, 100e6);
-        v[2] = Vector(0, 1000e6, 8000, 500, 1000, 5e6, -100e6);
-        v[3] = Vector(1000e6, 0, 8000, 500, 1000, 5e6, 100e6);
-        v[4] = Vector(10e6, 90e6, 8000, 500, 1000, 5e6, -10e6);
-        v[5] = Vector(3e6, 7e6, 8000, 500, 1000, 5e6, 0);
-        v[6] = Vector(100e6, 0, 8000, 500, 1000, 5e6, 10e6);
-        v[7] = Vector(50e6, 950e6, 8000, 200, 1000, 5e6, -100e6);
-        v[8] = Vector(300e6, 700e6, 5000, 500, 1000, 5e6, -100e6);
-        v[9] = Vector(123_456_789, 876_543_211, 8000, 500, 1000, 5e6, -76_543_211);
-        v[10] = Vector(0, 0, 8000, 500, 1000, 5e6, 0);
-        v[11] = Vector(1_000_000e6, 0, 8000, 500, 10_000, 5e6, 800_000e6);
-        v[12] = Vector(40e6, 60e6, 9500, 500, 1000, 5e6, 10e6);
-        v[13] = Vector(95e6, 5e6, 500, 500, 1000, 5e6, 0);
+        v[0] = Vector(200e6, 800e6, 8000, 500, 1000, 20e6, 0);
+        v[1] = Vector(500e6, 500e6, 8000, 500, 1000, 20e6, 100e6);
+        v[2] = Vector(0, 1000e6, 8000, 500, 1000, 20e6, -100e6);
+        v[3] = Vector(1000e6, 0, 8000, 500, 1000, 20e6, 100e6);
+        v[4] = Vector(100e6, 900e6, 8000, 500, 1000, 20e6, -100e6);
+        v[5] = Vector(3e6, 7e6, 8000, 500, 1000, 20e6, 0);
+        v[6] = Vector(100e6, 0, 8000, 500, 1000, 20e6, 20e6);
+        v[7] = Vector(50e6, 950e6, 8000, 200, 1000, 20e6, -100e6);
+        v[8] = Vector(300e6, 700e6, 5000, 500, 1000, 20e6, -100e6);
+        v[9] = Vector(123_456_789, 876_543_211, 8000, 500, 1000, 20e6, -76_543_211);
+        v[10] = Vector(0, 0, 8000, 500, 1000, 20e6, 0);
+        v[11] = Vector(1_000_000e6, 0, 8000, 500, 10_000, 20e6, 800_000e6);
+        v[12] = Vector(40e6, 60e6, 9500, 500, 1000, 20e6, 20e6);
+        v[13] = Vector(95e6, 5e6, 500, 500, 1000, 20e6, 0);
         v[14] = Vector(260e6, 740e6, 8000, 500, 1000, 100e6, 0);
     }
 
@@ -1142,8 +1632,8 @@ contract RebalancerTest is RebalancerTestBase {
             active: true,
             targetBps: uint16(bound(targetSteps, 5, 95)) * 100,
             bandBps: uint16(bound(band, 1, 9999)),
-            maxCorrectionBps: uint16(bound(cap, 1, 10_000)),
-            minTradeEurc: uint64(bound(minTrade, 1, 1e9)),
+            maxCorrectionBps: uint16(bound(cap, 10, 10_000)),
+            minTradeEurc: uint64(bound(minTrade, 20e6, 1e9)),
             interval: 1 days,
             maxSlippageBps: 100
         });
@@ -1195,8 +1685,10 @@ contract RebalancerTest is RebalancerTestBase {
         } else {
             uint256 btcIn = btc - cbbtc.balanceOf(alice);
             uint256 valueIn = Math.mulDiv(btcIn, PRICE, 1e8);
-            assertLe(valueIn, capEurc, "verkoopwaarde boven cap");
-            assertLe(valueIn, absDelta, "verkoopwaarde boven correctie");
+            // wantBtc wordt naar boven afgerond (M-5): hooguit 1 sat aan waarde boven cap/correctie.
+            uint256 oneSat = PRICE / 1e8;
+            assertLe(valueIn, capEurc + oneSat, "verkoopwaarde boven cap");
+            assertLe(valueIn, absDelta + oneSat, "verkoopwaarde boven correctie");
             assertLe(btcIn, Math.min(btc, allowanceBtc), "btcIn boven saldo/allowance");
             assertGe(valueIn, p.minTradeEurc, "verkoopwaarde onder minTrade");
             uint256 fee = Math.mulDiv(valueIn, 25, BPS);
@@ -1225,8 +1717,8 @@ contract RebalancerTest is RebalancerTestBase {
             interval: interval,
             maxSlippageBps: slip
         });
-        bool valid = target >= 500 && target <= 9500 && target % 100 == 0 && band >= 1 && band <= 9999 && cap >= 1
-            && cap <= 10_000 && minTrade > 0 && interval >= 1 hours && slip >= 30 && slip <= 100;
+        bool valid = target >= 500 && target <= 9500 && target % 100 == 0 && band >= 1 && band <= 9999 && cap >= 10
+            && cap <= 10_000 && minTrade >= 20e6 && interval >= 1 hours && slip >= 60 && slip <= 100;
         if (!valid) vm.expectRevert(Rebalancer.InvalidParams.selector);
         vm.prank(alice);
         r.setParams(p);
@@ -1255,6 +1747,14 @@ contract RebalancerHandler is Test {
     bool public contractHeldBalance;
     uint256 public executes;
     uint256 public executesSucceeded;
+    /// @dev Ghost-tellers per revert-reden (testgat math 7): NothingToDo is verwacht, "Too little received" of een
+    ///      spot-afwijking wijst op liveness-uitval.
+    uint256 public revertsNothingToDo;
+    uint256 public revertsInactive;
+    uint256 public revertsNotDue;
+    uint256 public revertsSpot;
+    uint256 public revertsSlippage;
+    uint256 public revertsOther;
 
     constructor(
         Rebalancer r_,
@@ -1305,10 +1805,10 @@ contract RebalancerHandler is Test {
             active: active,
             targetBps: uint16(bound(target, 5, 95)) * 100,
             bandBps: uint16(bound(band, 1, 9999)),
-            maxCorrectionBps: uint16(bound(cap, 1, 10_000)),
-            minTradeEurc: uint64(bound(minTrade, 1, 100e6)),
+            maxCorrectionBps: uint16(bound(cap, 10, 10_000)),
+            minTradeEurc: uint64(bound(minTrade, 20e6, 100e6)),
             interval: 1 hours,
-            maxSlippageBps: uint16(bound(slip, 30, 100))
+            maxSlippageBps: uint16(bound(slip, 60, 100))
         });
         vm.prank(_actor(seed));
         r.setParams(p);
@@ -1345,6 +1845,16 @@ contract RebalancerHandler is Test {
         router.setPrice(price);
     }
 
+    /// @dev Testgat oracle 10: alleen de pools verschuiven (feed blijft staan), tot ±1%, zodat de spot-check ook in
+    ///      de invariant-suite geraakt wordt.
+    function shiftSpot(uint16 bps, bool up) external afterCall {
+        bps = uint16(bound(bps, 0, 100));
+        (, int256 a,,,) = feedBtc.latestRoundData();
+        uint256 price = uint256(a) * 1e6 / 1e8;
+        uint256 shifted = up ? price * (10_000 + bps) / 10_000 : price * (10_000 - bps) / 10_000;
+        poolUsdcCbbtc.setPrice(shifted, 1e8);
+    }
+
     /// @dev Iedereen mag vegen; het contract mag daardoor nooit saldo overhouden en de treasury daalt nooit.
     function sweep(bool eurcToken) external afterCall {
         r.sweep(eurcToken ? eurc : cbbtc);
@@ -1356,7 +1866,15 @@ contract RebalancerHandler is Test {
         executes++;
         try r.execute(owner, rewardTo) {
             executesSucceeded++;
-        } catch {}
+        } catch (bytes memory reason) {
+            bytes4 sel = reason.length >= 4 ? bytes4(reason) : bytes4(0);
+            if (sel == Rebalancer.NothingToDo.selector) revertsNothingToDo++;
+            else if (sel == Rebalancer.Inactive.selector) revertsInactive++;
+            else if (sel == Rebalancer.NotDue.selector) revertsNotDue++;
+            else if (sel == Rebalancer.SpotDeviatesFromOracle.selector) revertsSpot++;
+            else if (sel == bytes4(keccak256("Error(string)"))) revertsSlippage++;
+            else revertsOther++;
+        }
         // Alleen execute mag saldi van actors veranderen: leg het nieuwe saldo vast.
         for (uint256 i = 0; i < actors.length; i++) {
             ghostEurc[actors[i]] = eurc.balanceOf(actors[i]);
@@ -1399,5 +1917,45 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
     function invariant_treasuryMonotonic() public view {
         assertFalse(handler.treasuryDecreased(), "treasury-saldo daalde");
         assertGe(eurc.balanceOf(treasury), handler.lastTreasury());
+    }
+
+    /// @dev Zonder router-slippage en met de spot binnen ±1% mag een execute alleen falen op NothingToDo, Inactive,
+    ///      NotDue of de spot-check; "Too little received" of iets anders zou liveness-uitval zijn.
+    function invariant_executeFailsOnlyForKnownReasons() public view {
+        assertEq(handler.revertsSlippage(), 0, "router-slippage zonder oorzaak");
+        assertEq(handler.revertsOther(), 0, "onbekende revert-reden");
+        assertEq(
+            handler.executes(),
+            handler.executesSucceeded() + handler.revertsNothingToDo() + handler.revertsInactive()
+                + handler.revertsNotDue() + handler.revertsSpot()
+        );
+    }
+}
+
+/// @dev Nep-token voor `sweep`: `balanceOf` roept met msg.sender = Rebalancer diens `setParams` aan.
+contract MaliciousSweepToken {
+    Rebalancer private immutable _r;
+
+    constructor(Rebalancer r_) {
+        _r = r_;
+    }
+
+    function balanceOf(address) external returns (uint256) {
+        _r.setParams(
+            Rebalancer.Params({
+                active: true,
+                targetBps: 8000,
+                bandBps: 500,
+                maxCorrectionBps: 1000,
+                minTradeEurc: 20e6,
+                interval: 1 hours,
+                maxSlippageBps: 100
+            })
+        );
+        return 0;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        return true;
     }
 }

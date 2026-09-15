@@ -14,7 +14,9 @@ contract RebalancerForkTest is Test {
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
     address internal constant FEED_CBBTC_USD = 0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D;
-    address internal constant FEED_EURC_USD = 0xDAe398520e2B67cd3f27aeF9Cf14D93D927f8250;
+    /// @dev EURC/USD met heartbeat 1 uur en deviatie 0,1% (Chainlink-referentiedirectory voor Base); de oude
+    ///      24-uursfeed 0xDAe3…8250 staat daar niet meer in (audit M-2).
+    address internal constant FEED_EURC_USD = 0x9867186e52d2F1C2c565CDA6E747101Fa56501e0;
     address internal constant SEQUENCER = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
     address internal constant POOL_EURC_USDC = 0x7279c08A36333e12c3Fc81747963264c100D66fB;
     address internal constant POOL_USDC_CBBTC = 0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef;
@@ -97,6 +99,44 @@ contract RebalancerForkTest is Test {
         assertEq(list[0], buyer);
     }
 
+    /// @notice Testgat oracle 3: beide feeds zijn on-chain 8 decimalen, dragen de verwachte beschrijving en zijn
+    ///         verser dan MAX_AGE_*; de sequencer-feed heeft een geïnitialiseerde ronde.
+    function test_fork_feedsAreFreshAndMatchConstants() public view {
+        IAggregatorV3 eurcFeed = IAggregatorV3(FEED_EURC_USD);
+        IAggregatorV3 btcFeed = IAggregatorV3(FEED_CBBTC_USD);
+        assertEq(eurcFeed.decimals(), 8);
+        assertEq(btcFeed.decimals(), 8);
+        assertEq(keccak256(bytes(eurcFeed.description())), keccak256("EURC / USD"));
+        assertEq(keccak256(bytes(btcFeed.description())), keccak256("cbBTC / USD"));
+
+        (, int256 eurcAnswer,, uint256 eurcUpdatedAt,) = eurcFeed.latestRoundData();
+        (, int256 btcAnswer,, uint256 btcUpdatedAt,) = btcFeed.latestRoundData();
+        assertGt(eurcAnswer, 0);
+        assertGt(btcAnswer, 0);
+        assertLe(block.timestamp - eurcUpdatedAt, 3600, "EURC-feed ouder dan zijn heartbeat van 1 uur");
+        assertLe(block.timestamp - eurcUpdatedAt, r.MAX_AGE_EURC());
+        assertLe(block.timestamp - btcUpdatedAt, r.MAX_AGE_CBBTC());
+        // EURC/USD hoort rond 1,0–1,3 te liggen (8 decimalen).
+        assertGt(eurcAnswer, 0.9e8);
+        assertLt(eurcAnswer, 1.5e8);
+
+        (, int256 seqAnswer, uint256 seqStartedAt,,) = IAggregatorV3(SEQUENCER).latestRoundData();
+        assertEq(seqAnswer, 0);
+        assertGt(seqStartedAt, 0);
+    }
+
+    /// @notice M-1: de spot na de swap ligt binnen de tolerantie; een run van 100 EURC/0,002 cbBTC haalt de
+    ///         post-swap-check ruim en boekt niets extra's.
+    function test_fork_postSwapSpotWithinTolerance() public {
+        _fund(buyer, 1000e6, 0);
+        r.execute(buyer, keeper);
+        uint256 oracle = r.quote();
+        uint256 spotAfter = r.spot();
+        uint256 diff = spotAfter > oracle ? spotAfter - oracle : oracle - spotAfter;
+        assertLe(diff * 10_000, oracle * 50, "spot na de swap buiten 0,5%");
+        assertEq(r.quoteChecked(), oracle);
+    }
+
     /// @notice Bevestigt dat de gasconstanten van `onReport` ruim genoeg zijn voor een echte koop en verkoop.
     function test_fork_onReportRunsBuyAndSellWithinGasBudget() public {
         _fund(buyer, 1000e6, 0);
@@ -123,7 +163,7 @@ contract RebalancerForkTest is Test {
             targetBps: 8000,
             bandBps: 500,
             maxCorrectionBps: 1000,
-            minTradeEurc: 5e6,
+            minTradeEurc: 20e6,
             interval: 1 days,
             maxSlippageBps: 100
         });

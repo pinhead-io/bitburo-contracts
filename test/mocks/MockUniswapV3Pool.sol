@@ -21,6 +21,11 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
         sqrtPriceX96 = uint160(Math.sqrt(Math.mulDiv(token1Amount, 1 << 192, token0Amount)));
     }
 
+    /// @notice Zet sqrtPriceX96 rechtstreeks (voor randgevallen als MIN/MAX_SQRT_RATIO).
+    function setSqrtPriceX96(uint160 value) external {
+        sqrtPriceX96 = value;
+    }
+
     function slot0() external view returns (uint160, int24, uint16, uint16, uint16, uint8, bool) {
         return (sqrtPriceX96, 0, 0, 0, 0, 0, true);
     }

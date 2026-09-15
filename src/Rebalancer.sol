@@ -27,14 +27,20 @@ import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
  *      wanneer, nooit wat of hoeveel. De fee is vast en gaat altijd in EURC naar de treasury, met een vaste
  *      beloning voor de aanroeper.
  *
- *      Sandwich-bescherming: vóór elke swap wordt de spotkoers van de twee Uniswap-pools (EURC/USDC en
- *      USDC/cbBTC, via slot0) vergeleken met de Chainlink-koers. Wijkt de spot meer dan MAX_SPOT_DEVIATION_BPS
- *      af, dan revert de run. Dat begrenst wat een aanroeper door de pool te verplaatsen kan onttrekken tot
- *      ongeveer 0,5% van het run-bedrag, plus de slippage die de gebruiker zelf toestaat (maxSlippageBps,
- *      minimaal 0,3%, maximaal 1%). Het maakt een run niet gratis te manipuleren, maar ook niet onmogelijk:
- *      wie de pool binnen die 0,5% verschuift, verdient dat deel. De EURC/USDC-pool is dun; runs boven ongeveer
- *      10.000 EURC per keer zijn onverstandig zolang de route Uniswap v3 is, omdat de eigen prijsimpact dan al
- *      in de buurt van de toegestane afwijking komt.
+ *      Sandwich-bescherming: vóór én na elke swap wordt de spotkoers van de twee Uniswap-pools (EURC/USDC en
+ *      USDC/cbBTC, via slot0) vergeleken met de Chainlink-koers. Wijkt de spot op een van beide momenten meer
+ *      dan MAX_SPOT_DEVIATION_BPS af, dan revert de run. De check vooraf begrenst hoe ver een aanroeper de pool
+ *      kan voorschuiven; de check achteraf dwingt af dat voorschuiving plus de eigen prijsimpact van de run
+ *      samen binnen die 0,5% blijven, wat de winstruimte van een atomaire zelf-sandwich grotendeels sluit.
+ *      Het maximale verlies per run ten opzichte van de Chainlink-koers is FEE_BPS + maxSlippageBps
+ *      (0,85% tot 1,25%); de spot-check is daar geen extra bovengrens op. De EURC/USDC-pool is dun;
+ *      runs boven ongeveer 8.000 EURC per keer reverten vaker zolang de route Uniswap v3 is, omdat de eigen
+ *      prijsimpact dan zelf al richting de toegestane afwijking gaat.
+ *
+ *      Beschikbaarheid: de fee-transfer naar de treasury en de beloning worden met een niet-reverterende
+ *      transfer gedaan. Faalt de treasury-transfer (bijvoorbeeld een Circle-blacklist), dan blijft de fee in
+ *      het contract (FeeRetained) en kan `sweep` die later alsnog ophalen; de rebalance zelf loopt nooit stuk
+ *      op de fee-ontvanger.
  */
 contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
@@ -64,18 +70,36 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     uint16 public constant FEE_BPS = 25;
     uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0,05 EURC
     uint16 public constant MAX_SLIPPAGE_BPS = 100;
-    uint16 public constant MIN_SLIPPAGE_BPS = 30;
+    /// @notice Ondergrens voor `maxSlippageBps`: MAX_SPOT_DEVIATION_BPS + 2 × 5 bps poolfee. `amountOutMinimum`
+    ///         wordt van de oracle afgeleid, terwijl de swap tegen de pool-spot loopt; die mag 0,5% afwijken en
+    ///         kost 0,1% aan poolfees. Onder 60 bps zou een run die de spot-check haalt structureel op
+    ///         "Too little received" kunnen reverten.
+    uint16 public constant MIN_SLIPPAGE_BPS = 60;
     uint16 public constant MAX_SPOT_DEVIATION_BPS = 50;
-    /// @notice Gas dat `onReport` aan één `execute` meegeeft; gemeten op de fork (zie README) met ruime marge.
-    uint256 public constant EXECUTE_GAS = 700_000;
-    /// @notice Onder dit restgas stopt `onReport` met de rest van het rapport in plaats van te reverten.
-    uint256 public constant EXECUTE_GAS_RESERVE = 750_000;
+    /// @notice Ondergrens voor `minTradeEurc` (20 EURC). Bij FEE_BPS = 25 is de fee van de kleinste run dan
+    ///         precies KEEPER_REWARD_EURC, zodat elke run de volledige keeperbeloning dekt en dust-owners geen
+    ///         CRE-slots meer kunnen bezetten voor 0 fee. Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
+    ///         sats bij 80.000 EURC/cbBTC, waardoor de afronding in `amountOutMinimum` onder 1 bp blijft.
+    uint64 public constant MIN_TRADE_FLOOR = 20e6;
+    /// @notice Ondergrens voor `maxCorrectionBps` (0,1% per run): sluit configuraties uit die elk interval een
+    ///         verwaarloosbare correctie doen en daarmee eeuwig due blijven.
+    uint16 public constant MIN_CORRECTION_BPS = 10;
+    /// @notice Gas dat `onReport` aan één `execute` meegeeft. Fork-meting (audit 2026-09-15): een run van
+    ///         ~10.000 EURC kost ~550–590k gas en ~19.000 EURC ging bij 700k out-of-gas; 1.000.000 dekt runs tot
+    ///         ruim boven de praktische grens van de dunne EURC/USDC-pool.
+    uint256 public constant EXECUTE_GAS = 1_000_000;
+    /// @notice Onder dit restgas stopt `onReport` met de rest van het rapport in plaats van te reverten
+    ///         (63/64 × 1.050.000 > EXECUTE_GAS, dus een gestarte run krijgt altijd het volle budget).
+    uint256 public constant EXECUTE_GAS_RESERVE = 1_050_000;
     uint16 public constant MIN_TARGET_BPS = 500;
     uint16 public constant MAX_TARGET_BPS = 9500;
     uint32 public constant MIN_INTERVAL = 1 hours;
     uint256 public constant GRACE_PERIOD = 1 hours;
+    /// @notice Beide feeds moeten dit aantal decimalen hebben; de omrekening in `_quote` deelt ze op elkaar.
+    uint8 public constant FEED_DECIMALS = 8;
     uint256 public constant MAX_AGE_CBBTC = 1200 + 300; // heartbeat 20 min + marge
-    uint256 public constant MAX_AGE_EURC = 86_400 + 3600; // heartbeat 24 u + marge
+    /// @notice EURC/USD-feed 0x9867…01e0 op Base: heartbeat 1 uur, deviatie 0,1%; zelfde 25% marge als cbBTC.
+    uint256 public constant MAX_AGE_EURC = 3600 + 900;
     uint256 public constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
     uint256 private constant EURC_UNIT = 1e6;
@@ -88,14 +112,17 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         bool active;
         uint16 targetBps; // cbBTC-aandeel, 500–9500, veelvoud van 100
         uint16 bandBps; // > 0
-        uint16 maxCorrectionBps; // 1–10000, aandeel van de totale waarde per run
-        uint64 minTradeEurc; // EURC-basiseenheden
+        uint16 maxCorrectionBps; // MIN_CORRECTION_BPS–10000, aandeel van de totale waarde per run
+        uint64 minTradeEurc; // EURC-basiseenheden, >= MIN_TRADE_FLOOR
         uint32 interval; // minimale tijd tussen runs, >= MIN_INTERVAL
         uint16 maxSlippageBps; // MIN_SLIPPAGE_BPS–MAX_SLIPPAGE_BPS
     }
 
     mapping(address owner => Params) public params;
     mapping(address owner => uint64) public lastExecutedAt;
+    /// @notice Tijdstip van de laatste mislukte poging via `onReport`. `dueOwners` slaat een owner over zolang
+    ///         die poging korter dan zijn `interval` geleden is; `isDue` en `execute` kijken er niet naar.
+    mapping(address owner => uint64) public lastAttemptAt;
     address[] private _owners;
     mapping(address owner => bool) private _isRegistered;
 
@@ -115,6 +142,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         uint256 fractionBps
     );
     event ReportSkipped(address indexed owner, bytes reason);
+    /// @notice `execute` binnen `onReport` revertte zonder reden: vrijwel zeker out-of-gas binnen EXECUTE_GAS.
+    event ReportOutOfGas(address indexed owner);
+    /// @notice De fee-transfer naar de treasury faalde; `amount` EURC blijft in het contract en is sweep-baar.
+    event FeeRetained(uint256 amount);
 
     error InvalidParams();
     error Inactive();
@@ -129,6 +160,8 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     error NotAContract(address account);
     error UnexpectedPoolTokens(address pool);
     error SpotDeviatesFromOracle(uint256 spot, uint256 oracle);
+    error UnexpectedFeedDecimals(address feed);
+    error NoOutput();
 
     // ─── Constructor ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -175,6 +208,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
 
         _eurcIsToken0 = _poolOrder(POOL_EURC_USDC, d.eurc, d.usdc);
         _usdcIsToken0 = _poolOrder(POOL_USDC_CBBTC, d.usdc, d.cbbtc);
+
+        // `_quote` deelt de twee feeds op elkaar; dat klopt alleen als beide dezelfde decimalen hebben.
+        if (FEED_CBBTC_USD.decimals() != FEED_DECIMALS) revert UnexpectedFeedDecimals(d.feedCbbtcUsd);
+        if (FEED_EURC_USD.decimals() != FEED_DECIMALS) revert UnexpectedFeedDecimals(d.feedEurcUsd);
     }
 
     function _requireContract(address account) private view {
@@ -194,11 +231,12 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     // ─── Gebruiker ──────────────────────────────────────────────────────────────────────────────────────────
 
     /// @notice Zet of wijzigt de eigen instellingen. Alleen msg.sender kan zijn eigen instellingen wijzigen.
+    /// @dev Economische ondergrenzen: `minTradeEurc >= MIN_TRADE_FLOOR` en `maxCorrectionBps >= MIN_CORRECTION_BPS`.
     function setParams(Params calldata p) external {
         if (
             p.targetBps < MIN_TARGET_BPS || p.targetBps > MAX_TARGET_BPS || p.targetBps % 100 != 0 || p.bandBps == 0
-                || p.bandBps >= BPS || p.maxCorrectionBps == 0 || p.maxCorrectionBps > BPS || p.minTradeEurc == 0
-                || p.interval < MIN_INTERVAL || p.maxSlippageBps < MIN_SLIPPAGE_BPS
+                || p.bandBps >= BPS || p.maxCorrectionBps < MIN_CORRECTION_BPS || p.maxCorrectionBps > BPS
+                || p.minTradeEurc < MIN_TRADE_FLOOR || p.interval < MIN_INTERVAL || p.maxSlippageBps < MIN_SLIPPAGE_BPS
                 || p.maxSlippageBps > MAX_SLIPPAGE_BPS
         ) {
             revert InvalidParams();
@@ -245,6 +283,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     }
 
     /// @notice Pagina uit de owner-lijst, gefilterd op wie nu due is (zelfde regels als `isDue`). Revert nooit.
+    /// @dev Bovenop `isDue`: een owner met een mislukte `onReport`-poging korter dan zijn `interval` geleden
+    ///      (`lastAttemptAt`) wordt overgeslagen. Een mislukte poging telt voor de wekker dus als een run, zodat een
+    ///      structureel revertende owner (blacklist, te krappe slippage, out-of-gas) niet elk rapport opnieuw
+    ///      een slot en EXECUTE_GAS kost. Handmatig of via het keeper-script blijft `execute` gewoon mogelijk.
     function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory due) {
         uint256 total = _owners.length;
         if (offset >= total) {
@@ -260,7 +302,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         for (uint256 i = offset; i < end; i++) {
             address owner = _owners[i];
             Params memory p = params[owner];
-            if (!p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) {
+            if (
+                !p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval
+                    || block.timestamp < uint256(lastAttemptAt[owner]) + p.interval
+            ) {
                 continue;
             }
             (bool isDueNow,) = _dueAt(owner, p, price);
@@ -295,8 +340,7 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         if (rewardTo == address(this)) rewardTo = address(0);
 
         uint256 price = _quoteChecked();
-        (bool isBuy, uint256 amountIn, uint256 correctionEurc, uint256 total, uint256 fractionBps) =
-            _plan(owner, p, price);
+        (bool isBuy, uint256 amountIn,, uint256 total, uint256 fractionBps) = _plan(owner, p, price);
         if (amountIn == 0) revert NothingToDo();
 
         // Vanaf hier wordt de run geboekt, ook al zou de swap nog reverten (dan revert alles).
@@ -312,13 +356,14 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         }
 
         emit Executed(owner, isBuy, amountIn, fee, reward, rewardTo, amountOut, price, total, fractionBps);
-        correctionEurc; // alleen voor isDue relevant
     }
 
     /// @notice Ingang voor Chainlink CRE: `report` = abi.encode(address[] owners). Per owner try/catch.
     /// @dev Elke owner krijgt precies EXECUTE_GAS; is er minder dan EXECUTE_GAS_RESERVE over, dan stopt de lus
     ///      en blijven de overige owners voor een volgend rapport. De hele call revert dus nooit op gasgebrek
-    ///      van één owner.
+    ///      van één owner. Een mislukte poging zet `lastAttemptAt[owner]`, waarna `dueOwners` die owner een
+    ///      `interval` lang overslaat. Een lege revert-reden is vrijwel zeker out-of-gas binnen EXECUTE_GAS en
+    ///      wordt apart gemeld met `ReportOutOfGas`.
     function onReport(bytes calldata metadata, bytes calldata report) external override {
         if (msg.sender != FORWARDER) revert UnauthorizedForwarder(msg.sender);
         (,, address workflowOwner) = _decodeMetadata(metadata);
@@ -327,15 +372,19 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         address[] memory list = abi.decode(report, (address[]));
         for (uint256 i = 0; i < list.length; i++) {
             if (gasleft() < EXECUTE_GAS_RESERVE) break;
-            try this.execute{gas: EXECUTE_GAS}(list[i], TREASURY) {}
+            address owner = list[i];
+            try this.execute{gas: EXECUTE_GAS}(owner, TREASURY) {}
             catch (bytes memory reason) {
-                emit ReportSkipped(list[i], reason);
+                lastAttemptAt[owner] = uint64(block.timestamp);
+                emit ReportSkipped(owner, reason);
+                if (reason.length == 0) emit ReportOutOfGas(owner);
             }
         }
     }
 
     /// @notice Stuurt het volledige saldo van `token` in dit contract naar de treasury. Iedereen mag dit
-    ///         aanroepen; het contract hoort buiten een transactie nooit saldo te hebben.
+    ///         aanroepen; het contract hoort buiten een transactie geen saldo te hebben, behalve fee die door een
+    ///         mislukte treasury-transfer is achtergebleven (`FeeRetained`).
     function sweep(IERC20 token) external nonReentrant {
         uint256 balance = token.balanceOf(address(this));
         if (balance > 0) token.safeTransfer(TREASURY, balance);
@@ -350,7 +399,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     /// @return price EURC-basiseenheden (6 dec) per 1 cbBTC.
     function _quote() internal view returns (uint256 price) {
         (, int256 seqAnswer, uint256 seqStartedAt,,) = SEQUENCER_FEED.latestRoundData();
-        if (seqAnswer != 0 || block.timestamp - seqStartedAt < GRACE_PERIOD) revert SequencerDown();
+        // startedAt == 0 is een niet-geïnitialiseerde ronde van de uptime-feed en telt als "onbekend", niet als up.
+        if (seqAnswer != 0 || seqStartedAt == 0 || block.timestamp - seqStartedAt < GRACE_PERIOD) {
+            revert SequencerDown();
+        }
 
         uint256 cbbtcUsd = _readFeed(FEED_CBBTC_USD, MAX_AGE_CBBTC);
         uint256 eurcUsd = _readFeed(FEED_EURC_USD, MAX_AGE_EURC);
@@ -361,6 +413,13 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     /// @dev Oracle-koers, geweigerd als de pool-spot er meer dan MAX_SPOT_DEVIATION_BPS van afwijkt.
     function _quoteChecked() internal view returns (uint256 price) {
         price = _quote();
+        _requireSpotNear(price);
+    }
+
+    /// @dev Revert als de huidige pool-spot meer dan MAX_SPOT_DEVIATION_BPS van `price` afwijkt. Wordt vóór de
+    ///      swap (via `_quoteChecked`) én na de swap aangeroepen, zodat voorschuiving en eigen prijsimpact samen
+    ///      binnen de tolerantie moeten blijven.
+    function _requireSpotNear(uint256 price) internal view {
         uint256 spotPrice = _spot();
         uint256 diff = spotPrice > price ? spotPrice - price : price - spotPrice;
         if (diff * BPS > price * MAX_SPOT_DEVIATION_BPS) revert SpotDeviatesFromOracle(spotPrice, price);
@@ -464,7 +523,9 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
             amountIn = Math.min(correctionEurc, Math.min(cash, EURC.allowance(owner, address(this))));
             if (amountIn < p.minTradeEurc) amountIn = 0;
         } else {
-            uint256 wantBtc = Math.mulDiv(correctionEurc, CBBTC_UNIT, price);
+            // Naar boven afgerond: anders is de teruggerekende waarde van een correctie die exact op de
+            // minTrade-vloer zit tot bijna 1 sat te klein en zou een kleine wallet nooit kunnen verkopen.
+            uint256 wantBtc = Math.mulDiv(correctionEurc, CBBTC_UNIT, price, Math.Rounding.Ceil);
             amountIn = Math.min(wantBtc, Math.min(btcBal, CBBTC.allowance(owner, address(this))));
             if (Math.mulDiv(amountIn, price, CBBTC_UNIT) < p.minTradeEurc) amountIn = 0;
         }
@@ -472,6 +533,9 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
 
     // ─── Intern: swaps ──────────────────────────────────────────────────────────────────────────────────────
 
+    /// @dev Koop: fee over het bruto bedrag, rest de pool in, output rechtstreeks naar de owner. Revert met
+    ///      `NoOutput` als de router 0 cbBTC oplevert, en met `SpotDeviatesFromOracle` als de spot na de swap te
+    ///      ver van de oracle ligt.
     function _buy(address owner, Params memory p, uint256 amountIn, uint256 price, address rewardTo)
         internal
         returns (uint256 fee, uint256 reward, uint256 amountOut)
@@ -492,8 +556,12 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
                 amountOutMinimum: minOut
             })
         );
+        if (amountOut == 0) revert NoOutput();
+        _requireSpotNear(price);
     }
 
+    /// @dev Verkoop: output naar het contract, fee over het werkelijk ontvangen bedrag, rest naar de owner.
+    ///      Revert met `SpotDeviatesFromOracle` als de spot na de swap te ver van de oracle ligt.
     function _sell(address owner, Params memory p, uint256 amountIn, uint256 price, address rewardTo)
         internal
         returns (uint256 fee, uint256 reward, uint256 amountOut)
@@ -514,20 +582,28 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
             })
         );
         uint256 received = EURC.balanceOf(address(this)) - eurcBefore;
+        _requireSpotNear(price);
 
         (fee, reward) = _takeFee(received, rewardTo);
         amountOut = received - fee;
         EURC.safeTransfer(owner, amountOut);
     }
 
-    /// @dev Fee in EURC over `eurcAmount`; beloning eruit naar rewardTo, rest naar de treasury.
+    /// @dev Fee in EURC over `eurcAmount`; beloning eruit naar rewardTo, rest naar de treasury. Beide transfers
+    ///      zijn niet-reverterend (`trySafeTransfer`), zodat de run nooit stukloopt op de ontvanger van de fee:
+    ///      - faalt de beloning (bijv. geblacklist rewardTo), dan is `reward` 0 en gaat de hele fee naar de
+    ///        treasury;
+    ///      - faalt de treasury-transfer, dan blijft dat deel in het contract (`FeeRetained`) en haalt `sweep`
+    ///        het later op.
+    ///      De fee wordt in beide gevallen volledig bij de owner ingehouden; `reward + treasury + retained == fee`.
     function _takeFee(uint256 eurcAmount, address rewardTo) internal returns (uint256 fee, uint256 reward) {
         fee = Math.mulDiv(eurcAmount, FEE_BPS, BPS);
         if (rewardTo != address(0)) {
             reward = Math.min(KEEPER_REWARD_EURC, fee);
-            if (reward > 0) EURC.safeTransfer(rewardTo, reward);
+            if (reward > 0 && !EURC.trySafeTransfer(rewardTo, reward)) reward = 0;
         }
-        if (fee - reward > 0) EURC.safeTransfer(TREASURY, fee - reward);
+        uint256 toTreasury = fee - reward;
+        if (toTreasury > 0 && !EURC.trySafeTransfer(TREASURY, toTreasury)) emit FeeRetained(toTreasury);
     }
 
     // ─── Intern: CRE-metadata ───────────────────────────────────────────────────────────────────────────────

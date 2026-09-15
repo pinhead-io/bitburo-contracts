@@ -5,6 +5,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IV3SwapRouter} from "../../src/interfaces/IV3SwapRouter.sol";
 import {MockERC20} from "./MockERC20.sol";
+import {MockUniswapV3Pool} from "./MockUniswapV3Pool.sol";
 
 /// @notice Uniswap SwapRouter02-nabootsing: accepteert alleen het 2-hop-pad via USDC met 0,05% per hop,
 ///         rekent output op een instelbare koers (EURC-basiseenheden per cbBTC) minus instelbare slippage.
@@ -18,6 +19,12 @@ contract MockRouter is IV3SwapRouter {
     uint256 public price;
     uint256 public slippageBps;
     uint256 public gasBurn;
+    /// @dev > 0: verbruik in elke swap al het gas op `gasKeep` na (om "run op vol budget" te testen).
+    uint256 public gasKeep;
+    /// @dev Optioneel: pool die ná elke swap op een nieuwe prijs wordt gezet (prijsimpact / sandwich nabootsen).
+    MockUniswapV3Pool public shiftPool;
+    uint256 public shiftToken0Amount;
+    uint256 public shiftToken1Amount;
     uint256 public calls;
     bytes public lastPath;
     address public lastRecipient;
@@ -44,8 +51,21 @@ contract MockRouter is IV3SwapRouter {
         gasBurn = gas;
     }
 
+    /// @notice Laat elke swap daarna `pool` op `token0Amount : token1Amount` zetten. Pool address(0) = uit.
+    /// @notice Laat elke swap gas verbruiken tot er nog `keep` over is in het router-frame; 0 = uit.
+    function setGasKeep(uint256 keep) external {
+        gasKeep = keep;
+    }
+
+    function setPoolShift(MockUniswapV3Pool pool, uint256 token0Amount, uint256 token1Amount) external {
+        shiftPool = pool;
+        shiftToken0Amount = token0Amount;
+        shiftToken1Amount = token1Amount;
+    }
+
     function exactInput(ExactInputParams calldata p) external payable override returns (uint256 amountOut) {
         uint256 stopAt = gasleft() > gasBurn ? gasleft() - gasBurn : 0;
+        if (gasKeep > 0) stopAt = gasKeep;
         while (gasleft() > stopAt) {}
         require(p.path.length == 66, "MockRouter: path length");
         address tokenIn = address(bytes20(p.path[0:20]));
@@ -73,5 +93,6 @@ contract MockRouter is IV3SwapRouter {
         lastRecipient = p.recipient;
         lastAmountIn = p.amountIn;
         lastAmountOutMinimum = p.amountOutMinimum;
+        if (address(shiftPool) != address(0)) shiftPool.setPrice(shiftToken0Amount, shiftToken1Amount);
     }
 }
