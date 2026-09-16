@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Rebalancer} from "src/Rebalancer.sol";
 
 interface ISwapRouter02 {
@@ -222,6 +223,39 @@ contract OracleSandwichTest is Test {
         console.log("run 1k: geslaagd:", ok);
         console.logInt(pnl);
         console.log("run 1k: verlies slachtoffer cbBTC:", fairBtc - btc);
+    }
+
+    /// @dev Testgat execute 4 (EX-03): op de echte route, met de EURC/USDC-pool vooraf voorgeschoven tot binnen de
+    ///      spot-check, krijgt de owner voor elke run die slaagt minstens de oraclewaarde minus FEE_BPS +
+    ///      maxSlippageBps. Runs die de post-swap-check niet halen tellen niet; minstens één geduwde run moet slagen.
+    function test_fork_lossPerRunBoundedUnderSpotPush() public {
+        uint256 oracle = r.quote();
+        uint256 maxPush = _maxPushWithinDeviation();
+        uint16[2] memory slippages = [uint16(60), uint16(100)];
+        uint256 pushedRunsSucceeded;
+        for (uint256 s = 0; s < slippages.length; s++) {
+            for (uint256 f = 0; f <= 4; f++) {
+                uint256 push = maxPush * f / 4;
+                uint256 snap = vm.snapshotState();
+                _fundVictim(1_250e6, slippages[s]); // koop van 1.000 EURC
+                if (push > 0) {
+                    deal(address(EURC), address(atk), push);
+                    atk.pushOnly(push);
+                }
+                (bool ok,) = address(r).call(abi.encodeCall(r.execute, (victim, address(this))));
+                if (ok) {
+                    uint256 fairSats = Math.mulDiv(1_000e6, 1e8, oracle);
+                    uint256 worstSats = Math.mulDiv(fairSats, 10_000 - r.FEE_BPS() - slippages[s], 10_000);
+                    uint256 received = CBBTC.balanceOf(victim);
+                    console.log("slippage:", slippages[s], " push:", push);
+                    console.log("  ontvangen sats:", received, " ondergrens:", worstSats);
+                    assertGe(received + 1, worstSats, "verlies boven fee + maxSlippage");
+                    if (push > 0) pushedRunsSucceeded++;
+                }
+                vm.revertToState(snap);
+            }
+        }
+        assertGt(pushedRunsSucceeded, 0, "geen enkele geduwde run geslaagd: de test bewijst dan niets");
     }
 
     /// @dev DoS: een push > 50 bps laat isDue/dueOwners leeg en execute reverten; wat kost dat de aanvaller?
