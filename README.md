@@ -151,7 +151,20 @@ RUN_FORK=false ~/.foundry/bin/forge test              # zonder fork
 ~/.foundry/bin/forge test --no-match-path "test/RebalancerFork.t.sol"   # idem, zonder RPC-aanroep
 ```
 
-`test/BlockWindow.t.sol` (unit) en `test/BlockWindowFork.t.sol` (fork) testen de blokcheck, het blokvenster, de runomvang en de delen uit audit M-1; `test/BlockWindowReviewFork.t.sol` zet de PoC's en scenario's uit de review van PR #18 om in asserts. `test/OracleLagSandwich.t.sol` stond als meting in `audit/2026-09-16/poc/` en is nu een test met asserts, net als de sandwich-PoC's in `test/OracleSandwich.t.sol`. `test/AuditMath.t.sol`, `test/CrePoC.t.sol`, `test/PocFork.t.sol` en `test/OracleSandwich.t.sol` komen uit de interne audit van 15 september 2026; `audit/2026-09-15/poc/README.md` zegt per bestand wat ervan is overgenomen en wat is omgeschreven van bewijs-van-lek naar bewijs-van-fix. Let op bij tijdreeksen onder `via_ir`: Solidity cachet `block.timestamp` binnen een testfunctie, gebruik na `vm.warp` dus `vm.getBlockTimestamp()`.
+| Testbestand | Contracten | Wat |
+|---|---|---|
+| `test/Rebalancer.t.sol` | `RebalancerTest`, `RebalancerInvariantTest`, `RebalancerInvariantTestNoRetire` (basis `RebalancerTestBase`) | Unit- en fuzztests met mocks (params, rekenregel, fee, sweep, retire, constructor) en de invariants. |
+| `test/BlockWindow.t.sol` | `BlockWindowTest` | Unit: blokcheck, blokvenster, runomvang en delen uit audit M-1. |
+| `test/BlockWindowFork.t.sol` | `BlockWindowForkTest`, `BlockWindowAttackForkTest`, `BlockWindowChunksForkTest`, `BlockWindowLpForkTest` | Fork: aanvalsrasters, twee owners in één blok, eerlijke correctie in delen, LP-aanvaller. |
+| `test/BlockWindowReviewFork.t.sol` | `BlockWindowReviewForkTest` | Fork: de PoC's en scenario's uit de review van PR #18 als asserts. |
+| `test/OracleSandwich.t.sol` | `OracleSandwichTest` (basis `OracleSandwichBase`) | Fork: sandwich-PoC's uit de audit van 15 september 2026, omgeschreven naar bewijs van de fix, en `test_poc_dosBySpotPush`. |
+| `test/OracleLagSandwich.t.sol` | `OracleLagSandwichTest` (basis `OracleSandwichBase`) | Fork: sandwich per rungrootte, met cbBTC/USD 0,3% te hoog; stond als meting in `audit/2026-09-16/poc/`. |
+| `test/RebalancerFork.t.sol` | `RebalancerForkTest` | Fork: koop en verkoop tegen de echte pools en feeds, gasgrens van `execute`, spotcheck. |
+| `test/PocFork.t.sol` | `PocFork` | Fork: PoC's uit de audit van 15 september 2026. |
+| `test/AuditMath.t.sol` | `AuditMathTest` | Fuzz-, invariant- en PoC-tests voor de rekenkunde van `_plan`, `_buy`, `_sell` en `_takeFee`, uit de audit van 15 september 2026. |
+| `test/mocks/` | – | Mocks voor tokens, feeds, pool, factory en router. |
+
+`test/AuditMath.t.sol`, `test/PocFork.t.sol` en `test/OracleSandwich.t.sol` komen uit de interne audit van 15 september 2026; `audit/2026-09-15/poc/README.md` zegt per bestand wat ervan is overgenomen en wat is omgeschreven van bewijs-van-lek naar bewijs-van-fix. Het `test/CrePoC.t.sol` dat daar genoemd wordt, is met het CRE-oppervlak verwijderd (v1.1.0, commit `a798bde`). Let op bij tijdreeksen onder `via_ir`: Solidity cachet `block.timestamp` binnen een testfunctie, gebruik na `vm.warp` dus `vm.getBlockTimestamp()`.
 
 Deployen naar Base mainnet:
 
