@@ -16,7 +16,6 @@ contract PocFork is Test {
     address constant POOL_EURC_USDC = 0x7279c08A36333e12c3Fc81747963264c100D66fB;
     address constant POOL_USDC_CBBTC = 0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef;
     address treasury = makeAddr("treasury");
-    address forwarder = makeAddr("forwarder");
     address keeper = makeAddr("keeper");
     Rebalancer r;
 
@@ -25,7 +24,6 @@ contract PocFork is Test {
             vm.skip(true);
         }
         vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
-        vm.etch(forwarder, hex"5f");
         r = new Rebalancer(
             Rebalancer.Deployment({
                 eurc: address(EURC),
@@ -37,9 +35,7 @@ contract PocFork is Test {
                 sequencerFeed: 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433,
                 poolEurcUsdc: POOL_EURC_USDC,
                 poolUsdcCbbtc: POOL_USDC_CBBTC,
-                treasury: treasury,
-                forwarder: forwarder,
-                workflowOwner: makeAddr("wf")
+                treasury: treasury
             })
         );
     }
@@ -151,8 +147,7 @@ contract PocFork is Test {
             bool ok;
             try r.quoteChecked() {
                 ok = true;
-            }
-                catch {}
+            } catch {}
             vm.revertToState(snap);
             if (ok) lo = mid;
             else hi = mid;

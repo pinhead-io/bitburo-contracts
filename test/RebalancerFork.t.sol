@@ -22,8 +22,6 @@ contract RebalancerForkTest is Test {
     address internal constant POOL_USDC_CBBTC = 0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef;
 
     address internal treasury = makeAddr("treasury");
-    address internal forwarder = makeAddr("forwarder");
-    address internal workflowOwner = makeAddr("workflowOwner");
     address internal keeper = makeAddr("keeper");
     address internal buyer = makeAddr("buyer");
     address internal seller = makeAddr("seller");
@@ -36,7 +34,6 @@ contract RebalancerForkTest is Test {
             return;
         }
         vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
-        vm.etch(forwarder, hex"5f");
 
         r = new Rebalancer(
             Rebalancer.Deployment({
@@ -49,9 +46,7 @@ contract RebalancerForkTest is Test {
                 sequencerFeed: SEQUENCER,
                 poolEurcUsdc: POOL_EURC_USDC,
                 poolUsdcCbbtc: POOL_USDC_CBBTC,
-                treasury: treasury,
-                forwarder: forwarder,
-                workflowOwner: workflowOwner
+                treasury: treasury
             })
         );
     }
@@ -137,24 +132,28 @@ contract RebalancerForkTest is Test {
         assertEq(r.quoteChecked(), oracle);
     }
 
-    /// @notice Bevestigt dat de gasconstanten van `onReport` ruim genoeg zijn voor een echte koop en verkoop.
-    function test_fork_onReportRunsBuyAndSellWithinGasBudget() public {
+    /// @notice Meet het gas van een echte koop en verkoop, zodat een wekker weet wat hij moet begroten.
+    function test_fork_buyAndSellGasCost() public {
         _fund(buyer, 1000e6, 0);
         _fund(seller, 0, 2_000_000);
-        address[] memory list = new address[](2);
-        list[0] = buyer;
-        list[1] = seller;
 
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(buyer, true, 0, 0, 0, treasury, 0, 0, 0, 0);
+        uint256 g = gasleft();
+        r.execute(buyer, keeper);
+        uint256 buyGas = g - gasleft();
+
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(seller, false, 0, 0, 0, treasury, 0, 0, 0, 0);
-        vm.prank(forwarder);
-        r.onReport(
-            abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), workflowOwner, bytes2(0x0001)), abi.encode(list)
-        );
+        g = gasleft();
+        r.execute(seller, keeper);
+        uint256 sellGas = g - gasleft();
+
+        console.log("gas koop:", buyGas, "gas verkoop:", sellGas);
         assertEq(r.lastExecutedAt(buyer), uint64(block.timestamp));
         assertEq(r.lastExecutedAt(seller), uint64(block.timestamp));
+        assertLt(buyGas, 1_000_000, "koop past niet meer in het begrote gas");
+        assertLt(sellGas, 1_000_000, "verkoop past niet meer in het begrote gas");
     }
 
     function _params() internal pure returns (Rebalancer.Params memory) {

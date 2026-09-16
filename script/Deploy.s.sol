@@ -10,7 +10,7 @@ import {Rebalancer} from "../src/Rebalancer.sol";
  *      2026). De constructor dwingt af dat beide prijsfeeds 8 decimalen hebben. Uitrollen alleen na akkoord van
  *      Arjan:
  *
- *   BASE_RPC_URL=… TREASURY=0x… WORKFLOW_OWNER=0x… \
+ *   BASE_RPC_URL=… TREASURY=0x… \
  *   ~/.foundry/bin/forge script script/Deploy.s.sol --rpc-url base --broadcast --verify --private-key $DEPLOYER_PRIVATE_KEY
  *
  * Zonder --broadcast is dit een droge run.
@@ -30,14 +30,10 @@ contract DeployRebalancer is Script {
     /// @dev Uniswap v3 0,05%-pools, alleen gelezen voor de spot-vs-oracle-check.
     address constant POOL_EURC_USDC = 0x7279c08A36333e12c3Fc81747963264c100D66fB;
     address constant POOL_USDC_CBBTC = 0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef;
-    /// @dev KeystoneForwarder van Chainlink CRE op Base mainnet. Bewust niet via env te overschrijven: het
-    ///      contract is onveranderbaar en de forwarder is de enige poort voor CRE-rapporten.
-    address constant CRE_FORWARDER = 0xF8344CFd5c43616a4366C34E3EEE75af79a74482;
 
     function run() external returns (Rebalancer rebalancer) {
         require(block.chainid == 8453, "alleen Base mainnet");
         address treasury = vm.envAddress("TREASURY");
-        address workflowOwner = vm.envAddress("WORKFLOW_OWNER");
 
         vm.startBroadcast();
         rebalancer = new Rebalancer(
@@ -51,9 +47,7 @@ contract DeployRebalancer is Script {
                 sequencerFeed: SEQUENCER_FEED,
                 poolEurcUsdc: POOL_EURC_USDC,
                 poolUsdcCbbtc: POOL_USDC_CBBTC,
-                treasury: treasury,
-                forwarder: CRE_FORWARDER,
-                workflowOwner: workflowOwner
+                treasury: treasury
             })
         );
         vm.stopBroadcast();

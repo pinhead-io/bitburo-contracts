@@ -4,11 +4,9 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
-import {IReceiver} from "./interfaces/IReceiver.sol";
 import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
 import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
 
@@ -43,7 +41,7 @@ import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
  *      het contract (FeeRetained) en kan `sweep` die later alsnog ophalen; de rebalance zelf loopt nooit stuk
  *      op de fee-ontvanger.
  */
-contract Rebalancer is IReceiver, ReentrancyGuardTransient {
+contract Rebalancer is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     // ─── Vaste parameters ───────────────────────────────────────────────────────────────────────────────────
@@ -56,10 +54,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     IAggregatorV3 public immutable FEED_EURC_USD; // 8 decimalen
     IAggregatorV3 public immutable SEQUENCER_FEED; // L2 Sequencer Uptime, answer 0 = up
     address public immutable TREASURY;
-    /// @notice KeystoneForwarder van Chainlink CRE op deze chain.
-    address public immutable FORWARDER;
-    /// @notice Adres van de CRE-workflow-eigenaar (de sleutel die de Bitburo-workflow uitrolt).
-    address public immutable WORKFLOW_OWNER;
     /// @notice Uniswap v3-pool EURC/USDC (0,05%), alleen gelezen voor de spot-vs-oracle-check.
     IUniswapV3Pool public immutable POOL_EURC_USDC;
     /// @notice Uniswap v3-pool USDC/cbBTC (0,05%), alleen gelezen voor de spot-vs-oracle-check.
@@ -78,20 +72,13 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     uint16 public constant MIN_SLIPPAGE_BPS = 60;
     uint16 public constant MAX_SPOT_DEVIATION_BPS = 50;
     /// @notice Ondergrens voor `minTradeEurc` (20 EURC). Bij FEE_BPS = 25 is de fee van de kleinste run dan
-    ///         precies KEEPER_REWARD_EURC, zodat elke run de volledige keeperbeloning dekt en dust-owners geen
-    ///         CRE-slots meer kunnen bezetten voor 0 fee. Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
+    ///         precies KEEPER_REWARD_EURC, zodat elke run de volledige keeperbeloning dekt en een dust-owner
+    ///         de wekkers niet gratis bezig kan houden. Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
     ///         sats bij 80.000 EURC/cbBTC, waardoor de afronding in `amountOutMinimum` onder 1 bp blijft.
     uint64 public constant MIN_TRADE_FLOOR = 20e6;
     /// @notice Ondergrens voor `maxCorrectionBps` (0,1% per run): sluit configuraties uit die elk interval een
     ///         verwaarloosbare correctie doen en daarmee eeuwig due blijven.
     uint16 public constant MIN_CORRECTION_BPS = 10;
-    /// @notice Gas dat `onReport` aan één `execute` meegeeft. Fork-meting (audit 2026-09-15): een run van
-    ///         ~10.000 EURC kost ~550–590k gas en ~19.000 EURC ging bij 700k out-of-gas; 1.000.000 dekt runs tot
-    ///         ruim boven de praktische grens van de dunne EURC/USDC-pool.
-    uint256 public constant EXECUTE_GAS = 1_000_000;
-    /// @notice Onder dit restgas stopt `onReport` met de rest van het rapport in plaats van te reverten
-    ///         (63/64 × 1.050.000 > EXECUTE_GAS, dus een gestarte run krijgt altijd het volle budget).
-    uint256 public constant EXECUTE_GAS_RESERVE = 1_050_000;
     uint16 public constant MIN_TARGET_BPS = 500;
     uint16 public constant MAX_TARGET_BPS = 9500;
     uint32 public constant MIN_INTERVAL = 1 hours;
@@ -121,14 +108,11 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
 
     mapping(address owner => Params) public params;
     mapping(address owner => uint64) public lastExecutedAt;
-    /// @notice Tijdstip van de laatste mislukte poging via `onReport`. `dueOwners` slaat een owner over zolang
-    ///         die poging korter dan zijn `interval` geleden is; `isDue` en `execute` kijken er niet naar.
-    mapping(address owner => uint64) public lastAttemptAt;
     address[] private _owners;
     mapping(address owner => bool) private _isRegistered;
     /// @notice True zodra de treasury `retire` heeft aangeroepen. Onomkeerbaar: daarna doet `execute` niets meer,
-    ///         geven `isDue`/`dueOwners` niets terug, slaat `onReport` elke owner over en kan `setParams` alleen
-    ///         nog een mandaat intrekken (`active = false`). `sweep` blijft werken.
+    ///         geven `isDue`/`dueOwners` niets terug en kan `setParams` alleen nog een mandaat intrekken
+    ///         (`active = false`). `sweep` blijft werken.
     bool public retired;
 
     // ─── Events en errors ───────────────────────────────────────────────────────────────────────────────────
@@ -148,9 +132,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         uint256 totalValueEurc,
         uint256 fractionBps
     );
-    event ReportSkipped(address indexed owner, bytes reason);
-    /// @notice `execute` binnen `onReport` revertte zonder reden: vrijwel zeker out-of-gas binnen EXECUTE_GAS.
-    event ReportOutOfGas(address indexed owner);
     /// @notice De fee-transfer naar de treasury faalde; `amount` EURC blijft in het contract en is sweep-baar.
     event FeeRetained(uint256 amount);
 
@@ -161,8 +142,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     error StaleFeed(address feed);
     error InvalidFeedAnswer(address feed);
     error NothingToDo();
-    error UnauthorizedForwarder(address caller);
-    error UnauthorizedWorkflowOwner(address owner);
     error ZeroAddress();
     error NotAContract(address account);
     error UnexpectedPoolTokens(address pool);
@@ -187,12 +166,10 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         address poolEurcUsdc;
         address poolUsdcCbbtc;
         address treasury;
-        address forwarder;
-        address workflowOwner;
     }
 
     constructor(Deployment memory d) {
-        if (d.treasury == address(0) || d.workflowOwner == address(0)) revert ZeroAddress();
+        if (d.treasury == address(0)) revert ZeroAddress();
         _requireContract(d.eurc);
         _requireContract(d.cbbtc);
         _requireContract(d.usdc);
@@ -202,7 +179,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         _requireContract(d.sequencerFeed);
         _requireContract(d.poolEurcUsdc);
         _requireContract(d.poolUsdcCbbtc);
-        _requireContract(d.forwarder);
 
         EURC = IERC20(d.eurc);
         CBBTC = IERC20(d.cbbtc);
@@ -214,8 +190,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         POOL_EURC_USDC = IUniswapV3Pool(d.poolEurcUsdc);
         POOL_USDC_CBBTC = IUniswapV3Pool(d.poolUsdcCbbtc);
         TREASURY = d.treasury;
-        FORWARDER = d.forwarder;
-        WORKFLOW_OWNER = d.workflowOwner;
 
         _eurcIsToken0 = _poolOrder(POOL_EURC_USDC, d.eurc, d.usdc);
         _usdcIsToken0 = _poolOrder(POOL_USDC_CBBTC, d.usdc, d.cbbtc);
@@ -298,11 +272,9 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     }
 
     /// @notice Pagina uit de owner-lijst, gefilterd op wie nu due is (zelfde regels als `isDue`). Revert nooit.
-    /// @dev Bovenop `isDue`: een owner met een mislukte `onReport`-poging korter dan zijn `interval` geleden
-    ///      (`lastAttemptAt`) wordt overgeslagen. Een mislukte poging telt voor de wekker dus als een run, zodat een
-    ///      structureel revertende owner (blacklist, te krappe slippage, out-of-gas) niet elk rapport opnieuw
-    ///      een slot en EXECUTE_GAS kost. Handmatig of via het keeper-script blijft `execute` gewoon mogelijk.
-    ///      Na `retire` altijd een lege lijst.
+    /// @dev Een owner die structureel revert (blacklist, te krappe slippage) blijft in de lijst staan; het
+    ///      contract onthoudt mislukte pogingen niet. De wekkers simuleren daarom eerst en houden zelf een
+    ///      cool-down per owner bij. Na `retire` altijd een lege lijst.
     function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory due) {
         uint256 total = _owners.length;
         if (retired || offset >= total) {
@@ -318,10 +290,7 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         for (uint256 i = offset; i < end; i++) {
             address owner = _owners[i];
             Params memory p = params[owner];
-            if (
-                !p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval
-                    || block.timestamp < uint256(lastAttemptAt[owner]) + p.interval
-            ) {
+            if (!p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval) {
                 continue;
             }
             (bool isDueNow,) = _dueAt(owner, p, price);
@@ -376,38 +345,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         emit Executed(owner, isBuy, amountIn, fee, reward, rewardTo, amountOut, price, total, fractionBps);
     }
 
-    /// @notice Ingang voor Chainlink CRE: `report` = abi.encode(address[] owners). Per owner try/catch.
-    /// @dev Elke owner krijgt precies EXECUTE_GAS; is er minder dan EXECUTE_GAS_RESERVE over, dan stopt de lus
-    ///      en blijven de overige owners voor een volgend rapport. De hele call revert dus nooit op gasgebrek
-    ///      van één owner. Een mislukte poging zet `lastAttemptAt[owner]`, waarna `dueOwners` die owner een
-    ///      `interval` lang overslaat. Een lege revert-reden is vrijwel zeker out-of-gas binnen EXECUTE_GAS en
-    ///      wordt apart gemeld met `ReportOutOfGas`. Na `retire` wordt elke owner overgeslagen met
-    ///      `ReportSkipped(owner, ContractRetired)`, zonder `execute` te proberen; de call zelf revert niet.
-    function onReport(bytes calldata metadata, bytes calldata report) external override {
-        if (msg.sender != FORWARDER) revert UnauthorizedForwarder(msg.sender);
-        (,, address workflowOwner) = _decodeMetadata(metadata);
-        if (workflowOwner != WORKFLOW_OWNER) revert UnauthorizedWorkflowOwner(workflowOwner);
-
-        address[] memory list = abi.decode(report, (address[]));
-        if (retired) {
-            bytes memory reason = abi.encodeWithSelector(ContractRetired.selector);
-            for (uint256 i = 0; i < list.length; i++) {
-                emit ReportSkipped(list[i], reason);
-            }
-            return;
-        }
-        for (uint256 i = 0; i < list.length; i++) {
-            if (gasleft() < EXECUTE_GAS_RESERVE) break;
-            address owner = list[i];
-            try this.execute{gas: EXECUTE_GAS}(owner, TREASURY) {}
-            catch (bytes memory reason) {
-                lastAttemptAt[owner] = uint64(block.timestamp);
-                emit ReportSkipped(owner, reason);
-                if (reason.length == 0) emit ReportOutOfGas(owner);
-            }
-        }
-    }
-
     /// @notice Stuurt het volledige saldo van `token` in dit contract naar de treasury. Iedereen mag dit
     ///         aanroepen; het contract hoort buiten een transactie geen saldo te hebben, behalve fee die door een
     ///         mislukte treasury-transfer is achtergebleven (`FeeRetained`).
@@ -421,7 +358,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
     ///      veranderen; er is geen weg terug en geen tegenhanger (`unretire`). Na `retire`:
     ///      - `execute` revert met `ContractRetired`, dus er wordt nooit meer een swap of fee geboekt;
     ///      - `isDue` geeft (false, 0) en `dueOwners` een lege lijst, zodat wekkers vanzelf stoppen;
-    ///      - `onReport` slaat elke owner over met `ReportSkipped(owner, ContractRetired)`;
     ///      - `setParams` accepteert alleen nog `active = false`, zodat gebruikers hun mandaat kunnen intrekken;
     ///      - `sweep` blijft werken om achtergebleven fee naar de treasury te halen.
     ///
@@ -435,10 +371,6 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         if (retired) revert AlreadyRetired();
         retired = true;
         emit Retired();
-    }
-
-    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
-        return interfaceId == type(IReceiver).interfaceId || interfaceId == type(IERC165).interfaceId;
     }
 
     // ─── Intern: koers ──────────────────────────────────────────────────────────────────────────────────────
@@ -651,18 +583,5 @@ contract Rebalancer is IReceiver, ReentrancyGuardTransient {
         }
         uint256 toTreasury = fee - reward;
         if (toTreasury > 0 && !EURC.trySafeTransfer(TREASURY, toTreasury)) emit FeeRetained(toTreasury);
-    }
-
-    // ─── Intern: CRE-metadata ───────────────────────────────────────────────────────────────────────────────
-
-    /// @dev Layout: bytes32 workflowId | bytes10 workflowName | address workflowOwner | bytes2 reportId.
-    function _decodeMetadata(bytes calldata metadata)
-        internal
-        pure
-        returns (bytes32 workflowId, bytes10 workflowName, address workflowOwner)
-    {
-        workflowId = bytes32(metadata[0:32]);
-        workflowName = bytes10(metadata[32:42]);
-        workflowOwner = address(bytes20(metadata[42:62]));
     }
 }
