@@ -41,7 +41,11 @@ contract RebalancerForkTest is Test {
             vm.skip(true);
             return;
         }
-        vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
+        // `FORK_BLOCK` pint een blok (review I-7), zodat de suite reproduceerbaar is; standaard het laatste.
+        string memory rpc = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
+        uint256 forkBlock = vm.envOr("FORK_BLOCK", uint256(0));
+        if (forkBlock == 0) vm.createSelectFork(rpc);
+        else vm.createSelectFork(rpc, forkBlock);
         // Een fork staat op de stand ná het laatste blok, met diens timestamp. Had dat blok een tickwissel in een van
         // de pools, dan ziet de blokcheck die als "in dit blok aangeraakt". Begin daarom in een vers blok.
         vm.roll(block.number + 1);

@@ -187,7 +187,7 @@ Foundry staat in `~/.foundry/bin` (het `forge` in PATH kan de Laravel Forge CLI 
 ```bash
 ~/.foundry/bin/forge build
 ~/.foundry/bin/forge test -vv                      # unit + fuzz + invariant + fork (BASE_RPC_URL optioneel)
-FORK_BLOCK=<blok> ~/.foundry/bin/forge test --match-path test/BlockWindowFork.t.sol -vv   # M-1-metingen op een vast blok
+FORK_BLOCK=<blok> ~/.foundry/bin/forge test -vv   # alle fork-suites op een vast blok (reproduceerbaar)
 ~/.foundry/bin/forge test --gas-report --match-contract RebalancerFork
 RUN_FORK=false ~/.foundry/bin/forge test              # zonder fork
 ~/.foundry/bin/forge test --no-match-path "test/RebalancerFork.t.sol"   # idem, zonder RPC-aanroep
