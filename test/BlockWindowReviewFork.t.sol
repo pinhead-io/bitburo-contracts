@@ -7,7 +7,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {IUniswapV3Pool} from "../src/interfaces/IUniswapV3Pool.sol";
 import {TickMath} from "../src/libraries/TickMath.sol";
-import {BlockWindowForkTest, WindowAttacker} from "./BlockWindowFork.t.sol";
+import {BlockWindowForkTest, IUniswapV3PoolActions, WindowAttacker} from "./BlockWindowFork.t.sol";
 
 interface IUniswapV3FactoryOwner {
     function owner() external view returns (address);
@@ -494,6 +494,74 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         for (uint256 i; i < 5; i++) {
             assertEq(EURC.balanceOf(vs[i]), 12_500e6, "slachtoffer handelde");
         }
+    }
+
+    // ─── Welke acties schrijven een observatie ──────────────────────────────────────────────────────────────
+
+    function _observationThisBlock(address pool) internal view returns (bool) {
+        (,, uint16 index,,,,) = IUniswapV3Pool(pool).slot0();
+        (uint32 ts,,,) = IUniswapV3Pool(pool).observations(index);
+        return ts == uint32(vm.getBlockTimestamp());
+    }
+
+    /// @dev Na `action` in een vers blok: schreef EURC/USDC een observatie, en is de owner nog due?
+    function _expectTouched(bool touched, string memory what) internal {
+        _freshFeeds(0);
+        (bool due,) = r.isDue(victim);
+        console.log(what, touched ? "observatie" : "geen observatie");
+        assertEq(_observationThisBlock(P1), touched, what);
+        assertEq(due, !touched, what);
+    }
+
+    /// @notice De blokcheck op de echte pool, per actie (Uniswap v3-core d8b1c635): een swap binnen de tick, een mint
+    ///         of burn buiten de range, een burn van 0 en collect schrijven niets; een mint of burn in de range en een
+    ///         swap over de tickgrens wel, en dan is de owner niet due.
+    function test_observationSemantics_perAction() public {
+        _fund(victim, true, 2000e6);
+        uint256 snap = vm.snapshotState();
+        int24 b = _floor10(_tick(P1));
+        uint128 l = IUniswapV3Pool(P1).liquidity();
+
+        _expectTouched(false, "vers blok");
+        (bool ok, WindowAttacker.Push memory p) = _pushInTick(P1, true, 900_000);
+        assertTrue(ok, "opzet: ruimte in de tick");
+        atk.swapTo(P1, p.zeroForOne, p.limit);
+        _expectTouched(false, "swap binnen de tick");
+
+        vm.revertToState(snap);
+        atk.mint(P1, b - 60, b - 10, l);
+        _expectTouched(false, "mint buiten de range (onder)");
+        atk.mint(P1, b + 20, b + 70, l);
+        _expectTouched(false, "mint buiten de range (boven)");
+        vm.prank(address(atk));
+        IUniswapV3PoolActions(P1).collect(address(atk), b - 60, b - 10, 1, 1);
+        _expectTouched(false, "collect");
+
+        vm.revertToState(snap);
+        atk.mint(P1, b - 20, b + 30, l);
+        _expectTouched(true, "mint in de range");
+
+        vm.revertToState(snap);
+        atk.mint(P1, b - 20, b + 30, l);
+        atk.mint(P1, b - 60, b - 10, l);
+        _nextBlock();
+        _expectTouched(false, "volgend blok na de mints");
+        vm.prank(address(atk));
+        IUniswapV3PoolActions(P1).burn(b - 60, b - 10, l);
+        _expectTouched(false, "burn buiten de range");
+        vm.prank(address(atk));
+        IUniswapV3PoolActions(P1).burn(b - 20, b + 30, 0);
+        _expectTouched(false, "burn van 0 in de range");
+        vm.prank(address(atk));
+        IUniswapV3PoolActions(P1).burn(b - 20, b + 30, l);
+        _expectTouched(true, "burn in de range");
+
+        vm.revertToState(snap);
+        int24 tickBefore = _tick(P1);
+        p = _push(P1, true, 20);
+        atk.swapTo(P1, p.zeroForOne, p.limit);
+        assertTrue(_tick(P1) != tickBefore, "opzet: tick niet veranderd");
+        _expectTouched(true, "swap over de tickgrens");
     }
 
     // ─── Review L-1: liquiditeitsklif ───────────────────────────────────────────────────────────────────────
