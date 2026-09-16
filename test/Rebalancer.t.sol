@@ -4,11 +4,9 @@ pragma solidity 0.8.28;
 import {Test, Vm} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {Rebalancer} from "../src/Rebalancer.sol";
-import {IReceiver} from "../src/interfaces/IReceiver.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAggregator} from "./mocks/MockAggregator.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
@@ -33,16 +31,12 @@ abstract contract RebalancerTestBase is Test {
     Rebalancer internal r;
 
     address internal treasury = makeAddr("treasury");
-    address internal forwarder = makeAddr("forwarder");
-    address internal workflowOwner = makeAddr("workflowOwner");
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
     address internal keeper = makeAddr("keeper");
 
     function setUp() public virtual {
         vm.warp(START);
-        // De constructor eist dat de forwarder een contract is; de KeystoneForwarder is dat op Base ook.
-        vm.etch(forwarder, hex"5f");
 
         eurc = new MockERC20("Euro Coin", "EURC", 6);
         cbbtc = new MockERC20("Coinbase Wrapped BTC", "cbBTC", 8);
@@ -72,9 +66,7 @@ abstract contract RebalancerTestBase is Test {
             sequencerFeed: address(sequencer),
             poolEurcUsdc: address(poolEurcUsdc),
             poolUsdcCbbtc: address(poolUsdcCbbtc),
-            treasury: treasury,
-            forwarder: forwarder,
-            workflowOwner: workflowOwner
+            treasury: treasury
         });
     }
 
@@ -876,19 +868,15 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(address(r)), 0);
     }
 
-    /// @dev M-6 via CRE: onReport geeft TREASURY als rewardTo; is die geblacklist, dan falen beloning én
-    ///      treasury-transfer en blijft de hele fee in het contract. De run wordt wél geboekt.
-    function test_onReport_continuesWhenTreasuryBlacklisted() public {
+    /// @dev M-6: met TREASURY als rewardTo falen beloning én treasury-transfer zodra de treasury geblacklist
+    ///      is, en blijft de hele fee in het contract. De run wordt wél geboekt en `sweep` haalt de fee later op.
+    function test_execute_continuesWhenTreasuryBlacklisted() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         eurc.setBlacklisted(treasury, true);
-        address[] memory list = new address[](1);
-        list[0] = alice;
         vm.expectEmit(false, false, false, true, address(r));
         emit Rebalancer.FeeRetained(250_000);
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
+        r.execute(alice, treasury);
         assertEq(r.lastExecutedAt(alice), uint64(START));
-        assertEq(r.lastAttemptAt(alice), 0);
         assertEq(eurc.balanceOf(address(r)), 250_000);
     }
 
@@ -989,8 +977,8 @@ contract RebalancerTest is RebalancerTestBase {
         vm.expectRevert("Blacklistable: account is blacklisted");
         r.execute(alice, keeper);
         assertEq(r.lastExecutedAt(alice), 0);
-        // Een handmatige revert houdt de owner due (isDue/dueOwners kennen de reden niet); alleen een mislukte
-        // onReport-poging zet de cool-down (zie test_onReport_failedAttemptSetsCoolDown).
+        // Een revert houdt de owner due: het contract onthoudt mislukte pogingen niet. De wekkers simuleren
+        // daarom eerst en houden zelf een cool-down per owner bij.
         (bool due,) = r.isDue(alice);
         assertTrue(due);
         assertEq(r.dueOwners(0, 10).length, 1);
@@ -1162,302 +1150,6 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.quote(), Math.mulDiv(80_000e8, 1e6, 1.1e8));
     }
 
-    // onReport ──────────────────────────────────────────────────────────────────────────────────────────
-
-    function _metadata(address wfOwner) internal pure returns (bytes memory) {
-        return abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), wfOwner, bytes2(0x0001));
-    }
-
-    function test_onReport_revertsUnauthorizedForwarder() public {
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedForwarder.selector, bob));
-        vm.prank(bob);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-    }
-
-    function test_onReport_revertsUnauthorizedWorkflowOwner() public {
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedWorkflowOwner.selector, bob));
-        vm.prank(forwarder);
-        r.onReport(_metadata(bob), abi.encode(list));
-    }
-
-    function test_onReport_executesDueAndSkipsOthers() public {
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        _setUser(bob, 200e6, 1_000_000, _defaultParams()); // binnen band
-        address[] memory list = new address[](3);
-        list[0] = alice;
-        list[1] = bob;
-        list[2] = keeper; // nooit geregistreerd
-
-        uint256 amountOut = Math.mulDiv(99_750_000, 1e8, PRICE);
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.Executed(alice, true, 100e6, 250_000, 50_000, treasury, amountOut, PRICE, 1000e6, 0);
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(bob, abi.encodeWithSelector(Rebalancer.NothingToDo.selector));
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(keeper, abi.encodeWithSelector(Rebalancer.Inactive.selector));
-
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-
-        // Reward gaat naar de treasury: hele fee bij de treasury.
-        assertEq(eurc.balanceOf(treasury), 250_000);
-        assertEq(eurc.balanceOf(alice), 900e6);
-        assertEq(eurc.balanceOf(bob), 200e6);
-        assertEq(r.lastExecutedAt(alice), uint64(START));
-        assertEq(r.lastExecutedAt(bob), 0);
-    }
-
-    /// @dev M-4: een mislukte poging via onReport zet lastAttemptAt; dueOwners slaat de owner een interval lang
-    ///      over, isDue en execute niet. Na het interval staat hij weer in de lijst.
-    function test_onReport_failedAttemptSetsCoolDown() public {
-        Rebalancer.Params memory p = _defaultParams();
-        p.interval = 1 hours;
-        _setUser(alice, 1000e6, 0, p);
-        _setUser(bob, 1000e6, 0, p);
-        router.setSlippageBps(200);
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-
-        assertEq(r.lastAttemptAt(alice), uint64(START));
-        assertEq(r.lastExecutedAt(alice), 0);
-        (bool due,) = r.isDue(alice);
-        assertTrue(due, "isDue negeert de cool-down");
-        address[] memory dueList = r.dueOwners(0, 10);
-        assertEq(dueList.length, 1, "alice zit in cool-down, bob niet");
-        assertEq(dueList[0], bob);
-
-        vm.warp(START + 1 hours - 1);
-        _setPrice(PRICE);
-        assertEq(r.dueOwners(0, 10).length, 1);
-        vm.warp(START + 1 hours);
-        _setPrice(PRICE);
-        assertEq(r.dueOwners(0, 10).length, 2, "na het interval weer due");
-
-        // Handmatig uitvoeren kan tijdens de cool-down gewoon.
-        vm.warp(START);
-        _setPrice(PRICE);
-        router.setSlippageBps(0);
-        r.execute(alice, keeper);
-        assertEq(r.lastExecutedAt(alice), uint64(START));
-    }
-
-    /// @dev M-4: een geslaagde run zet lastAttemptAt niet.
-    function test_onReport_successDoesNotSetLastAttemptAt() public {
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-        assertEq(r.lastAttemptAt(alice), 0);
-        assertEq(r.lastExecutedAt(alice), uint64(START));
-    }
-
-    /// @dev Testgat cre 2 + M-3/M-4: isDue is true terwijl execute binnen EXECUTE_GAS out-of-gas gaat. Het
-    ///      rapport meldt dat met ReportOutOfGas en de owner verdwijnt een interval uit dueOwners in plaats van
-    ///      elk uur opnieuw het volle budget te verbranden.
-    function test_onReport_outOfGasEmitsEventAndCoolsDown() public {
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        router.setGasBurn(r.EXECUTE_GAS());
-        (bool due,) = r.isDue(alice);
-        assertTrue(due, "isDue simuleert de swap niet");
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(alice, "");
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportOutOfGas(alice);
-        vm.prank(forwarder);
-        r.onReport{gas: 4_000_000}(_metadata(workflowOwner), abi.encode(list));
-        assertEq(r.lastAttemptAt(alice), uint64(START));
-        assertEq(r.dueOwners(0, 10).length, 0);
-        (due,) = r.isDue(alice);
-        assertTrue(due);
-    }
-
-    /// @dev Een revert mét reden krijgt geen ReportOutOfGas.
-    function test_onReport_revertWithReasonIsNotReportedAsOutOfGas() public {
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        router.setSlippageBps(200);
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.recordLogs();
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i = 0; i < logs.length; i++) {
-            assertTrue(logs[i].topics[0] != Rebalancer.ReportOutOfGas.selector, "ReportOutOfGas ten onrechte");
-        }
-    }
-
-    /// @dev Testgat execute 6 / cre 6: een owner die dubbel in het rapport staat (of een tweede levering van
-    ///      hetzelfde rapport) krijgt NotDue; de rest van de lijst loopt door.
-    function test_onReport_duplicateAndReplayGiveNotDue() public {
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        _setUser(bob, 1000e6, 0, _defaultParams());
-        address[] memory list = new address[](3);
-        list[0] = alice;
-        list[1] = alice;
-        list[2] = bob;
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(alice, abi.encodeWithSelector(Rebalancer.NotDue.selector));
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-        assertEq(eurc.balanceOf(alice), 900e6, "een keer uitgevoerd");
-        assertEq(eurc.balanceOf(bob), 900e6, "rest van de lijst loopt door");
-
-        // Replay van hetzelfde rapport: alles NotDue, niets verandert.
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(alice, abi.encodeWithSelector(Rebalancer.NotDue.selector));
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(bob, abi.encodeWithSelector(Rebalancer.NotDue.selector));
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-        assertEq(eurc.balanceOf(alice), 900e6);
-        assertEq(eurc.balanceOf(bob), 900e6);
-    }
-
-    /// @dev Testgat cre 5: metadata korter dan 62 bytes of een rapport dat niet als address[] decodeert laat
-    ///      de hele call reverten (de afzender is dan per definitie een misvormd forwarder-rapport).
-    function test_onReport_revertsOnMalformedMetadataOrReport() public {
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        bytes memory shortMetadata = abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), bytes20(workflowOwner));
-        shortMetadata = bytes.concat(shortMetadata); // 62 bytes: precies genoeg
-        vm.prank(forwarder);
-        r.onReport(shortMetadata, abi.encode(list));
-
-        bytes memory tooShort = abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), bytes19(0));
-        vm.expectRevert();
-        vm.prank(forwarder);
-        r.onReport(tooShort, abi.encode(list));
-
-        vm.expectRevert();
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), hex"deadbeef");
-    }
-
-    /// @dev Testgat cre 9: alleen de owner-slice (bytes 42–62) telt; workflowId, naam en reportId zijn vrij.
-    function testFuzz_onReport_metadataOnlyOwnerMatters(
-        bytes32 workflowId,
-        bytes10 name,
-        bytes2 reportId,
-        address other
-    ) public {
-        vm.assume(other != workflowOwner);
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedWorkflowOwner.selector, other));
-        vm.prank(forwarder);
-        r.onReport(abi.encodePacked(workflowId, name, other, reportId), abi.encode(list));
-
-        vm.prank(forwarder);
-        r.onReport(abi.encodePacked(workflowId, name, workflowOwner, reportId), abi.encode(list));
-        assertEq(r.lastExecutedAt(alice), uint64(START));
-    }
-
-    /// @dev M-3 / testgat cre 7: met het gas dat de forwarder na eigen overhead uit een 4M-rapport overlaat
-    ///      (~3,55M) passen bij runs die bijna het volle EXECUTE_GAS gebruiken drie owners; de rest blijft netjes
-    ///      voor een volgend rapport. Bij normale runs (~450k) passen er vijf.
-    function test_onReport_threeFullBudgetOwnersFitInForwarderMargin() public {
-        address[] memory list = new address[](5);
-        for (uint256 i = 0; i < 5; i++) {
-            address u = makeAddr(string(abi.encodePacked("budget", i)));
-            _setUser(u, 1000e6, 0, _defaultParams());
-            list[i] = u;
-        }
-        // Eerst één gewone run zodat de opslag van de mock-router warm is; daarna gebruikt elke run bijna het
-        // volle EXECUTE_GAS (~0,87M) en slaagt.
-        _setUser(bob, 1000e6, 0, _defaultParams());
-        r.execute(bob, keeper);
-        router.setGasKeep(150_000);
-        vm.prank(forwarder);
-        r.onReport{gas: 3_550_000}(_metadata(workflowOwner), abi.encode(list));
-        uint256 executed;
-        for (uint256 i = 0; i < 5; i++) {
-            if (r.lastExecutedAt(list[i]) != 0) executed++;
-        }
-        assertEq(executed, 3, "drie owners op vol budget");
-        for (uint256 i = 0; i < 5; i++) {
-            assertEq(r.lastAttemptAt(list[i]), 0, "afgebroken door reserve, geen mislukte poging");
-        }
-
-        router.setGasKeep(0);
-        vm.prank(forwarder);
-        r.onReport{gas: 3_550_000}(_metadata(workflowOwner), abi.encode(list));
-        for (uint256 i = 0; i < 5; i++) {
-            assertEq(r.lastExecutedAt(list[i]), uint64(START));
-        }
-    }
-
-    function test_onReport_emptyReport() public {
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(new address[](0)));
-    }
-
-    function test_onReport_stopsCleanlyWhenGasRunsOut() public {
-        address[5] memory users;
-        address[] memory list = new address[](5);
-        for (uint256 i = 0; i < 5; i++) {
-            users[i] = makeAddr(string(abi.encodePacked("gas", i)));
-            _setUser(users[i], 1000e6, 0, _defaultParams());
-            list[i] = users[i];
-        }
-
-        // Genoeg voor de eerste owner en de reserve-check, te weinig voor een tweede: de lus breekt af,
-        // de call slaagt en de rest blijft voor een volgend rapport.
-        uint256 tightGas = r.EXECUTE_GAS_RESERVE() + 300_000;
-        vm.prank(forwarder);
-        r.onReport{gas: tightGas}(_metadata(workflowOwner), abi.encode(list));
-        assertEq(r.lastExecutedAt(users[0]), uint64(START), "eerste owner uitgevoerd");
-        assertEq(r.lastExecutedAt(users[1]), 0, "tweede owner overgeslagen door gasgebrek");
-        assertEq(r.lastExecutedAt(users[4]), 0);
-
-        // Met ruim gas gaan alle resterende owners in één rapport mee.
-        vm.prank(forwarder);
-        r.onReport{gas: 4_000_000}(_metadata(workflowOwner), abi.encode(list));
-        for (uint256 i = 1; i < 5; i++) {
-            assertEq(r.lastExecutedAt(users[i]), uint64(START));
-        }
-    }
-
-    function test_onReport_executeGasBudgetIsPerOwner() public {
-        // Een owner die meer dan EXECUTE_GAS zou vragen, wordt overgeslagen zonder de rest te raken.
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        _setUser(bob, 1000e6, 0, _defaultParams());
-        address[] memory list = new address[](2);
-        list[0] = alice;
-        list[1] = bob;
-        router.setGasBurn(r.EXECUTE_GAS());
-
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(alice, "");
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(bob, "");
-        vm.prank(forwarder);
-        r.onReport{gas: 4_000_000}(_metadata(workflowOwner), abi.encode(list));
-        assertEq(r.lastExecutedAt(alice), 0);
-        assertEq(r.lastExecutedAt(bob), 0);
-    }
-
-    function test_onReport_skipsOnSwapFailure() public {
-        _setUser(alice, 1000e6, 0, _defaultParams());
-        router.setSlippageBps(200);
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(alice, abi.encodeWithSignature("Error(string)", "Too little received"));
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-        assertEq(r.lastExecutedAt(alice), 0);
-    }
-
     // retire ────────────────────────────────────────────────────────────────────────────────────────────
 
     function test_retire_revertsForNonTreasury() public {
@@ -1513,38 +1205,20 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.ownerCount(), 2);
     }
 
-    function test_retire_onReportSkipsEveryOwnerWithoutReverting() public {
+    function test_retire_executeRevertsForEveryOwner() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         _setUser(bob, 1000e6, 0, _defaultParams());
         vm.prank(treasury);
         r.retire();
-        address[] memory list = new address[](2);
-        list[0] = alice;
-        list[1] = bob;
-        bytes memory reason = abi.encodeWithSelector(Rebalancer.ContractRetired.selector);
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(alice, reason);
-        vm.expectEmit(true, false, false, true, address(r));
-        emit Rebalancer.ReportSkipped(bob, reason);
-        vm.prank(forwarder);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
+
+        vm.expectRevert(Rebalancer.ContractRetired.selector);
+        r.execute(alice, keeper);
+        vm.expectRevert(Rebalancer.ContractRetired.selector);
+        r.execute(bob, keeper);
+
         assertEq(eurc.balanceOf(alice), 1000e6);
         assertEq(eurc.balanceOf(bob), 1000e6);
         assertEq(r.lastExecutedAt(alice), 0);
-        assertEq(r.lastAttemptAt(alice), 0, "geen cool-down: er wordt niets meer geprobeerd");
-    }
-
-    function test_retire_onReportStillChecksForwarderAndWorkflowOwner() public {
-        vm.prank(treasury);
-        r.retire();
-        address[] memory list = new address[](1);
-        list[0] = alice;
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedForwarder.selector, bob));
-        vm.prank(bob);
-        r.onReport(_metadata(workflowOwner), abi.encode(list));
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnauthorizedWorkflowOwner.selector, bob));
-        vm.prank(forwarder);
-        r.onReport(_metadata(bob), abi.encode(list));
     }
 
     function test_retire_setParamsCanOnlyDeactivate() public {
@@ -1600,22 +1274,11 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(cbbtc.balanceOf(treasury), 4_567);
     }
 
-    function test_supportsInterface() public view {
-        assertTrue(r.supportsInterface(type(IReceiver).interfaceId));
-        assertTrue(r.supportsInterface(type(IERC165).interfaceId));
-        assertFalse(r.supportsInterface(0xffffffff));
-        assertFalse(r.supportsInterface(0x12345678));
-    }
-
     // constructor ───────────────────────────────────────────────────────────────────────────────────────
 
     function test_constructor_rejectsZeroAddress() public {
         Rebalancer.Deployment memory d = _deployment();
         d.treasury = address(0);
-        vm.expectRevert(Rebalancer.ZeroAddress.selector);
-        new Rebalancer(d);
-        d = _deployment();
-        d.workflowOwner = address(0);
         vm.expectRevert(Rebalancer.ZeroAddress.selector);
         new Rebalancer(d);
         d = _deployment();
@@ -1631,7 +1294,7 @@ contract RebalancerTest is RebalancerTestBase {
     function test_constructor_rejectsNonContracts() public {
         address eoa = makeAddr("eoa");
         Rebalancer.Deployment memory d;
-        for (uint256 i = 0; i < 10; i++) {
+        for (uint256 i = 0; i < 9; i++) {
             d = _deployment();
             if (i == 0) d.eurc = eoa;
             if (i == 1) d.cbbtc = eoa;
@@ -1642,14 +1305,12 @@ contract RebalancerTest is RebalancerTestBase {
             if (i == 6) d.sequencerFeed = eoa;
             if (i == 7) d.poolEurcUsdc = eoa;
             if (i == 8) d.poolUsdcCbbtc = eoa;
-            if (i == 9) d.forwarder = eoa;
             vm.expectRevert(abi.encodeWithSelector(Rebalancer.NotAContract.selector, eoa));
             new Rebalancer(d);
         }
-        // Treasury en workflow-owner mogen EOA's zijn.
+        // De treasury mag een EOA zijn.
         d = _deployment();
         d.treasury = eoa;
-        d.workflowOwner = eoa;
         new Rebalancer(d);
     }
 

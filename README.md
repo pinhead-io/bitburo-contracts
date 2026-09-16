@@ -18,11 +18,9 @@ De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBT
 | Functie | Wat |
 |---|---|
 | `setParams(Params)` | Eigen instellingen zetten of wijzigen. Grenzen: `minTradeEurc` ≥ `MIN_TRADE_FLOOR` (20 EURC), `maxCorrectionBps` 10–10000, `maxSlippageBps` 60–100, `interval` ≥ 1 uur. Na `retire` alleen nog met `active = false` (mandaat intrekken); anders `ContractRetired`. |
-| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. Kijkt niet naar `lastAttemptAt`. Na `retire` altijd `(false, 0)`. |
-| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn. Zelfde regels als `isDue`, plus: een owner met een mislukte `onReport`-poging korter dan zijn `interval` geleden wordt overgeslagen. Dit is wat de wekkers gebruiken. Na `retire` altijd leeg. |
-| `lastAttemptAt(owner) → uint64` | Tijdstip van de laatste mislukte poging via `onReport` (0 = nooit). |
+| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. Na `retire` altijd `(false, 0)`. |
+| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn, zelfde regels als `isDue`. Dit is wat de wekkers gebruiken. Na `retire` altijd leeg. |
 | `execute(owner, rewardTo)` | Eén rebalance-stap; iedereen mag dit aanroepen. `rewardTo` = contract zelf telt als `address(0)`. Revert met `NoOutput` als de koop 0 cbBTC zou opleveren, en met `ContractRetired` na `retire`. |
-| `onReport(metadata, report)` | Ingang voor Chainlink CRE; `report` = `abi.encode(address[])`. Elke owner krijgt `EXECUTE_GAS` (1.000.000); onder `EXECUTE_GAS_RESERVE` (1.050.000) restgas stopt de lus netjes. Een mislukte owner krijgt `ReportSkipped(owner, reason)`, bij lege reden ook `ReportOutOfGas(owner)`, en `lastAttemptAt[owner]` wordt gezet. Na `retire` krijgt elke owner `ReportSkipped(owner, ContractRetired)` zonder dat `execute` wordt geprobeerd; de call zelf revert niet. |
 | `sweep(token)` | Stuurt een achtergebleven saldo naar de treasury (per ongeluk gestuurde tokens, of fee die door een mislukte treasury-transfer is blijven staan). Permissionless. Werkt ook na `retire`. |
 | `retire()` | Eenmalige, onomkeerbare uitschakelaar. Alleen `TREASURY`; tweede aanroep revert met `AlreadyRetired`. Zet `retired = true` en emit `Retired()`. Kan niets met fondsen of instellingen. |
 | `retired() → bool` | Staat het contract buiten gebruik? |
@@ -42,11 +40,11 @@ Vóór én ná elke swap vergelijkt het contract de spotkoers van de Uniswap-poo
 
 De check vooraf begrenst hoe ver een aanroeper de pool kan voorschuiven; de check achteraf dwingt af dat die voorschuiving plus de eigen prijsimpact van de run samen binnen 0,5% blijven. Dat sluit de winstruimte van een atomaire zelf-sandwich grotendeels, maar het maximale verlies per run blijft `FEE_BPS + maxSlippageBps` (zie hierboven). **De EURC/USDC-pool is dun: runs boven ongeveer 8.000 EURC per keer reverten vaker zolang de route Uniswap v3 is**, omdat de eigen prijsimpact dan zelf al richting de toegestane afwijking gaat. Grote wallets houden `maxCorrectionBps` dus laag.
 
-Gas van `execute` op de fork (audit 15 september 2026, tegen het 700k-budget van de vorige versie): koop 344k–548k en verkoop 404k–587k voor runs van 475 tot 9.500 EURC; ~19.000 EURC ging out-of-gas. Daarom is `EXECUTE_GAS` nu 1.000.000 en `EXECUTE_GAS_RESERVE` 1.050.000. Gevolg voor het CRE-rapport (`gasLimit` 4.000.000, waarvan na de forwarder ~3,55M overblijft): bij runs die het volle budget gebruiken passen **drie** owners gegarandeerd (`test_onReport_threeFullBudgetOwnersFitInForwarderMargin`); bij normale runs (~450k) passen er vijf. `maxOwnersPerReport` in de CRE-config moet dus naar 3, of `gasLimit` omhoog naar ~5,5M voor vijf owners op vol budget.
+Gas van `execute` op de fork (audit 15 september 2026): koop 344k–548k en verkoop 404k–587k voor runs van 475 tot 9.500 EURC. `test_fork_buyAndSellGasCost` meet dat elke run en bewaakt de grens van 1.000.000, zodat een wekker weet wat hij moet begroten.
 
 ### Wekker en mislukte pogingen
 
-`onReport` schrijft bij een mislukte `execute` `lastAttemptAt[owner]`; `dueOwners` slaat die owner daarna een `interval` lang over. Een owner die structureel revert (blacklist, te krappe slippage, out-of-gas) kost de CRE-wekker zo hooguit één slot per interval in plaats van elk rapport. `isDue` en `execute` kijken er niet naar, dus het keeper-script en handmatige runs kunnen eerder opnieuw proberen.
+Het contract onthoudt mislukte pogingen niet: `lastExecutedAt` wordt alleen bij succes gezet, dus een owner die structureel revert (blacklist, te krappe slippage) blijft due. De wekkers vangen dat zelf op: beide simuleren `execute` eerst en houden een cool-down per owner bij die per opeenvolgende mislukking verdubbelt.
 
 ## Contract buiten gebruik stellen
 
@@ -54,7 +52,7 @@ Gas van `execute` op de fork (audit 15 september 2026, tegen het 700k-budget van
 
 Het contract heeft geen admin, upgrade of pauzeknop, wel één eenmalige en onomkeerbare uitschakelaar: `retire()`, alleen aan te roepen met de sleutel van `TREASURY`. Dit is het antwoord op audit-bevinding M-8/M-9 (oude mandaten die na een redeploy onzichtbaar actief blijven, en het ontbreken van een noodstop). Er is geen weg terug en geen `unretire`.
 
-Wat het doet: `execute` revert daarna met `ContractRetired`, `isDue` geeft `(false, 0)`, `dueOwners` is leeg (de CRE-wekker en het keeper-script vinden dus vanzelf niets meer), `onReport` slaat elke owner over met `ReportSkipped`, en `setParams` accepteert alleen nog `active = false`. `sweep` blijft werken om achtergebleven fee op te halen.
+Wat het doet: `execute` revert daarna met `ContractRetired`, `isDue` geeft `(false, 0)`, `dueOwners` is leeg (de wekkers vinden dus vanzelf niets meer), en `setParams` accepteert alleen nog `active = false`. `sweep` blijft werken om achtergebleven fee op te halen.
 
 Wat het niet kan: fondsen verplaatsen. Het contract houdt nooit gebruikersfondsen; het mandaat is een ERC-20-allowance die in de tokencontracten bij de gebruiker staat en waar `retire` niets aan verandert. Het enige pad dat die allowance ooit gebruikte (`execute`) is na `retire` dicht.
 
@@ -74,7 +72,7 @@ Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit au
 |---|---|
 | `src/Rebalancer.sol` | Het contract. Solidity 0.8.28, OpenZeppelin 5.6.1, via-IR. |
 | `audit/` | Interne auditrapporten en PoC's per datum. |
-| `src/interfaces/` | Minimale interfaces: Chainlink AggregatorV3, Uniswap SwapRouter02, CRE IReceiver. |
+| `src/interfaces/` | Minimale interfaces: Chainlink AggregatorV3 en Uniswap SwapRouter02. |
 | `test/` | Unit-, fuzz- en invarianttests met mocks; fork-tests tegen Base mainnet. |
 | `script/Deploy.s.sol` | Deploy-script met de geverifieerde Base-adressen. |
 | `keeper/` | Open keeper-script in TypeScript. Iedereen kan het draaien, zonder Bitburo; de terugvaloptie naast de Laravel-keeper. Zelfde ondergrens, simulatie vooraf en een cool-down per owner na een mislukking. |
@@ -83,7 +81,7 @@ Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit au
 
 De primaire wekker is `bitburo:run-keeper` in de Bitburo Laravel-app: die pagineert het register via `dueOwners` en wekt elk uur iedereen die aan de beurt is. Het script in `keeper/` is de open terugvaloptie die iedereen zonder Bitburo kan draaien.
 
-De Chainlink CRE-workflow die hier ooit stond is verwijderd in v1.1.0. Chainlink Automation is medio 2026 gestopt, CRE Early Access is nooit toegekend en het pad heeft op mainnet geen enkel rapport verwerkt. Wat wel in het contract blijft zitten is het ontvangstoppervlak: `onReport`, `IReceiver`, en de immutables `FORWARDER` en `WORKFLOW_OWNER`. Dat staat in de bytecode op de keten en gaat er alleen met een nieuwe deploy uit. Op het live contract is `WORKFLOW_OWNER` bovendien de deployer, dus `onReport` is daar sowieso onbereikbaar. Wie CRE alsnog wil, vindt de workflow in de geschiedenis onder tag `v1.0.0`.
+Van Chainlink CRE is niets meer over. De workflow ging eruit in v1.1.0 en het ontvangstoppervlak in het contract (`onReport`, `IReceiver`, `FORWARDER`, `WORKFLOW_OWNER`) in v1.2.0. Chainlink Automation is medio 2026 gestopt, CRE Early Access is nooit toegekend en het pad heeft op mainnet geen enkel rapport verwerkt. Dat scheelt ruim 1.600 bytes bytecode en een hoop uitleg. Wie het terug wil halen, vindt de workflow onder tag `v1.0.0` en het contractoppervlak onder `v1.1.0`. Let op: het oppervlak zit nog wél in elk uitgerold contract van vóór v1.2.0.
 
 ## Commando's
 
@@ -118,7 +116,7 @@ RPC_URL=https://mainnet.base.org REBALANCER=0x… DRY_RUN=1 bun run keeper.ts
 bun test            # selectie- en cool-down-logica
 ```
 
-Het script leest per due owner `isDue`, slaat runs onder `MIN_RUN_EURC` (standaard 20 EURC) over, simuleert `execute` eerst met `eth_call` en stuurt pas daarna de transactie. Een owner waarvan de simulatie of de transactie mislukt krijgt een cool-down die per opeenvolgende mislukking verdubbelt (`COOLDOWN_SECONDS`, standaard 3600 s, tot `COOLDOWN_MAX_SECONDS`, standaard 86.400 s), bijgehouden in `COOLDOWN_FILE` (standaard `./keeper-cooldowns.json`, staat in `.gitignore`). Zo blijft een owner die structureel revert (het contract zet `lastExecutedAt` alleen bij succes) niet elke run gas kosten. Het script heeft geen gascap en bedient dus ook owners met een run die te groot is voor de `EXECUTE_GAS` van 1.000.000 die `onReport` per owner meegeeft.
+Het script leest per due owner `isDue`, slaat runs onder `MIN_RUN_EURC` (standaard 20 EURC) over, simuleert `execute` eerst met `eth_call` en stuurt pas daarna de transactie. Een owner waarvan de simulatie of de transactie mislukt krijgt een cool-down die per opeenvolgende mislukking verdubbelt (`COOLDOWN_SECONDS`, standaard 3600 s, tot `COOLDOWN_MAX_SECONDS`, standaard 86.400 s), bijgehouden in `COOLDOWN_FILE` (standaard `./keeper-cooldowns.json`, staat in `.gitignore`). Zo blijft een owner die structureel revert (het contract zet `lastExecutedAt` alleen bij succes) niet elke run gas kosten. Het script heeft geen gascap.
 
 ## Vaste regels
 

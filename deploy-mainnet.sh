@@ -21,7 +21,6 @@ FORGE="$HOME/.foundry/bin/forge"
 BROADCAST="broadcast/Deploy.s.sol/8453/run-latest.json"
 
 export TREASURY="0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9"        # zelfde treasury als het huidige contract
-export WORKFLOW_OWNER="0xdeb5e5b8bDc70e8f2BBB3bACbAFA2a981ee2E7A7"  # deployer; CRE wordt niet gebruikt
 export BASE_RPC_URL="${BASE_RPC_URL:-https://mainnet.base.org}"
 export BASESCAN_API_KEY="${BASESCAN_API_KEY:-${ETHERSCAN_API_KEY:-}}"
 

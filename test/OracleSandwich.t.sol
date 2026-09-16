@@ -92,7 +92,6 @@ contract OracleSandwichTest is Test {
     address internal constant POOL_USDC_CBBTC = 0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef;
 
     address internal treasury = makeAddr("treasury");
-    address internal forwarder = makeAddr("forwarder");
     address internal victim = makeAddr("victim");
     Rebalancer internal r;
     Sandwicher internal atk;
@@ -102,7 +101,6 @@ contract OracleSandwichTest is Test {
             vm.skip(true);
         }
         vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
-        vm.etch(forwarder, hex"5f");
         r = new Rebalancer(
             Rebalancer.Deployment({
                 eurc: address(EURC),
@@ -114,9 +112,7 @@ contract OracleSandwichTest is Test {
                 sequencerFeed: SEQUENCER,
                 poolEurcUsdc: POOL_EURC_USDC,
                 poolUsdcCbbtc: POOL_USDC_CBBTC,
-                treasury: treasury,
-                forwarder: forwarder,
-                workflowOwner: makeAddr("wf")
+                treasury: treasury
             })
         );
         atk = new Sandwicher();
