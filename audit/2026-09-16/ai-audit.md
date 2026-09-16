@@ -11,13 +11,13 @@ Scope: `src/Rebalancer.sol` op solc 0.8.37 (via-IR, cancun), commit `48cc7f9`.
 | Echidna | 2.3.3 | Niet bruikbaar met deze handler-opzet (zie onderaan) |
 | Foundry invariants | forge, 1.000 runs × depth 100 | 5/5 groen |
 
-Vergeleken met `audit/2026-09-15/RAPPORT.md`: F-1 is de rest van M-1 die na de post-swap-check overblijft. De rest is nieuw.
+Vergeleken met `audit/2026-09-15/RAPPORT.md`: **M-1 is nog open** — de post-swap-check verkleint de sandwich-winst, maar sluit hem niet. De overige punten hieronder zijn nieuw. Of de andere punten uit dat rapport (H-1, H-2, M-2 t/m M-9, L-1 t/m L-9) zijn opgelost, is in deze ronde niet systematisch nagelopen.
 
 ---
 
 ## Findings
 
-### F-1 — Caller kan zijn eigen `execute` nog steeds winstgevend sandwichen (Medium, bevestigd)
+### M-1 (nog open, uit 2026-09-15) — Caller kan zijn eigen `execute` nog steeds winstgevend sandwichen (Medium, bevestigd)
 
 `Rebalancer.execute` → `_buy`/`_sell` + `_requireSpotNear`
 
@@ -61,8 +61,8 @@ Fix: `eurcDelta` afleiden van `amountIn`.
 ## Leads (handmatig nalopen)
 
 - **Pool-feetier niet afgedwongen in de constructor** (6 agents). `_poolOrder` controleert alleen token0/token1, niet `fee() == POOL_FEE` of `factory.getPool`. Drie agents hebben on-chain met `cast` geverifieerd dat de huidige deploy-pools de 0.05%-pools van de SwapRouter02-factory zijn. Dit is dus hardening voor een volgende deploy.
-- **Meerdere wallets per push** (oracle-agent). Eén push gevolgd door meerdere `execute`-calls voor verschillende due owners telt hun volume op, waardoor kleine wallets samen de winstgevende grootte halen. Zelfde mechanisme als F-1; niet getest.
-- **Donatie over de bandgrens** (agents 10, 11). Een kleine donatie duwt een owner die net binnen de band zit erover, en `_plan` corrigeert dan de volledige drift (r493). Daarmee kan de aanvaller zelf het blok kiezen voor F-1. Extra winst boven F-1 is niet bewezen.
+- **Meerdere wallets per push** (oracle-agent). Eén push gevolgd door meerdere `execute`-calls voor verschillende due owners telt hun volume op, waardoor kleine wallets samen de winstgevende grootte halen. Zelfde mechanisme als M-1; niet getest.
+- **Donatie over de bandgrens** (agents 10, 11). Een kleine donatie duwt een owner die net binnen de band zit erover, en `_plan` corrigeert dan de volledige drift (r493). Daarmee kan de aanvaller zelf het blok kiezen voor M-1. Extra winst boven M-1 is niet bewezen.
 - **Front-run van `setParams`/`approve(0)`** (agent 5). Een run op de oude parameters vlak vóór een wijziging. Op Base (FCFS-sequencer) is dat onbewezen.
 - **Oracle mogelijk deels afgeleid van DEX-prijzen** (oracle-agent). De Chainlink-directory labelt beide feeds `dex_state_price`. Als daar de Base EURC/USDC-pool in zit, controleert de oracle deels zichzelf. Navragen bij Chainlink.
 - **Geen absolute min/max op feed-antwoorden** (oracle-agent). Alleen relevant als een feed eerst ernstig faalt.
