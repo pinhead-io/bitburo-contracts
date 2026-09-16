@@ -77,8 +77,13 @@ Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit au
 | `src/interfaces/` | Minimale interfaces: Chainlink AggregatorV3, Uniswap SwapRouter02, CRE IReceiver. |
 | `test/` | Unit-, fuzz- en invarianttests met mocks; fork-tests tegen Base mainnet. |
 | `script/Deploy.s.sol` | Deploy-script met de geverifieerde Base-adressen. |
-| `cre/` | Chainlink CRE-workflow `bitburo-keeper` (cron, elk uur). **Geparkeerd, niet uitgerold:** Chainlink Automation is medio 2026 gestopt en het CRE-pad heeft op mainnet nooit een rapport verwerkt. De primaire wekker is de keeper in de Bitburo Laravel-app (`bitburo:run-keeper`), die het register via `dueOwners` pagineert. Roterend startpunt, filter op run-omvang (`minRunEurc`/`maxRunEurc`) en simulatie vooraf; zie `cre/bitburo-keeper/README.md`. |
 | `keeper/` | Open keeper-script in TypeScript. Iedereen kan het draaien, zonder Bitburo; de terugvaloptie naast de Laravel-keeper. Zelfde ondergrens, simulatie vooraf en een cool-down per owner na een mislukking. |
+
+### Wekkers
+
+De primaire wekker is `bitburo:run-keeper` in de Bitburo Laravel-app: die pagineert het register via `dueOwners` en wekt elk uur iedereen die aan de beurt is. Het script in `keeper/` is de open terugvaloptie die iedereen zonder Bitburo kan draaien.
+
+De Chainlink CRE-workflow die hier ooit stond is verwijderd in v1.1.0. Chainlink Automation is medio 2026 gestopt, CRE Early Access is nooit toegekend en het pad heeft op mainnet geen enkel rapport verwerkt. Wat wel in het contract blijft zitten is het ontvangstoppervlak: `onReport`, `IReceiver`, en de immutables `FORWARDER` en `WORKFLOW_OWNER`. Dat staat in de bytecode op de keten en gaat er alleen met een nieuwe deploy uit. Op het live contract is `WORKFLOW_OWNER` bovendien de deployer, dus `onReport` is daar sowieso onbereikbaar. Wie CRE alsnog wil, vindt de workflow in de geschiedenis onder tag `v1.0.0`.
 
 ## Commando's
 
@@ -94,12 +99,6 @@ RUN_FORK=false ~/.foundry/bin/forge test              # zonder fork
 
 `test/AuditMath.t.sol` bevat de fuzz-, invariant- en PoC-tests uit de interne audit van 15 september 2026 (`audit/2026-09-15/`). Let op bij tijdreeksen onder `via_ir`: Solidity cachet `block.timestamp` binnen een testfunctie, gebruik na `vm.warp` dus `vm.getBlockTimestamp()`.
 
-CRE-workflow simuleren (vanuit `cre/`):
-
-```bash
-~/.cre/bin/cre workflow simulate bitburo-keeper --target staging-settings --non-interactive --trigger-index 0
-```
-
 Keeper-script (vanuit `keeper/`):
 
 ```bash
@@ -108,7 +107,7 @@ RPC_URL=https://mainnet.base.org REBALANCER=0x… DRY_RUN=1 bun run keeper.ts
 bun test            # selectie- en cool-down-logica
 ```
 
-Het script leest per due owner `isDue`, slaat runs onder `MIN_RUN_EURC` (standaard 20 EURC) over, simuleert `execute` eerst met `eth_call` en stuurt pas daarna de transactie. Een owner waarvan de simulatie of de transactie mislukt krijgt een cool-down die per opeenvolgende mislukking verdubbelt (`COOLDOWN_SECONDS`, standaard 3600 s, tot `COOLDOWN_MAX_SECONDS`, standaard 86.400 s), bijgehouden in `COOLDOWN_FILE` (standaard `./keeper-cooldowns.json`, staat in `.gitignore`). Zo blijft een owner die structureel revert (het contract zet `lastExecutedAt` alleen bij succes) niet elke run gas kosten. Het script heeft geen gascap: owners die te groot zijn voor de 700.000 gas van `onReport` bedient het wel, de CRE-workflow slaat die over (`maxRunEurc`).
+Het script leest per due owner `isDue`, slaat runs onder `MIN_RUN_EURC` (standaard 20 EURC) over, simuleert `execute` eerst met `eth_call` en stuurt pas daarna de transactie. Een owner waarvan de simulatie of de transactie mislukt krijgt een cool-down die per opeenvolgende mislukking verdubbelt (`COOLDOWN_SECONDS`, standaard 3600 s, tot `COOLDOWN_MAX_SECONDS`, standaard 86.400 s), bijgehouden in `COOLDOWN_FILE` (standaard `./keeper-cooldowns.json`, staat in `.gitignore`). Zo blijft een owner die structureel revert (het contract zet `lastExecutedAt` alleen bij succes) niet elke run gas kosten. Het script heeft geen gascap en bedient dus ook owners met een run die te groot is voor de `EXECUTE_GAS` van 1.000.000 die `onReport` per owner meegeeft.
 
 ## Vaste regels
 
