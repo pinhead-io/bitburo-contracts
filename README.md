@@ -164,7 +164,7 @@ Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit au
 |---|---|
 | `src/Rebalancer.sol` | Het contract. Solidity 0.8.37, OpenZeppelin 5.6.1, via-IR. |
 | `audit/` | Interne auditrapporten en PoC's per datum. |
-| `src/interfaces/` | Minimale interfaces: Chainlink AggregatorV3, Uniswap v3-pool en -factory, SwapRouter02. |
+| `src/interfaces/` | Minimale interfaces, zelf geschreven en MIT: Chainlink AggregatorV3, en van de Uniswap v3-pool, -factory en SwapRouter02 alleen de aanroepen die het contract doet (review I-3; selectors en ABI-typen gelijk aan Uniswap). |
 | `src/libraries/TickMath.sol` | `getSqrtPriceAtTick` uit Uniswap v4-core (MIT, met licentietekst), voor het blokvenster. |
 | `test/` | Unit-, fuzz- en invarianttests met mocks; fork-tests tegen Base mainnet. |
 | `script/Deploy.s.sol` | Deploy-script met de geverifieerde Base-adressen. |
