@@ -57,7 +57,11 @@ import {TickMath} from "./libraries/TickMath.sol";
  *         MAX_SPOT_DEVIATION_BPS van de Chainlink-koers liggen, en `amountOutMinimum` volgt uit Chainlink en
  *         `maxSlippageBps`. Dat begrenst duwen over meerdere blokken, wat het blokvenster niet ziet. Het
  *         maximale verlies per run ten opzichte van de Chainlink-koers blijft FEE_BPS + maxSlippageBps
- *         (0,85% tot 1,25%).
+ *         (0,85% tot 1,25%). Omdat de eigen swap de gecombineerde spot hooguit ~12 bp verschuift (6 bp per pool),
+ *         kan een eerlijke run alleen na de swap op de spotcheck vastlopen als de spot vooraf al meer dan ~38 bp in
+ *         de runrichting afweek (audit lead 4; gemeten in 0,69% van de uurmetingen over 30 dagen, zie README).
+ *         Beide feeds zijn volgens Chainlink `dex_state_price`; welke pools erin zitten is niet gepubliceerd, dus
+ *         de bewaakte pools kunnen deels in de feed zitten (audit lead 5, zie README).
  *
  *      Delen: een run die door de liquiditeit is begrensd, opent een ronde. Het volgende deel in dezelfde
  *      richting mag al na CHUNK_INTERVAL in plaats van na `interval`, tot de afwijking binnen de band is of het
@@ -69,6 +73,13 @@ import {TickMath} from "./libraries/TickMath.sol";
  *      liquiditeit is of de run de vensterrand haalt. Beide zijn tijdelijk: in een volgend blok opnieuw proberen.
  *      Gemeten op Base (2.000 blokken rond blok 51.390.800) valt door de blokcheck 0% van de pogingen uit als de
  *      transactie bovenaan het blok staat, 4,3% halverwege en 7 tot 11% onderaan.
+ *
+ *      Runs tegenhouden (audit L-3): wie een pool elk blok aanraakt (een burn van 1 liquiditeit in de range kost
+ *      ~92.630 gas, gemeten ~1,8 EURC per uur), houdt alle runs in die blokken tegen, zonder er iets aan te
+ *      verdienen. Geen contractwijziging maakt dat duurder zonder de aanraking voor gas te laten staan; het antwoord
+ *      zit in de wekkers: lezen met blok-overrides voor het volgende blok, het hele retry-budget blijven proberen,
+ *      en versturen met een priority fee die na een blokkade oploopt, zodat de aanvaller die tip elk blok moet
+ *      betalen (zie README en keeper/keeper.ts).
  *
  *      Beschikbaarheid: de fee-transfer naar de treasury en de beloning worden met een niet-reverterende
  *      transfer gedaan. Faalt de treasury-transfer (bijvoorbeeld een Circle-blacklist), dan blijft de fee in
@@ -85,6 +96,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     address public immutable USDC; // alleen als tussenhop in het Uniswap-pad
     IV3SwapRouter public immutable ROUTER; // Uniswap SwapRouter02
     IAggregatorV3 public immutable FEED_CBBTC_USD; // 8 decimalen
+    /// @dev Op Base de Standard proxy `0x9867…01e0` van de SVR-feed EURC/USD, niet de SVR-proxy `0x8a55…E287`: zo
+    ///      geldt de vertraging voor de MEV-Share-veiling niet (audit lead 5).
     IAggregatorV3 public immutable FEED_EURC_USD; // 8 decimalen
     IAggregatorV3 public immutable SEQUENCER_FEED; // L2 Sequencer Uptime, answer 0 = up
     address public immutable TREASURY;
@@ -320,6 +333,12 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///      Na `retire` is alleen `active = false` nog toegestaan (mandaat intrekken); een actief mandaat zetten
     ///      revert dan met `ContractRetired`. Breekt een lopende ronde af: de volgende run is weer een nieuwe
     ///      ronde, `interval` na de laatste run.
+    ///      Niet atomair (audit lead 7): wie deze transactie (of een `approve(0)`) ziet voordat ze in een Flashblock
+    ///      zit, kan er met een hogere priority fee één `execute` op de oude instellingen vóór zetten, binnen de
+    ///      gewone grenzen van een run. Daarna geldt `interval`; wie zeker geen run meer wil, stuurt eerst `approve(0)`.
+    ///      Registreren vraagt geen saldo of allowance en het register krimpt nooit (audit lead 9). Een saldo-eis
+    ///      is te omzeilen en zou "eerst instellen, dan storten" onmogelijk maken; wekkers filteren het register
+    ///      daarom zelf off-chain op saldo en allowance.
     function setParams(Params calldata p) external {
         if (retired && p.active) revert ContractRetired();
         if (
@@ -710,6 +729,10 @@ contract Rebalancer is ReentrancyGuardTransient {
         amount = Math.min(amount, type(uint96).max) * SIZING_BPS / BPS;
     }
 
+    /// @dev Geen absolute min/max op `answer` (audit lead 6): de aggregators handhaven er zelf geen zinvolle (minAnswer 1,
+    ///      maxAnswer 2^176 − 1), en een vaste grens zou dit onveranderbare contract bij een echte extreme koers
+    ///      blijvend stilleggen. De koers wordt vóór en na elke swap tegen beide pools gehouden (`_requireSpotNear`);
+    ///      een foute feed levert alleen een trade op als de pools op dezelfde foute koers staan.
     function _readFeed(IAggregatorV3 feed, uint256 maxAge) internal view returns (uint256) {
         (, int256 answer,, uint256 updatedAt,) = feed.latestRoundData();
         if (answer <= 0) revert InvalidFeedAnswer(address(feed));
