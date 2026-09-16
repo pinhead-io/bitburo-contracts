@@ -81,7 +81,7 @@ Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit au
 
 De primaire wekker is `bitburo:run-keeper` in de Bitburo Laravel-app: die pagineert het register via `dueOwners` en wekt elk uur iedereen die aan de beurt is. Het script in `keeper/` is de open terugvaloptie die iedereen zonder Bitburo kan draaien.
 
-Van Chainlink CRE is niets meer over. De workflow ging eruit in v1.1.0 en het ontvangstoppervlak in het contract (`onReport`, `IReceiver`, `FORWARDER`, `WORKFLOW_OWNER`) in v1.2.0. Chainlink Automation is medio 2026 gestopt, CRE Early Access is nooit toegekend en het pad heeft op mainnet geen enkel rapport verwerkt. Dat scheelt ruim 1.600 bytes bytecode en een hoop uitleg. Wie het terug wil halen, vindt de workflow onder tag `v1.0.0` en het contractoppervlak onder `v1.1.0`. Let op: het oppervlak zit nog wél in elk uitgerold contract van vóór v1.2.0.
+Van Chainlink CRE is niets meer over. In v1.1.0 gingen zowel de workflow als het ontvangstoppervlak in het contract eruit: `onReport`, `IReceiver`, `supportsInterface`, de immutables `FORWARDER` en `WORKFLOW_OWNER`, en `lastAttemptAt`. Chainlink Automation is medio 2026 gestopt, CRE Early Access is nooit toegekend en het pad heeft op mainnet geen enkel rapport verwerkt. Dat scheelt 1.604 bytes runtime-bytecode en een hoop uitleg. Wie het terug wil halen, vindt alles onder tag `v1.0.0`. Let op: het oppervlak zit nog wél in elk uitgerold contract van vóór v1.1.0, dus ook in `0xE577…2104`.
 
 ## Commando's
 
