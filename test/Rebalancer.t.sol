@@ -5,6 +5,7 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -892,6 +893,33 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(alice), 1000e6);
         assertEq(eurc.balanceOf(address(r)), 0);
         assertEq(eurc.balanceOf(treasury), 0);
+    }
+
+    /// @dev Testgat execute 7 (EX-09), de schrijvende kant: `transfer` van een nep-token draait wél met
+    ///      schrijfrechten. Terug de run van een due owner in via `execute` stuit op de reentrancy-guard; het enige
+    ///      dat lukt is het nep-token zelf als owner registreren (`_owners` vervuilen), zonder saldo of effect.
+    function test_sweep_maliciousTokenReentryCanOnlyRegisterItself() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        ReentrantSweepToken evil = new ReentrantSweepToken(r, alice);
+
+        r.sweep(IERC20(address(evil)));
+
+        assertEq(
+            bytes4(evil.executeRevertData()),
+            ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector,
+            "execute kwam binnen"
+        );
+        assertEq(eurc.balanceOf(alice), 1000e6);
+        assertEq(r.lastExecutedAt(alice), 0);
+        assertEq(r.ownerCount(), 2);
+        assertEq(r.owners(1, 1)[0], address(evil), "nep-token staat als owner geregistreerd");
+        (bool due,) = r.isDue(address(evil));
+        assertFalse(due, "zonder saldo nooit due");
+        assertEq(eurc.balanceOf(address(r)), 0);
+
+        // De echte owner loopt daarna gewoon.
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 900e6);
     }
 
     function test_execute_rewardToSelfGoesToTreasury() public {
@@ -1825,6 +1853,42 @@ contract MaliciousSweepToken {
     }
 
     function transfer(address, uint256) external pure returns (bool) {
+        return true;
+    }
+}
+
+/// @dev Nep-token voor `sweep` met een schrijvende `transfer`: probeert de run van `victim` binnen te komen en
+///      registreert zichzelf daarna als owner.
+contract ReentrantSweepToken {
+    Rebalancer private immutable _r;
+    address private immutable _victim;
+    bytes public executeRevertData;
+
+    constructor(Rebalancer r_, address victim_) {
+        _r = r_;
+        _victim = victim_;
+    }
+
+    function balanceOf(address) external pure returns (uint256) {
+        return 1;
+    }
+
+    function transfer(address, uint256) external returns (bool) {
+        try _r.execute(_victim, address(this)) {}
+        catch (bytes memory reason) {
+            executeRevertData = reason;
+        }
+        _r.setParams(
+            Rebalancer.Params({
+                active: true,
+                targetBps: 8000,
+                bandBps: 500,
+                maxCorrectionBps: 1000,
+                minTradeEurc: 20e6,
+                interval: 1 hours,
+                maxSlippageBps: 100
+            })
+        );
         return true;
     }
 }
