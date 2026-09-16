@@ -1553,6 +1553,18 @@ contract RebalancerTest is RebalancerTestBase {
         new Rebalancer(d);
     }
 
+    /// @dev Review L-1: de runomvang rekent met hooguit één tickgrens in het venster, en dat klopt alleen bij
+    ///      tickSpacing 10. Een pool met een andere tickSpacing wordt geweigerd.
+    function test_constructor_rejectsPoolWithWrongTickSpacing() public {
+        poolEurcUsdc.setTickSpacing(1);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedTickSpacing.selector, address(poolEurcUsdc)));
+        new Rebalancer(_deployment());
+        poolEurcUsdc.setTickSpacing(10);
+        poolUsdcCbbtc.setTickSpacing(60);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedTickSpacing.selector, address(poolUsdcCbbtc)));
+        new Rebalancer(_deployment());
+    }
+
     /// @dev Lead 1: een pool met de juiste tokens en fee die niet de pool van de factory van de router is (een
     ///      nagebouwde pool, of een pool van een andere factory) wordt geweigerd.
     function test_constructor_rejectsPoolNotFromRouterFactory() public {

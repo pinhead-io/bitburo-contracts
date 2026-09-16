@@ -16,6 +16,11 @@ contract RebalancerWindowHarness is Rebalancer {
     function window(IUniswapV3Pool pool) external view returns (bool touched, Window memory w) {
         return _window(pool);
     }
+
+    function maxRunEurc(bool isBuy, uint256 price) external view returns (uint256 eurc, address binding) {
+        (, Window memory w1, Window memory w2) = _windows();
+        return _maxRunEurc(isBuy, price, w1, w2);
+    }
 }
 
 /// @notice Unit-tests voor audit M-1: blokvenster, runomvang uit de liquiditeit en rondes in delen.
@@ -378,6 +383,133 @@ contract BlockWindowTest is RebalancerTestBase {
         assertTrue(due, "bob mag in hetzelfde blok zolang de tick staat");
         assertLt(deltaBob, deltaAliceAlone, "bob krijgt de resterende ruimte, niet het hele venster");
         r.execute(bob, keeper);
+    }
+
+    // ─── Liquiditeitsklif (review L-1) ──────────────────────────────────────────────────────────────────────
+
+    /// @dev Zet EURC/USDC (vorig blok) op tick `t`, iets boven de onderrand.
+    function _p1AtTick(int24 t) internal {
+        poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(t) + 1_000);
+        assertEq(poolEurcUsdc.tick(), t, "opzet: tick");
+    }
+
+    /// @dev Grootste run bij liquiditeit `liq` in EURC/USDC en `liquidityNet` = `net` op `boundary`, in een snapshot.
+    function _runWith(bool isBuy, uint128 liq, int24 boundary, int128 net) internal returns (uint256 run) {
+        uint256 snap = vm.snapshotState();
+        poolEurcUsdc.setLiquidity(liq);
+        poolEurcUsdc.setLiquidityNet(boundary, net);
+        (run,) = h.maxRunEurc(isBuy, PRICE);
+        vm.revertToState(snap);
+    }
+
+    /// @notice Koop (EURC/USDC omlaag) met de koers op tick 0: grens 0 ligt in het venster en wordt meteen gekruist.
+    ///         Houdt de liquiditeit daar op (1e12 → 5e11), dan rekent de run met 5e11. Groeit ze (1e12 → 1,5e12),
+    ///         dan blijft de run die van 1e12. isDue en execute volgen dezelfde omvang.
+    function test_cliff_buy_boundaryInWindowUsesThinnerSide() public {
+        uint256 thin = _runWith(true, 5e11, 0, 0);
+        uint256 full = _runWith(true, 1e12, 0, 0);
+        assertGt(thin, 20e6, "opzet");
+        assertEq(_runWith(true, 1e12, 0, 5e11), thin, "klif niet meegerekend");
+        assertEq(_runWith(true, 1e12, 0, -5e11), full, "liquiditeit voorbij de grens maakte de run groter");
+
+        poolEurcUsdc.setLiquidity(1e12);
+        poolEurcUsdc.setLiquidityNet(0, 5e11);
+        _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
+        (bool due, int256 delta) = r.isDue(alice);
+        assertTrue(due);
+        assertEq(uint256(delta), thin, "isDue");
+        r.execute(alice, keeper);
+        assertEq(10_000e6 - eurc.balanceOf(alice), thin, "execute");
+    }
+
+    /// @notice Verkoop (EURC/USDC omhoog) met de koers op tick 5: grens 10 ligt in het venster. Zelfde regel, andere
+    ///         richting en teken: omhoog kruisen telt `liquidityNet` op.
+    function test_cliff_sell_boundaryInWindowUsesThinnerSide() public {
+        _p1AtTick(5);
+        uint256 thin = _runWith(false, 5e11, 10, 0);
+        uint256 full = _runWith(false, 1e12, 10, 0);
+        assertGt(thin, 20e6, "opzet");
+        assertEq(_runWith(false, 1e12, 10, -5e11), thin, "klif niet meegerekend");
+        assertEq(_runWith(false, 1e12, 10, 5e11), full, "liquiditeit voorbij de grens maakte de run groter");
+        // Tick 5 omlaag: grens 0 ligt ook in het venster (t - 5).
+        assertEq(_runWith(true, 1e12, 0, 5e11), _runWith(true, 5e11, 0, 0), "grens t - 5 niet meegerekend");
+    }
+
+    /// @notice Geen initialiseerbare grens in het venster in de swaprichting: `liquidityNet` van de grens erbuiten
+    ///         doet niets. Koop op tick 6 (grens 0 ligt net onder het venster), verkoop op tick 4 (grens 10 net
+    ///         erboven).
+    function test_cliff_noBoundaryInWindowIgnoresNet() public {
+        _p1AtTick(6);
+        assertEq(_runWith(true, 1e12, 0, 1e12), _runWith(true, 1e12, 0, 0), "koop: grens buiten het venster telde");
+        _p1AtTick(4);
+        assertEq(_runWith(false, 1e12, 10, -1e12), _runWith(false, 1e12, 10, 0), "verkoop: grens buiten het venster");
+    }
+
+    /// @notice Voorbij de grens geen liquiditeit: geen run. isDue en dueOwners melden niets en execute revert vooraf
+    ///         met BlockMoveExceeded, in beide richtingen. Zo zijn isDue en execute het eens (review L-1: vroeger
+    ///         isDue true en execute elke keer een revert na de swap).
+    function test_cliff_zeroLiquidityBeyondBoundary_notDue() public {
+        poolEurcUsdc.setLiquidity(1e12);
+        poolEurcUsdc.setLiquidityNet(0, 1e12);
+        _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
+        (bool due,) = r.isDue(alice);
+        assertFalse(due, "koop due");
+        assertEq(r.dueOwners(0, 10).length, 0);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
+        r.execute(alice, keeper);
+
+        _p1AtTick(5);
+        poolEurcUsdc.setLiquidityNet(10, -1e12);
+        _setUser(bob, 0, 12_500_000, _params(10_000, 20e6));
+        (due,) = r.isDue(bob);
+        assertFalse(due, "verkoop due");
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
+        r.execute(bob, keeper);
+    }
+
+    /// @notice USDC/cbBTC heeft negatieve ticks: de grens omlaag is floor(tick / 10) × 10, niet naar nul afgerond.
+    function test_cliff_negativeTickInCbbtcPool() public {
+        poolEurcUsdc.setLiquidity(type(uint128).max);
+        int24 t = poolUsdcCbbtc.tick();
+        assertLt(t, 0, "opzet: negatieve tick");
+        int24 b = t / 10 * 10;
+        if (t % 10 != 0) b -= 10;
+        poolUsdcCbbtc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(b + 2) + 1_000); // koop omlaag: grens b in venster
+        poolUsdcCbbtc.setLiquidity(1e13);
+        (uint256 full, address binding) = h.maxRunEurc(true, PRICE);
+        assertEq(binding, address(poolUsdcCbbtc), "opzet: cbBTC-pool begrenst");
+        poolUsdcCbbtc.setLiquidityNet(b + 10, 1e13); // naar nul afgeronde grens: buiten de swaprichting, telt niet
+        (uint256 run,) = h.maxRunEurc(true, PRICE);
+        assertEq(run, full, "verkeerde grens bij negatieve tick");
+        poolUsdcCbbtc.setLiquidityNet(b, 5e12);
+        (run,) = h.maxRunEurc(true, PRICE);
+        assertLt(run, full * 51 / 100, "grens bij negatieve tick niet meegerekend");
+        assertGt(run, full * 49 / 100);
+    }
+
+    /// @notice Voor elke `liquidityNet` op de grens en elke tick rond een veelvoud van 10: de run is nooit groter dan
+    ///         zonder grens, en gelijk aan de run bij min(liquiditeit nu, liquiditeit voorbij de grens) als de grens in
+    ///         het venster ligt.
+    function testFuzz_cliff_neverLargerAndMinLiquidity(int128 net, uint8 offset, bool isBuy) public {
+        int24 t = int24(uint24(bound(offset, 0, 9)));
+        _p1AtTick(t);
+        uint128 liq = 1e12;
+        net = int128(bound(net, -2e12, 2e12));
+        int24 boundary = isBuy ? int24(0) : int24(10);
+        uint256 without = _runWith(isBuy, liq, boundary, 0);
+        uint256 with = _runWith(isBuy, liq, boundary, net);
+        assertLe(with, without, "run groter door liquiditeit voorbij de grens");
+        // Grens in het venster: omlaag voor t <= 5, omhoog voor t >= 5 (zie _maxInput).
+        bool inWindow = isBuy ? t <= 5 : t >= 5;
+        int256 beyond = isBuy ? int256(uint256(liq)) - net : int256(uint256(liq)) + net;
+        if (!inWindow) {
+            assertEq(with, without, "grens buiten het venster telde mee");
+        } else if (beyond <= 0) {
+            assertEq(with, 0, "geen liquiditeit voorbij de grens, toch een run");
+        } else {
+            uint128 minLiq = uint128(Math.min(liq, uint256(beyond)));
+            assertEq(with, _runWith(isBuy, minLiq, boundary, 0), "niet de kleinste liquiditeit");
+        }
     }
 
     // ─── Rondes in delen ────────────────────────────────────────────────────────────────────────────────────

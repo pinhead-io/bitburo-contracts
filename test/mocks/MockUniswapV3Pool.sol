@@ -25,6 +25,9 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
     uint160 public sqrtPriceX96;
     int24 public tick;
     uint24 public fee = 500;
+    int24 public tickSpacing = 10;
+    /// @dev `liquidityNet` per tick; standaard 0 (niet geïnitialiseerd), zodat de runomvang niets merkt van grenzen.
+    mapping(int24 tick => int128) public liquidityNetAt;
     /// @dev Standaard zo groot dat het blokvenster de run nooit begrenst; `setLiquidity` voor die tests.
     uint128 public liquidity = type(uint128).max;
     uint16 public observationIndex;
@@ -62,6 +65,25 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
 
     function setFee(uint24 value) external {
         fee = value;
+    }
+
+    function setTickSpacing(int24 value) external {
+        tickSpacing = value;
+    }
+
+    /// @notice Zet `liquidityNet` van `tick_`, zoals een positie met die tick als rand dat in de echte pool doet.
+    function setLiquidityNet(int24 tick_, int128 net) external {
+        liquidityNetAt[tick_] = net;
+    }
+
+    function ticks(int24 tick_)
+        external
+        view
+        returns (uint128, int128, uint256, uint256, int56, uint160, uint32, bool)
+    {
+        int128 net = liquidityNetAt[tick_];
+        uint128 gross = uint128(net < 0 ? -net : net);
+        return (gross, net, 0, 0, 0, 0, 0, net != 0);
     }
 
     function setLiquidity(uint128 value) external {

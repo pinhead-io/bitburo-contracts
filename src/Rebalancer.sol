@@ -48,8 +48,9 @@ import {TickMath} from "./libraries/TickMath.sol";
  *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick
  *         verandert; daarna is de pool in dit blok aangeraakt.
  *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers op SIZING_BPS van
- *         de resterende ruimte tot de vensterrand blijft. Past de correctie daar niet in, dan gaat hij in delen
- *         (zie `rounds`).
+ *         de resterende ruimte tot de vensterrand blijft, gerekend met de kleinste liquiditeit tot die rand (ook
+ *         voorbij een tickgrens in het venster, review L-1). Liquiditeit buiten de range maakt een run nooit groter.
+ *         Past de correctie daar niet in, dan gaat hij in delen (zie `rounds`).
  *      3. Spot tegen Chainlink. Vóór én na elke swap moet de spot van beide pools binnen
  *         MAX_SPOT_DEVIATION_BPS van de Chainlink-koers liggen, en `amountOutMinimum` volgt uit Chainlink en
  *         `maxSlippageBps`. Dat begrenst duwen over meerdere blokken, wat het blokvenster niet ziet. Het
@@ -94,6 +95,9 @@ contract Rebalancer is ReentrancyGuardTransient {
     bool private immutable _usdcIsToken0;
 
     uint24 public constant POOL_FEE = 500; // 0,05% op beide hops
+    /// @notice tickSpacing van de POOL_FEE-pools (UniswapV3Factory: feeAmountTickSpacing[500] = 10, niet te wijzigen).
+    ///         De constructor dwingt het af; `_maxInput` rekent erop.
+    int24 public constant TICK_SPACING = 10;
     uint16 public constant FEE_BPS = 25;
     uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0,05 EURC
     uint16 public constant MAX_SLIPPAGE_BPS = 100;
@@ -116,6 +120,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///         een zelf-sandwich per geduwde eenheid verlies maakt. De begintick is afgerond; het venster wordt
     ///         vanaf de ongunstigste rand van die tick gerekend, zodat de afronding (≤ 1 tick ≈ 1 bp) alleen
     ///         eerlijke runs ruimte kost en nooit een aanvaller ruimte geeft.
+    ///         Moet ruim onder TICK_SPACING ticks blijven (1 tick ≈ 1 bp): `_maxInput` gaat ervan uit dat er tussen de
+    ///         koers en de vensterrand hooguit één initialiseerbare tickgrens ligt.
     uint16 public constant MAX_BLOCK_MOVE_BPS = 6;
     /// @notice Welk deel van de resterende ruimte tot de vensterrand een run volgens de schatting bij constante
     ///         liquiditeit mag gebruiken. De marge vangt liquiditeit die over een tickgrens dunner wordt.
@@ -206,6 +212,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     error UnexpectedPoolTokens(address pool);
     /// @notice De pool heeft niet de fee-tier POOL_FEE waar de swap doorheen gaat.
     error UnexpectedPoolFee(address pool);
+    /// @notice De pool heeft niet de tickSpacing TICK_SPACING waar de runomvang op rekent.
+    error UnexpectedTickSpacing(address pool);
     /// @notice De pool is niet de POOL_FEE-pool van de factory van de router, dus niet de pool van de swap.
     error PoolNotFromRouterFactory(address pool);
     error SpotDeviatesFromOracle(uint256 spot, uint256 oracle);
@@ -292,6 +300,7 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @dev Revert als `pool` niet de POOL_FEE-pool van {a, b} uit `factory` is.
     function _requireSwapPool(IUniswapV3Factory factory, IUniswapV3Pool pool, address a, address b) private view {
         if (pool.fee() != POOL_FEE) revert UnexpectedPoolFee(address(pool));
+        if (pool.tickSpacing() != TICK_SPACING) revert UnexpectedTickSpacing(address(pool));
         if (factory.getPool(a, b, POOL_FEE) != address(pool)) revert PoolNotFromRouterFactory(address(pool));
     }
 
@@ -577,6 +586,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         uint160 upper;
         uint160 sqrtPriceX96;
         uint128 liquidity;
+        int24 tick;
     }
 
     /// @return touched address(0), of de eerste pool die in dit blok al een observatie schreef.
@@ -611,6 +621,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (lastTimestamp == uint32(block.timestamp)) return (true, w);
         w.sqrtPriceX96 = sqrtPriceX96;
         w.liquidity = pool.liquidity();
+        w.tick = tick;
         // Een echte pool heeft altijd MIN_TICK <= tick < MAX_TICK (de swap weigert MIN/MAX_SQRT_RATIO als limiet).
         // Anders een leeg venster: geen run (BlockMoveExceeded), en geen revert in TickMath.
         if (tick < TickMath.MIN_TICK || tick >= TickMath.MAX_TICK) {
@@ -633,7 +644,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     }
 
     /// @return eurc    Grootste run in EURC waarvan de geschatte eindkoers in beide pools binnen SIZING_BPS van de
-    ///                 resterende ruimte tot de vensterrand blijft. 0 als een pool nu al buiten zijn venster ligt.
+    ///                 resterende ruimte tot de vensterrand blijft. 0 als een pool nu al buiten zijn venster ligt of
+    ///                 voorbij de tickgrens in het venster geen liquiditeit heeft.
     /// @return binding De pool die de grens bepaalt.
     function _maxRunEurc(bool isBuy, uint256 price, Window memory w1, Window memory w2)
         internal
@@ -641,26 +653,50 @@ contract Rebalancer is ReentrancyGuardTransient {
         returns (uint256 eurc, address binding)
     {
         // Hop EURC/USDC: bij kopen gaat EURC erin, bij verkopen USDC. Beide omgerekend naar EURC via deze pool.
-        uint256 in1 = _maxInput(w1, isBuy == _eurcIsToken0);
+        uint256 in1 = _maxInput(POOL_EURC_USDC, w1, isBuy == _eurcIsToken0);
         uint256 eurc1 = isBuy ? in1 : _convert(w1.sqrtPriceX96, !_eurcIsToken0, in1);
         // Hop USDC/cbBTC: bij kopen gaat USDC erin (omgerekend via EURC/USDC), bij verkopen cbBTC (via de oracle).
-        uint256 in2 = _maxInput(w2, isBuy == _usdcIsToken0);
+        uint256 in2 = _maxInput(POOL_USDC_CBBTC, w2, isBuy == _usdcIsToken0);
         uint256 eurc2 = isBuy ? _convert(w1.sqrtPriceX96, !_eurcIsToken0, in2) : Math.mulDiv(in2, price, CBBTC_UNIT);
         return eurc1 <= eurc2 ? (eurc1, address(POOL_EURC_USDC)) : (eurc2, address(POOL_USDC_CBBTC));
     }
 
-    /// @dev Inputhoeveelheid die de koers bij constante liquiditeit SIZING_BPS van de weg naar de vensterrand in de
-    ///      swaprichting brengt (Uniswap-formules voor amount0/amount1 tussen twee sqrtPrices, zonder poolfee: de fee
-    ///      verschuift de koers niet, dus dit is aan de voorzichtige kant). Een pool buiten zijn venster geeft 0.
-    ///      Begrensd op 2^96 basiseenheden, zodat de omrekening naar EURC nooit overloopt.
-    function _maxInput(Window memory w, bool zeroForOne) internal pure returns (uint256 amount) {
+    /// @dev Inputhoeveelheid die de koers SIZING_BPS van de weg naar de vensterrand in de swaprichting brengt
+    ///      (Uniswap-formules voor amount0/amount1 tussen twee sqrtPrices, zonder poolfee: de fee verschuift de koers
+    ///      niet, dus dit is aan de voorzichtige kant). Een pool buiten zijn venster geeft 0. Begrensd op 2^96
+    ///      basiseenheden, zodat de omrekening naar EURC nooit overloopt.
+    ///
+    ///      Liquiditeit (review L-1). Gerekend wordt met de kleinste liquiditeit tot de vensterrand: de in-range
+    ///      liquiditeit nu, en voorbij de eerstvolgende initialiseerbare tickgrens in de swaprichting de liquiditeit
+    ///      na het kruisen (± `liquidityNet` van die tick). Omlaag is dat floor(tick / TICK_SPACING) × TICK_SPACING,
+    ///      ook als de koers er precies op staat (UniswapV3Pool.swap kruist die tick dan meteen); omhoog de grens
+    ///      daarboven. Met begintick t (1 tick ≈ 1 bp) kan een swap binnen het venster omlaag hooguit de grenzen t tot
+    ///      en met t − 5 kruisen en omhoog t + 1 tot en met t + 5. Dat zijn per richting minder dan TICK_SPACING
+    ///      opeenvolgende ticks, dus hooguit één veelvoud van TICK_SPACING, en een `tickBitmap`-lookup is niet nodig:
+    ///      een niet-geïnitialiseerde tick heeft `liquidityNet` 0. Liquiditeit voorbij de grens die groter is, maakt de run
+    ///      nooit groter; is ze 0, dan geen run. Een grens precies op de vensterrand telt mee (voorzichtig).
+    function _maxInput(IUniswapV3Pool pool, Window memory w, bool zeroForOne) internal view returns (uint256 amount) {
         if (w.sqrtPriceX96 < w.lower || w.sqrtPriceX96 > w.upper) return 0;
+        uint256 liquidity = w.liquidity;
+        int24 boundary = w.tick / TICK_SPACING;
+        if (w.tick < 0 && w.tick % TICK_SPACING != 0) boundary--;
+        boundary = boundary * TICK_SPACING + (zeroForOne ? int24(0) : TICK_SPACING);
+        if (boundary >= TickMath.MIN_TICK && boundary <= TickMath.MAX_TICK) {
+            uint160 atBoundary = TickMath.getSqrtPriceAtTick(boundary);
+            if (zeroForOne ? atBoundary >= w.lower : atBoundary <= w.upper) {
+                (, int128 net,,,,,,) = pool.ticks(boundary);
+                // Omlaag kruisen trekt `liquidityNet` af, omhoog telt het op (UniswapV3Pool.swap).
+                int256 beyond = zeroForOne ? int256(liquidity) - net : int256(liquidity) + net;
+                if (beyond <= 0) return 0;
+                liquidity = Math.min(liquidity, uint256(beyond));
+            }
+        }
         if (zeroForOne) {
             // token0 erin: koers omlaag naar `lower`. amount0 = L × 2^96 × (√P − √lower) / (√P × √lower).
-            amount = Math.mulDiv(uint256(w.liquidity) << 96, w.sqrtPriceX96 - w.lower, w.sqrtPriceX96) / w.lower;
+            amount = Math.mulDiv(liquidity << 96, w.sqrtPriceX96 - w.lower, w.sqrtPriceX96) / w.lower;
         } else {
             // token1 erin: koers omhoog naar `upper`. amount1 = L × (√upper − √P) / 2^96.
-            amount = Math.mulDiv(w.liquidity, w.upper - w.sqrtPriceX96, Q96);
+            amount = Math.mulDiv(liquidity, w.upper - w.sqrtPriceX96, Q96);
         }
         amount = Math.min(amount, type(uint96).max) * SIZING_BPS / BPS;
     }
