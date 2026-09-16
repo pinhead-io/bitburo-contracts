@@ -633,3 +633,53 @@ export const parseCooldownState = (json: string): CooldownState => {
   }
   return state;
 };
+
+// ─── Eindreview I-5: lock robuust tegen een hergebruikt PID ────────────────────────────────────────────────────
+
+/** Inhoud van LOCK_FILE: pid en starttijd (unix-seconden) van de run die het lock houdt. */
+export type LockInfo = { pid: number; startedAt: number };
+
+export const formatLock = (lock: LockInfo): string => `${JSON.stringify(lock)}\n`;
+
+/**
+ * Lock uit het bestand. Het oude formaat (alleen een pid) en onleesbare inhoud geven `startedAt` = `fallbackStartedAt`
+ * (de mtime van het bestand), zodat ook zo'n lock een leeftijd heeft.
+ */
+export const parseLock = (text: string, fallbackStartedAt: number): LockInfo => {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      Number.isInteger((parsed as LockInfo).pid) &&
+      Number.isFinite((parsed as LockInfo).startedAt)
+    ) {
+      return { pid: (parsed as LockInfo).pid, startedAt: (parsed as LockInfo).startedAt };
+    }
+  } catch {
+    // oud formaat of rommel
+  }
+  const pid = Number(text.trim());
+  return { pid: Number.isInteger(pid) ? pid : 0, startedAt: fallbackStartedAt };
+};
+
+/**
+ * Eindreview I-5: mag een bestaand lock weg? Alleen een pid controleren is niet genoeg: blijft na een crash een lock
+ * staan en geeft het OS die pid later aan een ander proces, dan stopt elke run stil. Daarom:
+ * - een lock ouder dan `maxAgeSeconds` is altijd verlopen, wat de pid ook doet. Dat is veilig omdat een run zichzelf
+ *   stopt vóór die leeftijd (`lockWatchdogSeconds`): een lock van die leeftijd kan niet meer van een levende run zijn;
+ * - een jonger lock is verlopen als de pid niet (meer) bestaat;
+ * - een lock met een starttijd in de toekomst (klok verzet) telt als jong, dus alleen de pid beslist.
+ */
+export const lockIsStale = (
+  lock: LockInfo,
+  nowSeconds: number,
+  maxAgeSeconds: number,
+  isAlive: (pid: number) => boolean,
+): boolean => {
+  if (nowSeconds - lock.startedAt >= maxAgeSeconds) return true;
+  return !(lock.pid > 0 && isAlive(lock.pid));
+};
+
+/** Na hoeveel seconden een run zichzelf stopt: 15 s vóór het lock verloopt, zodat twee runs nooit tegelijk lopen. */
+export const lockWatchdogSeconds = (maxAgeSeconds: number): number => Math.max(maxAgeSeconds - 15, 0);

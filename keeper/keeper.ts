@@ -65,12 +65,13 @@
  * Optioneel: REWARD_TO=0x…  PAGE_SIZE=20  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
  *            RETRY_SECONDS=540  SEND_RETRY_BLOCKS=30  PRIORITY_FEE_GWEI=0.05  MAX_PRIORITY_FEE_GWEI=3
  *            GAS_LIMIT=1000000  FEE_STATE_FILE=./keeper-fee.json  FEE_HOLD_SECONDS=3600  LOCK_FILE=./keeper.lock
+ *            LOCK_MAX_SECONDS=900
  *            GAS_ESTIMATE=500000  TIP_REWARD_SHARE_BPS=10000  TIP_BUDGET_ETH=0.0015
  *            FEED_ETH_USD=0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70
  *            SEARCH_SECONDS=180  SCAN_STATE_FILE=./keeper-scan.json  OWNERS_FILE=./owners.txt
  *            COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600  COOLDOWN_MAX_SECONDS=86400
  */
-import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import {
   BaseError,
   ContractFunctionRevertedError,
@@ -107,8 +108,11 @@ import {
   filterCandidates,
   formatEurc,
   formatGwei,
+  formatLock,
   isBlockWindowRevert,
   isCoolingDown,
+  lockIsStale,
+  lockWatchdogSeconds,
   maxFeePerGas,
   minRunBaseUnits,
   newOwners,
@@ -122,6 +126,7 @@ import {
   overridesApplied,
   parseCooldownState,
   parseGwei,
+  parseLock,
   parseOwnersFile,
   parseScanState,
   pruneExpired,
@@ -208,6 +213,7 @@ const cooldownFile = env("COOLDOWN_FILE", "./keeper-cooldowns.json");
 const feeStateFile = env("FEE_STATE_FILE", "./keeper-fee.json");
 const feeHoldSeconds = Number(env("FEE_HOLD_SECONDS", "3600"));
 const lockFile = env("LOCK_FILE", "./keeper.lock");
+const lockMaxSeconds = Number(env("LOCK_MAX_SECONDS", "900"));
 const cooldownPolicy = {
   baseSeconds: Number(env("COOLDOWN_SECONDS", "3600")),
   maxSeconds: Number(env("COOLDOWN_MAX_SECONDS", "86400")),
@@ -228,28 +234,35 @@ if (tipRewardShareBps < 0n) throw new Error("TIP_REWARD_SHARE_BPS moet >= 0 zijn
 if (tipBudgetWei < 0n) throw new Error("TIP_BUDGET_ETH moet >= 0 zijn");
 if (!isAddress(feedEthUsd)) throw new Error("FEED_ETH_USD is geen geldig adres");
 if (!Number.isFinite(feeHoldSeconds) || feeHoldSeconds < 0) throw new Error("FEE_HOLD_SECONDS moet een getal >= 0 zijn");
+if (!Number.isFinite(lockMaxSeconds) || lockMaxSeconds < retrySeconds + 60) {
+  throw new Error("LOCK_MAX_SECONDS moet minstens RETRY_SECONDS + 60 zijn");
+}
 
 /**
  * Eén run tegelijk: twee runs zouden om dezelfde nonce en hetzelfde cool-down-bestand vechten. Het lock-bestand bevat
- * de pid; een lock van een proces dat niet meer bestaat, wordt opgeruimd.
+ * pid en starttijd (eindreview I-5). Een lock is verlopen als de pid niet meer bestaat, of als het ouder is dan
+ * LOCK_MAX_SECONDS (standaard 900), ook als de pid inmiddels van een ander proces is. Dat laatste is veilig omdat deze
+ * run zichzelf 15 s vóór die leeftijd stopt (watchdog hieronder).
  */
+const lockStartedAt = Math.floor(Date.now() / 1000);
+const pidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: het proces bestaat, maar is van een andere gebruiker.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
 const acquireLock = (): boolean => {
   if (existsSync(lockFile)) {
-    const pid = Number(readFileSync(lockFile, "utf8").trim());
-    let alive = false;
-    try {
-      if (Number.isInteger(pid) && pid > 0) {
-        process.kill(pid, 0);
-        alive = true;
-      }
-    } catch {
-      alive = false;
-    }
-    if (alive) return false;
+    const lock = parseLock(readFileSync(lockFile, "utf8"), Math.floor(statSync(lockFile).mtimeMs / 1000));
+    if (!lockIsStale(lock, lockStartedAt, lockMaxSeconds, pidAlive)) return false;
+    console.warn(`verlopen lock opgeruimd (pid ${lock.pid}, ${lockStartedAt - lock.startedAt} s oud)`);
     unlinkSync(lockFile);
   }
   const fd = openSync(lockFile, "wx");
-  writeFileSync(fd, `${process.pid}\n`);
+  writeFileSync(fd, formatLock({ pid: process.pid, startedAt: lockStartedAt }));
   closeSync(fd);
   return true;
 };
@@ -259,11 +272,16 @@ if (!acquireLock()) {
 }
 process.on("exit", () => {
   try {
-    if (readFileSync(lockFile, "utf8").trim() === String(process.pid)) unlinkSync(lockFile);
+    if (parseLock(readFileSync(lockFile, "utf8"), 0).pid === process.pid) unlinkSync(lockFile);
   } catch {
     // al weg
   }
 });
+// Eindreview I-5: een run die blijft hangen, stopt zichzelf voordat zijn lock verloopt.
+setTimeout(() => {
+  console.error(`run loopt langer dan ${lockWatchdogSeconds(lockMaxSeconds)} s (LOCK_MAX_SECONDS ${lockMaxSeconds}); gestopt`);
+  process.exit(1);
+}, lockWatchdogSeconds(lockMaxSeconds) * 1000).unref();
 
 const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
 const account = dryRun ? undefined : privateKeyToAccount(env("KEEPER_PRIVATE_KEY") as Hex);

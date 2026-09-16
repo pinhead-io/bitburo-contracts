@@ -22,9 +22,12 @@ import {
   isDirectExecute,
   formatEurc,
   formatGwei,
+  formatLock,
   isBlockWindowRevert,
   isCoolingDown,
   isTemporaryFailure,
+  lockIsStale,
+  lockWatchdogSeconds,
   maxFeePerGas,
   maxRunValues,
   minRunBaseUnits,
@@ -40,6 +43,7 @@ import {
   overridesApplied,
   parseCooldownState,
   parseGwei,
+  parseLock,
   parseOwnersFile,
   parseScanState,
   pruneExpired,
@@ -626,5 +630,40 @@ describe("register spam filter (lead 9)", () => {
   test("chunks splits without losing or reordering owners", () => {
     expect(chunks([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
     expect(chunks([], 20)).toEqual([]);
+  });
+});
+
+describe("lock (final review I-5)", () => {
+  const alive = (pids: number[]) => (pid: number) => pids.includes(pid);
+
+  test("the lock stores pid and start time and reads back; the old pid-only format gets the file time", () => {
+    const lock = { pid: 4242, startedAt: 1_789_600_000 };
+    expect(parseLock(formatLock(lock), 0)).toEqual(lock);
+    expect(parseLock("4242\n", 1_789_500_000)).toEqual({ pid: 4242, startedAt: 1_789_500_000 });
+    expect(parseLock("rommel", 7)).toEqual({ pid: 0, startedAt: 7 });
+  });
+
+  test("a young lock of a live pid holds; of a dead pid it is stale", () => {
+    const lock = { pid: 100, startedAt: 1_000 };
+    expect(lockIsStale(lock, 1_100, 900, alive([100]))).toBe(false);
+    expect(lockIsStale(lock, 1_100, 900, alive([]))).toBe(true);
+    expect(lockIsStale({ pid: 0, startedAt: 1_000 }, 1_100, 900, alive([0]))).toBe(true);
+  });
+
+  test("a reused pid: a lock older than the max age is stale even if the pid is alive", () => {
+    // Crash om 1.000; het OS geeft pid 100 later aan een ander proces. Vroeger stopte elke run dan stil.
+    const lock = { pid: 100, startedAt: 1_000 };
+    expect(lockIsStale(lock, 1_899, 900, alive([100]))).toBe(false);
+    expect(lockIsStale(lock, 1_900, 900, alive([100]))).toBe(true);
+  });
+
+  test("a start time in the future (clock changed) leaves the decision to the pid", () => {
+    expect(lockIsStale({ pid: 100, startedAt: 5_000 }, 1_000, 900, alive([100]))).toBe(false);
+    expect(lockIsStale({ pid: 100, startedAt: 5_000 }, 1_000, 900, alive([]))).toBe(true);
+  });
+
+  test("the run stops itself before its lock expires", () => {
+    expect(lockWatchdogSeconds(900)).toBe(885);
+    expect(lockWatchdogSeconds(10)).toBe(0);
   });
 });
