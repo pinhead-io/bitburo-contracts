@@ -626,10 +626,9 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
     }
 
     /// @notice Meet de beste extra winst van een LP-aanvaller (aandeel 50%, 80%, 95% van de actieve liquiditeit, gemint
-    ///         in een eerder blok) bij de huidige protocolfee, met pushes binnen de begintick. Correcties van 500 en
-    ///         10.000 EURC: geen winst. Correctie van 20.000 EURC (run tot ~12.300 EURC dankzij de diepe LP): gemeten
-    ///         op blok 51.390.800 +0,066 EURC (0,05 bp) bij 95%; daar geldt de grens van 1 bp uit de protocolfee-0-meting.
-    ///         Vroeger: < 0,5 bp met pushes tot 5 bp; die pushes veranderen de tick en worden nu geweigerd.
+    ///         in een eerder blok) bij de huidige protocolfee, met pushes binnen de begintick, voor correcties van 500,
+    ///         10.000 en 20.000 EURC. Eis (door Arjan geaccepteerd): < 0,5 bp van de run. De uitkomst schuift per blok
+    ///         met de poolstand; gemeten tot +0,18 bp (koop van 10.000 EURC, aandeel 95%, blok 51.402.700).
     function test_fork_lpAttackerProfitAtCurrentProtocolFee() public {
         uint256 snap0 = vm.snapshotState();
         uint256[3] memory phis = [uint256(50), 80, 95];
@@ -644,11 +643,9 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
                     console.log("  beste extra winst (EURC 6 dec):");
                     console.logInt(extra);
                     assertGt(run, 0, "geen enkele push slaagde: de test bewijst niets");
-                    if (sizes[k] <= 10_000e6) {
-                        assertLe(extra, 0, "LP-aanvaller maakt winst bij de huidige protocolfee");
-                    } else {
-                        assertLt(extra * 10_000, int256(run), "LP-aanvaller haalt 1 bp of meer van de run");
-                    }
+                    console.log("  extra winst (bp x100 van de run):");
+                    console.logInt(extra * 1_000_000 / int256(run));
+                    assertLt(extra * 20_000, int256(run), "LP-aanvaller haalt 0,5 bp of meer van de run");
                 }
             }
         }

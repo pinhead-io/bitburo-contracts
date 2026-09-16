@@ -323,6 +323,9 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
                 sum.comparisons += b.okN;
                 if (b.bp > sum.maxBpX100) sum.maxBpX100 = b.bp;
                 if (feeOff) assertLt(b.bp, 100, "extra winst 1 bp of meer bij protocolfee 0");
+                // Een aanvaller met een groot LP-aandeel mag hooguit < 0,5 bp van de run halen (door Arjan
+                // geaccepteerd; de uitkomst schuift per blok met de poolstand). Zonder LP-aandeel: geen winst.
+                else if (kind == LP_PRIOR || kind == OOR_JIT) assertLt(b.bp, 50, "LP: extra winst 0,5 bp of meer");
                 else assertLe(b.extra, 0, "extra winst bij de huidige protocolfee");
             }
         }
@@ -603,7 +606,8 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
 
     // ─── Scenario's uit de meting ───────────────────────────────────────────────────────────────────────────
 
-    /// @notice LP uit een eerder blok (99% van EURC/USDC, of 99,9% van beide pools), huidige protocolfee: geen winst.
+    /// @notice LP uit een eerder blok (99% van EURC/USDC, of 99,9% van beide pools), huidige protocolfee: extra winst
+    ///         onder 0,5 bp van de run.
     function test_scenario_lpPriorBlock_currentProtocolFee_noProfit() public {
         Summary memory sum = _newSummary();
         _cfg(LP_PRIOR, false, false, 990, 1);
@@ -615,7 +619,7 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         _grid(sum, false, true);
         _summary("LP eerder blok, huidige protocolfee", sum);
         assertGt(sum.comparisons, 0, "niets vergeleken");
-        assertLe(sum.maxBpX100, 0);
+        assertLt(sum.maxBpX100, 50);
     }
 
     /// @notice LP uit een eerder blok alleen in EURC/USDC (99%, of 99,9% met LP in beide pools), protocolfee 0 (zoals
@@ -660,7 +664,7 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
 
     /// @notice JIT net buiten de range in de swaprichting (schrijft geen observatie) plus push, alleen EURC/USDC (99%)
     ///         en in beide pools (99,9%), huidige protocolfee: de run blijft binnen wat de in-range liquiditeit
-    ///         toelaat, en geen winst.
+    ///         toelaat, en de extra winst blijft onder 0,5 bp van de run.
     function test_scenario_jitOutOfRange_currentProtocolFee() public {
         Summary memory sum = _newSummary();
         _cfg(OOR_JIT, false, false, 990, 1);
@@ -669,7 +673,7 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         _grid(sum, false, true);
         _summary("JIT buiten de range, huidige protocolfee", sum);
         assertGt(sum.comparisons, 0, "niets vergeleken");
-        assertLe(sum.maxBpX100, 0);
+        assertLt(sum.maxBpX100, 50);
     }
 
     /// @notice Idem bij protocolfee 0: < 1 bp.
@@ -692,8 +696,8 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         assertLe(sum.maxBpX100, 0);
     }
 
-    /// @notice Twee owners in één blok met LP uit een eerder blok (99,9% van beide pools), push in EURC/USDC: geen
-    ///         winst bij de huidige protocolfee, < 1 bp bij protocolfee 0.
+    /// @notice Twee owners in één blok met LP uit een eerder blok (99,9% van beide pools), push in EURC/USDC: < 0,5 bp
+    ///         bij de huidige protocolfee, < 1 bp bij protocolfee 0.
     function test_scenario_twoOwnersOneBlock_lpPriorBlock() public {
         Summary memory cur = _newSummary();
         _cfg(LP_PRIOR, true, false, 999, 2);

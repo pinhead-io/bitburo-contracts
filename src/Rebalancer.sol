@@ -42,10 +42,11 @@ import {TickMath} from "./libraries/TickMath.sol";
  *         de begintick duwen (≤ 1 tick ≈ 1 bp per pool) en geen JIT-liquiditeit in de range zetten. Vóór én na de
  *         swap moet de koers bovendien binnen MAX_BLOCK_MOVE_BPS van die begintick liggen, inclusief de eigen
  *         swap. Restrisico: een LP met een groot aandeel die in een eerder blok minde, krijgt een deel van de
- *         poolfee terug. Bij de huidige protocolfee levert dat met een push binnen de tick bij correcties tot
- *         10.000 EURC geen winst op (bij een run van ~12.300 EURC en een aandeel van 95%: +0,05 bp); zet Uniswap de
- *         protocolfee op 0, dan hooguit ~1 bp van de run (gemeten +0,80 bp in de fork-tests). Niet gezien wordt
- *         duwen aan het eind van het vorige blok (review I-4; niet atomair, laag 3 en arbitrage begrenzen het).
+ *         poolfee terug. Bij de huidige protocolfee levert dat met een push binnen de tick gemeten tot +0,18 bp
+ *         van de run op (blok 51.402.700, aandeel 95%; de uitkomst schuift per blok met de poolstand), begrensd
+ *         < 0,5 bp in de fork-tests; zet Uniswap de protocolfee op 0, dan gemeten tot ~0,9 bp, begrensd < 1 bp.
+ *         Niet gezien wordt duwen aan het eind van het vorige blok (review I-4; niet atomair, laag 3 en arbitrage
+ *         begrenzen het).
  *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick
  *         verandert; daarna is de pool in dit blok aangeraakt.
  *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers op SIZING_BPS van
