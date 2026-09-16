@@ -108,11 +108,12 @@ contract AuditMathTest is RebalancerTestBase {
         } else {
             uint256 btcIn = aliceBtcBefore - cbbtc.balanceOf(alice);
             uint256 received = Math.mulDiv(Math.mulDiv(btcIn, price, 1e8), BPS - routerSlip, BPS);
-            feeBase = received;
             amountInEurcValue = Math.mulDiv(btcIn, price, 1e8);
+            // L-B: grondslag is max(ontvangen, verwachte opbrengst tegen de oracle).
+            feeBase = Math.max(received, amountInEurcValue);
             assertEq(eurc.balanceOf(alice) - aliceEurcBefore, received - feePaid, "owner kreeg niet received - fee");
             assertGt(router.lastAmountOutMinimum(), 0, "amountOutMinimum 0");
-            assertGe(feePaid + 1, Math.mulDiv(r.KEEPER_REWARD_EURC(), BPS - routerSlip, BPS), "verkoop-fee te laag");
+            assertGe(feePaid, r.KEEPER_REWARD_EURC(), "verkoop-fee onder de beloning");
             // Ceil op wantBtc: de verkochte waarde ligt hooguit 1 sat boven de correctie.
             assertLe(amountInEurcValue, absDelta + price / 1e8, "meer dan 1 sat boven de correctie verkocht");
         }

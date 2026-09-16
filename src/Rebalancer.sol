@@ -73,7 +73,9 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint16 public constant MAX_SPOT_DEVIATION_BPS = 50;
     /// @notice Ondergrens voor `minTradeEurc` (20 EURC). Bij FEE_BPS = 25 is de fee van de kleinste run dan
     ///         precies KEEPER_REWARD_EURC, zodat elke run de volledige keeperbeloning dekt en een dust-owner
-    ///         de wekkers niet gratis bezig kan houden. Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
+    ///         de wekkers niet gratis bezig kan houden. Dat geldt voor kopen én verkopen: bij een koop is de
+    ///         fee-grondslag het bruto inputbedrag, bij een verkoop max(ontvangen, verwachte opbrengst), waarbij
+    ///         de verwachte opbrengst dezelfde oraclewaarde is waarop de ondergrens is gecontroleerd (audit L-B). Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
     ///         sats bij 80.000 EURC/cbBTC, waardoor de afronding in `amountOutMinimum` onder 1 bp blijft.
     uint64 public constant MIN_TRADE_FLOOR = 20e6;
     /// @notice Ondergrens voor `maxCorrectionBps` (0,1% per run): sluit configuraties uit die elk interval een
@@ -523,7 +525,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         returns (uint256 fee, uint256 reward, uint256 amountOut)
     {
         EURC.safeTransferFrom(owner, address(this), amountIn);
-        (fee, reward) = _takeFee(amountIn, rewardTo);
+        (fee, reward) = _takeFee(amountIn, amountIn, rewardTo);
         uint256 swapIn = amountIn - fee;
 
         uint256 expectedOut = Math.mulDiv(swapIn, CBBTC_UNIT, price);
@@ -542,7 +544,9 @@ contract Rebalancer is ReentrancyGuardTransient {
         _requireSpotNear(price);
     }
 
-    /// @dev Verkoop: output naar het contract, fee over het werkelijk ontvangen bedrag, rest naar de owner.
+    /// @dev Verkoop: output naar het contract, fee over max(ontvangen, expectedOut), rest naar de owner. De fee is
+    ///      begrensd op het ontvangen bedrag. Over `expectedOut` en niet alleen over `received`, zodat de fee van
+    ///      een run op de MIN_TRADE_FLOOR na poolfees en slippage niet onder KEEPER_REWARD_EURC zakt (audit L-B).
     ///      Revert met `SpotDeviatesFromOracle` als de spot na de swap te ver van de oracle ligt.
     function _sell(address owner, Params memory p, uint256 amountIn, uint256 price, address rewardTo)
         internal
@@ -566,20 +570,25 @@ contract Rebalancer is ReentrancyGuardTransient {
         uint256 received = EURC.balanceOf(address(this)) - eurcBefore;
         _requireSpotNear(price);
 
-        (fee, reward) = _takeFee(received, rewardTo);
+        (fee, reward) = _takeFee(Math.max(received, expectedOut), received, rewardTo);
         amountOut = received - fee;
         EURC.safeTransfer(owner, amountOut);
     }
 
-    /// @dev Fee in EURC over `eurcAmount`; beloning eruit naar rewardTo, rest naar de treasury. Beide transfers
-    ///      zijn niet-reverterend (`trySafeTransfer`), zodat de run nooit stukloopt op de ontvanger van de fee:
+    /// @dev Fee in EURC: FEE_BPS over `feeBase`, begrensd op `maxFee` (het EURC-bedrag waar de fee uit komt).
+    ///      Bij een koop zijn beide het bruto inputbedrag; bij een verkoop is `feeBase` max(ontvangen,
+    ///      expectedOut) en `maxFee` het ontvangen bedrag. Beloning eruit naar rewardTo, rest naar de treasury.
+    ///      Beide transfers zijn niet-reverterend (`trySafeTransfer`), zodat de run nooit stukloopt op de ontvanger van de fee:
     ///      - faalt de beloning (bijv. geblacklist rewardTo), dan is `reward` 0 en gaat de hele fee naar de
     ///        treasury;
     ///      - faalt de treasury-transfer, dan blijft dat deel in het contract (`FeeRetained`) en haalt `sweep`
     ///        het later op.
     ///      De fee wordt in beide gevallen volledig bij de owner ingehouden; `reward + treasury + retained == fee`.
-    function _takeFee(uint256 eurcAmount, address rewardTo) internal returns (uint256 fee, uint256 reward) {
-        fee = Math.mulDiv(eurcAmount, FEE_BPS, BPS);
+    function _takeFee(uint256 feeBase, uint256 maxFee, address rewardTo)
+        internal
+        returns (uint256 fee, uint256 reward)
+    {
+        fee = Math.min(Math.mulDiv(feeBase, FEE_BPS, BPS), maxFee);
         if (rewardTo != address(0)) {
             reward = Math.min(KEEPER_REWARD_EURC, fee);
             if (reward > 0 && !EURC.trySafeTransfer(rewardTo, reward)) reward = 0;

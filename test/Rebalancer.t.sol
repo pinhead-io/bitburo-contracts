@@ -380,15 +380,17 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_rewardCappedByFee() public {
-        // Sinds MIN_TRADE_FLOOR is een fee onder de beloning alleen nog via verkoop-slippage mogelijk:
-        // 150 EURC in cbBTC, cap 10% = 15 < vloer 20 -> verkoop 25_000 sats (20 EURC); router levert 1% minder
-        // (19,8 EURC), fee 49_500 < 50_000: hele fee naar rewardTo.
+        // Vroeger kon verkoop-slippage de fee onder de beloning duwen: 150 EURC in cbBTC, cap 10% = 15 < vloer 20
+        // -> verkoop 25_000 sats (20 EURC); router levert 1% minder (19,8 EURC), fee was 49_500. Sinds L-B telt
+        // de fee over max(ontvangen, verwacht) = 20 EURC -> 50_000, precies de beloning. Een fee onder de beloning
+        // is via `execute` dus niet meer te bereiken; de begrenzing zelf staat in test_takeFee_cappedAtMaxFee.
         _setUser(alice, 0, 187_500, _defaultParams());
         router.setSlippageBps(100);
         r.execute(alice, keeper);
         assertEq(cbbtc.balanceOf(alice), 187_500 - 25_000);
-        assertEq(eurc.balanceOf(keeper), 49_500);
+        assertEq(eurc.balanceOf(keeper), 50_000);
         assertEq(eurc.balanceOf(treasury), 0);
+        assertEq(eurc.balanceOf(alice), 19_800_000 - 50_000);
     }
 
     function test_execute_rewardToZeroSendsWholeFeeToTreasury() public {
@@ -1010,8 +1012,55 @@ contract RebalancerTest is RebalancerTestBase {
         router.setSlippageBps(100);
         r.execute(alice, keeper);
         assertEq(cbbtc.balanceOf(address(r)), 0);
-        // Fee over het werkelijk ontvangen bedrag (99 EURC), niet over de verwachting.
-        assertEq(eurc.balanceOf(keeper) + eurc.balanceOf(treasury), 99e6 * 25 / BPS);
+        // L-B: fee over max(ontvangen 99 EURC, verwacht 100 EURC), dus over de oraclewaarde.
+        assertEq(eurc.balanceOf(keeper) + eurc.balanceOf(treasury), 100e6 * 25 / BPS);
+        assertEq(eurc.balanceOf(alice), 99e6 - 100e6 * 25 / BPS);
+    }
+
+    /// @dev L-B, rekenvoorbeeld uit de audit: verkoop ter waarde van 20,000160 EURC, ontvangen 19,980159 EURC
+    ///      (10 bps router-slippage). Vroeger was de fee 25 bps over `received` = 49.950, onder de beloning, en
+    ///      kreeg de aanroeper alles. Nu is de fee 25 bps over de oraclewaarde = 50.000: precies de beloning, zoals
+    ///      MIN_TRADE_FLOOR belooft. Iets boven de vloer (20,01 EURC) krijgt de treasury ook iets; vroeger niet.
+    function test_execute_sellFeeFloorUsesExpectedOut() public {
+        _sellAtValue(alice, 80_000_640_000, keeper); // 25.000 sats × 80.000,64 = 20,000160 EURC
+        assertEq(eurc.balanceOf(keeper), 50_000, "beloning volledig");
+        assertEq(eurc.balanceOf(treasury), 0, "fee is precies de beloning");
+        assertEq(eurc.balanceOf(alice), 19_980_159 - 50_000);
+        assertGt(19_980_159 * 25 / BPS, 0);
+        assertLt(19_980_159 * 25 / BPS, 50_000, "opzet: oude fee lag onder de beloning");
+
+        address keeper2 = makeAddr("keeper2");
+        _sellAtValue(bob, 80_040_000_000, keeper2); // 25.000 sats × 80.040 = 20,010000 EURC, ontvangen 19,989990
+        assertEq(eurc.balanceOf(keeper2), 50_000);
+        assertEq(eurc.balanceOf(treasury), 25, "treasury krijgt > 0 (fee 50.025)");
+        assertLe(19_989_990 * 25 / BPS, 50_000, "opzet: oude fee gaf de treasury 0");
+    }
+
+    /// @dev Verkoop van precies 25.000 sats (allowance) tegen `price`, met 10 bps router-slippage.
+    function _sellAtValue(address user, uint256 price, address rewardTo) internal {
+        _setPrice(price);
+        router.setPrice(price);
+        router.setSlippageBps(10);
+        _setUser(user, 0, 1_250_000, _defaultParams());
+        vm.prank(user);
+        cbbtc.approve(address(r), 25_000);
+        r.execute(user, rewardTo);
+        assertEq(cbbtc.balanceOf(user), 1_250_000 - 25_000);
+    }
+
+    /// @dev L-B: de fee is begrensd op het ontvangen bedrag. Onbereikbaar via de router (minOut ligt hooguit
+    ///      MAX_SLIPPAGE_BPS onder expectedOut), dus hier via een harness die `_takeFee` rechtstreeks aanroept.
+    function test_takeFee_cappedAtMaxFee() public {
+        RebalancerFeeHarness h = new RebalancerFeeHarness(_deployment());
+        eurc.mint(address(h), 1_000e6);
+        (uint256 fee, uint256 reward) = h.takeFee(1_000e6, 1_000, keeper);
+        assertEq(fee, 1_000, "begrensd op maxFee");
+        assertEq(reward, 1_000, "beloning begrensd op de fee");
+        assertEq(eurc.balanceOf(keeper), 1_000);
+        (fee, reward) = h.takeFee(1_000e6, type(uint256).max, address(0));
+        assertEq(fee, 2_500_000);
+        assertEq(reward, 0);
+        assertEq(eurc.balanceOf(treasury), 2_500_000);
     }
 
     function test_execute_revertsWhenTokenPaused() public {
@@ -1901,6 +1950,15 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
         if (r.retired()) {
             assertEq(r.dueOwners(0, handler.actorCount()).length, 0, "dueOwners niet leeg na retire");
         }
+    }
+}
+
+/// @dev Maakt `_takeFee` aanroepbaar voor de begrenzingstest.
+contract RebalancerFeeHarness is Rebalancer {
+    constructor(Deployment memory d) Rebalancer(d) {}
+
+    function takeFee(uint256 feeBase, uint256 maxFee, address rewardTo) external returns (uint256, uint256) {
+        return _takeFee(feeBase, maxFee, rewardTo);
     }
 }
 

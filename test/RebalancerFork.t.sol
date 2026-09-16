@@ -277,9 +277,12 @@ contract RebalancerForkTest is Test {
         assertApproxEqRel(received, btcSold * price / 1e8 * 9975 / 10_000, 0.01e18);
         assertEq(EURC.balanceOf(keeper), 50_000, "beloning");
         assertGt(EURC.balanceOf(treasury), 0, "treasury-fee");
-        // fee = 25 bps over het ontvangen bedrag = reward + treasury.
+        // fee = 25 bps over max(ontvangen, verwachte opbrengst tegen de oracle) = reward + treasury (audit L-B).
         uint256 fee = EURC.balanceOf(keeper) + EURC.balanceOf(treasury);
-        assertEq(fee, (received + fee) * 25 / 10_000);
+        uint256 feeBase = received + fee;
+        uint256 expectedOut = btcSold * price / 1e8;
+        if (expectedOut > feeBase) feeBase = expectedOut;
+        assertEq(fee, feeBase * 25 / 10_000);
         assertEq(EURC.balanceOf(address(r)), 0);
         assertEq(CBBTC.balanceOf(address(r)), 0);
 
