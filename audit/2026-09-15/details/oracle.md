@@ -160,13 +160,23 @@ Geen van beide tools signaleert de kernproblemen (slot0-manipuleerbaarheid, feed
 
 ## Testgaten (oracle/prijs-vector)
 
-1. Fork-test met atomaire zelf-sandwich (front-run → `execute` → back-run) die asserteert dat de aanvaller géén positieve PnL kan halen (faalt nu, zie ORC-1).
-2. Post-swap-deviatie: test dat de spot ná de swap binnen de tolerantie ligt (bestaat niet omdat de check niet bestaat).
-3. Fork-test die de werkelijke leeftijd en cadans van beide feeds toetst aan `MAX_AGE_*` (en `updatedAt` niet ouder dan heartbeat + marge), plus een check dat de feedadressen in Chainlinks referentiedirectory voorkomen.
-4. Unit-test die alleen de EURC/USDC-pool > 50 bps verschuift (nu alleen 0,4 %-pass; de fail-kant loopt via de cbBTC-pool).
-5. Scenario waarin feed en spot los van elkaar bewegen (feed lagt 0,3 %, spot ±0,3 %) om ORC-3 zichtbaar te maken; de mocks koppelen ze nu altijd (`_setPrice`).
-6. Sequencer `startedAt == 0`.
-7. Feed met afwijkende `decimals()` (constructor moet reverten na fix ORC-5).
-8. EURC-depeg-scenario (feed 0,90, pool volgt) met assertie over de richting van de run.
-9. `_spotOut` bij extreme `sqrtPriceX96` (MIN/MAX_SQRT_RATIO): geen Panic naar buiten via `isDue`/`dueOwners`.
-10. Invariant-handler heeft geen actie die alleen de pools verschuift (los van `feedBtc`), dus de spot-check wordt in de invariant-suite nooit geraakt.
+1. [x] Fork-test met atomaire zelf-sandwich (front-run → `execute` → back-run) die asserteert dat de aanvaller géén positieve PnL kan halen (faalt nu, zie ORC-1).
+   → Gedekt: fork `test_poc_selfSandwich_10k_slippage100` (aanval faalt, PnL ≤ 0, slachtoffer ongemoeid) en `test_poc_executorSandwich`.
+2. [x] Post-swap-deviatie: test dat de spot ná de swap binnen de tolerantie ligt (bestaat niet omdat de check niet bestaat).
+   → Gedekt: fork `test_fork_postSwapSpotWithinTolerance` en unit `test_execute_revertsWhenSpotDeviatesAfterSwap`.
+3. [x] Fork-test die de werkelijke leeftijd en cadans van beide feeds toetst aan `MAX_AGE_*` (en `updatedAt` niet ouder dan heartbeat + marge), plus een check dat de feedadressen in Chainlinks referentiedirectory voorkomen.
+   → Gedekt: fork `test_fork_feedsAreFreshAndMatchConstants` (leeftijd, decimals, description) en `test_fork_feedCadenceWithinMaxAge` (gaten tussen de laatste 24 rondes ≤ `MAX_AGE_*`). De referentiedirectory van Chainlink is off-chain en niet vanuit Forge te raadplegen.
+4. [x] Unit-test die alleen de EURC/USDC-pool > 50 bps verschuift (nu alleen 0,4 %-pass; de fail-kant loopt via de cbBTC-pool).
+   → Gedekt: `test_execute_revertsWhenOnlyEurcPoolDeviates`.
+5. [x] Scenario waarin feed en spot los van elkaar bewegen (feed lagt 0,3 %, spot ±0,3 %) om ORC-3 zichtbaar te maken; de mocks koppelen ze nu altijd (`_setPrice`).
+   → Gedekt: `test_execute_feedAndSpotDivergeIndependently`.
+6. [x] Sequencer `startedAt == 0`.
+   → Gedekt: `test_execute_revertsSequencerDownWhenStartedAtZero`.
+7. [x] Feed met afwijkende `decimals()` (constructor moet reverten na fix ORC-5).
+   → Gedekt: `test_constructor_rejectsFeedWithWrongDecimals`.
+8. [x] EURC-depeg-scenario (feed 0,90, pool volgt) met assertie over de richting van de run.
+   → Gedekt: `test_isDue_eurcDepegTurnsHoldIntoSell`.
+9. [x] `_spotOut` bij extreme `sqrtPriceX96` (MIN/MAX_SQRT_RATIO): geen Panic naar buiten via `isDue`/`dueOwners`.
+   → Gedekt: `test_spot_extremeSqrtPriceNeverPanicsInViews`.
+10. [x] Invariant-handler heeft geen actie die alleen de pools verschuift (los van `feedBtc`), dus de spot-check wordt in de invariant-suite nooit geraakt.
+   → Gedekt: handler-actie `shiftSpot` in `RebalancerHandler`, geteld in `invariant_executeFailsOnlyForKnownReasons`.

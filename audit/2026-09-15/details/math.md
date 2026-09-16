@@ -127,13 +127,20 @@ Notatie: EURC = 6 decimalen, cbBTC = 8 decimalen ("sat"), Chainlink = 8 decimale
 
 ## Testgaten in de bestaande suite
 
-1. Geen enkele sell-test met een niet-rond koersgetal (`PRICE = 80_000e6`, `VECTOR_PRICE = 100e6` delen `minTrade` exact) → M-01 onzichtbaar. Voeg een fuzz op `price` toe aan `testFuzz_planBoundedAndAccountingClosed` en assert `due == (correction ≥ minTrade)`.
-2. Geen test voor een geblacklist TREASURY of `rewardTo` (M-02).
-3. Geen assertie `amountOut > 0` / `minOut > 0` bij kleine runs; `minTrade` wordt gefuzzt vanaf 1 zonder die controle (L-01).
-4. Geen test voor "spot binnen 0,5 % + poolfees > maxSlippage" (L-02).
-5. Geen test die na een run de nieuwe fractie t.o.v. band/target controleert of de richting van de volgende run (overshoot/ping-pong, I-01).
-6. Geen test voor `decimals()`-mismatch van de feeds (I-04).
-7. De invariant-handler laat `execute` reverten zonder te registreren waarom; een ghost-teller per revert-reden (NothingToDo vs "Too little received") zou L-02-achtige liveness-uitval zichtbaar maken.
+1. [x] Geen enkele sell-test met een niet-rond koersgetal (`PRICE = 80_000e6`, `VECTOR_PRICE = 100e6` delen `minTrade` exact) → M-01 onzichtbaar. Voeg een fuzz op `price` toe aan `testFuzz_planBoundedAndAccountingClosed` en assert `due == (correction ≥ minTrade)`.
+   → Gedekt: `testFuzz_isDue_matchesCorrectionAtAnyPrice` (koers vrij tussen 20k en 200k, asserteert `due == (correctie ≥ minTrade)` en dat `execute` dan slaagt), plus `testFuzz_poc_sellOnMinTradeFloorAlwaysDue` en `test_poc_smallWalletCanSellWithNonRoundPrice`.
+2. [x] Geen test voor een geblacklist TREASURY of `rewardTo` (M-02).
+   → Gedekt: `test_execute_continuesWhenTreasuryBlacklistedAndSweepRecoversFee`, `test_execute_sellRetainsWholeFeeWhenTreasuryBlacklisted`, `test_execute_rewardFallsBackToTreasuryWhenRewardToBlacklisted`.
+3. [x] Geen assertie `amountOut > 0` / `minOut > 0` bij kleine runs; `minTrade` wordt gefuzzt vanaf 1 zonder die controle (L-01).
+   → Gedekt: `testFuzz_audit_corridorFeeResidue` asserteert cbBTC-output > 0 bij koop en `amountOutMinimum` > 0 bij koop én verkoop; `test_execute_revertsNoOutputWhenBuyYieldsZero`.
+4. [x] Geen test voor "spot binnen 0,5 % + poolfees > maxSlippage" (L-02).
+   → Gedekt: `test_execute_minSlippageCoversSpotDeviationPlusPoolFees`, `test_poc_minSlippageBelowSpotDeviationPlusPoolFees`.
+5. [x] Geen test die na een run de nieuwe fractie t.o.v. band/target controleert of de richting van de volgende run (overshoot/ping-pong, I-01).
+   → Gedekt: `testFuzz_audit_corridorFeeResidue`, `testFuzz_audit_noPingPongConstantPrice`, `test_poc_sellOvershootTailRuns`.
+6. [x] Geen test voor `decimals()`-mismatch van de feeds (I-04).
+   → Gedekt: `test_constructor_rejectsFeedWithWrongDecimals`.
+7. [x] De invariant-handler laat `execute` reverten zonder te registreren waarom; een ghost-teller per revert-reden (NothingToDo vs "Too little received") zou L-02-achtige liveness-uitval zichtbaar maken.
+   → Gedekt: ghost-tellers per revert-reden in `RebalancerHandler`, getoetst door `invariant_executeFailsOnlyForKnownReasons`.
 
 ## Fuzz-/invariant-uitkomst
 
