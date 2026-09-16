@@ -1,7 +1,7 @@
 /**
  * Selectielogica van het keeper-script, los van RPC en bestandssysteem zodat het te testen is.
  */
-import type { Address, Hex } from "viem";
+import { type Address, type Hex, isAddress } from "viem";
 
 export const EURC_UNIT = 1_000_000n;
 
@@ -449,6 +449,80 @@ export const filterCandidates = (rows: readonly OwnerFunds[], priceEurcPerBtc: b
 export const minRunBaseUnits = (minTradeFloor: bigint, minRunEurc: number): bigint => {
   const keeper = BigInt(Math.ceil(minRunEurc * Number(EURC_UNIT)));
   return keeper > minTradeFloor ? keeper : minTradeFloor;
+};
+
+// ─── Eindreview F-2: registratiespam laat de keeper niet stilvallen ─────────────────────────────────────────────
+
+/** Eén `owners(offset, limit)`-lezing. */
+export type ScanSegment = { offset: bigint; limit: bigint };
+
+/**
+ * Eindreview F-2: de volgorde waarin een run het register leest. Niet altijd vanaf 0: vanaf `start` (de opgeslagen
+ * offset, modulo `count`) tot het eind, en daarna van 0 tot `start`, in porties van hooguit `page`. Samen precies één
+ * keer het hele register. Een run die door zijn zoektijd heen is, stopt ergens in deze lijst; de volgende begint daar.
+ * Zo haalt spam vóór een echte owner die owner niet meer elke run uit beeld: na hooguit ⌈count / owners per run⌉ runs is
+ * elke plek een keer aan de beurt geweest.
+ */
+export const scanSegments = (start: bigint, count: bigint, page: bigint): ScanSegment[] => {
+  if (count <= 0n || page <= 0n) return [];
+  const from = ((start % count) + count) % count;
+  const out: ScanSegment[] = [];
+  const push = (lo: bigint, hi: bigint) => {
+    for (let offset = lo; offset < hi; offset += page) {
+      out.push({ offset, limit: hi - offset < page ? hi - offset : page });
+    }
+  };
+  push(from, count);
+  push(0n, from);
+  return out;
+};
+
+/** Opgeslagen startpositie voor de volgende run (`SCAN_STATE_FILE`). */
+export type ScanState = { nextOffset: string };
+
+/** Offset uit het bestand; 0 bij een ontbrekend of ongeldig bestand. */
+export const parseScanState = (json: string | undefined): bigint => {
+  if (json === undefined) return 0n;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    const value = (parsed as ScanState | null)?.nextOffset;
+    return typeof value === "string" && /^\d+$/.test(value) ? BigInt(value) : 0n;
+  } catch {
+    return 0n;
+  }
+};
+
+/**
+ * Waar de volgende run begint:
+ * - is de run gestopt met kandidaten die hij gevonden maar niet meer gelezen heeft (retry-budget op), dan bij de eerste
+ *   daarvan uit het register (`firstUnprocessed`), zodat ze niet een hele ronde wachten;
+ * - anders waar het zoeken stopte (`scannedTo`); heeft de run het hele register gelezen, dan is dat weer de start.
+ */
+export const nextScanOffset = (scannedTo: bigint, firstUnprocessed: bigint | null, count: bigint): bigint => {
+  if (count <= 0n) return 0n;
+  const next = firstUnprocessed ?? scannedTo;
+  return ((next % count) + count) % count;
+};
+
+/**
+ * Eindreview F-2: `OWNERS_FILE`, adressen die elke run eerst worden bediend (zoals de app-keeper eigen gebruikers eerst
+ * bedient), vóór het register. Scheiding door witruimte of komma's; `#` begint commentaar tot het eind van de regel.
+ * Een ongeldig adres is een fout (liever niet starten dan een eigen gebruiker stil overslaan); dubbele adressen tellen
+ * één keer, ongeacht hoofdletters.
+ */
+export const parseOwnersFile = (text: string): Address[] => {
+  const seen = new Set<string>();
+  const out: Address[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    for (const token of line.replace(/#.*$/, "").split(/[\s,]+/)) {
+      if (token === "") continue;
+      if (!isAddress(token, { strict: false })) throw new Error(`OWNERS_FILE: geen geldig adres: ${token}`);
+      if (seen.has(token.toLowerCase())) continue;
+      seen.add(token.toLowerCase());
+      out.push(token as Address);
+    }
+  }
+  return out;
 };
 
 export const chunks = <T>(items: readonly T[], size: number): T[][] => {

@@ -3,3 +3,5 @@ keeper-cooldowns.json
 # Priority fee tussen runs en het lock van een lopende run
 keeper-fee.json
 keeper.lock
+# Waar de volgende run in het register verder zoekt (eindreview F-2)
+keeper-scan.json

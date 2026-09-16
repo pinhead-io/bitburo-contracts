@@ -49,6 +49,15 @@
  * ophouden, moet per adres dat bedrag met allowance aanhouden. Het filter draait één keer per run; wie tijdens de run
  * stort, komt de volgende run aan de beurt.
  *
+ * Eindreview F-2: met genoeg lege registraties kostte alleen dat lezen het hele retry-budget, elke run weer vanaf 0.
+ * - Het zoeken heeft een eigen tijdsgrens, SEARCH_SECONDS (standaard 180) na de start, binnen het retry-budget: daarna
+ *   blijft er tijd over voor isDue en execute.
+ * - Het register wordt niet meer altijd vanaf 0 gelezen: de volgende run begint waar deze stopte (SCAN_STATE_FILE),
+ *   en loopt na het eind door vanaf 0. Stopt een run met gevonden maar ongelezen kandidaten, dan begint de volgende
+ *   bij de eerste daarvan.
+ * - Een fout van de node bij een portie (owners, saldo en allowance, isDue) slaat alleen die portie over, met een log.
+ * - OWNERS_FILE (optioneel): adressen die elke run eerst worden bediend, vóór het register.
+ *
  * Grote correcties gaan in delen die 10 minuten na elkaar mogen. Draai dit script daarom elke 10 minuten.
  *
  * Gebruik:
@@ -58,6 +67,7 @@
  *            GAS_LIMIT=1000000  FEE_STATE_FILE=./keeper-fee.json  FEE_HOLD_SECONDS=3600  LOCK_FILE=./keeper.lock
  *            GAS_ESTIMATE=500000  TIP_REWARD_SHARE_BPS=10000  TIP_BUDGET_ETH=0.0015
  *            FEED_ETH_USD=0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70
+ *            SEARCH_SECONDS=180  SCAN_STATE_FILE=./keeper-scan.json  OWNERS_FILE=./owners.txt
  *            COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600  COOLDOWN_MAX_SECONDS=86400
  */
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -103,6 +113,7 @@ import {
   minRunBaseUnits,
   newOwners,
   nextAttemptBlock,
+  nextScanOffset,
   nextBlockOverrides,
   nextSendBlock,
   onchainRevertVerdict,
@@ -111,10 +122,13 @@ import {
   overridesApplied,
   parseCooldownState,
   parseGwei,
+  parseOwnersFile,
+  parseScanState,
   pruneExpired,
   recordFailure,
   retryDeadline,
   runSizeSkipReason,
+  scanSegments,
   servedBefore,
   shouldReadPageAgain,
   startPriorityFee,
@@ -177,6 +191,9 @@ const minRunEurc = Number(env("MIN_RUN_EURC", "20"));
 const blockRetries = Number(env("BLOCK_RETRIES", "3"));
 const blockWaitSeconds = Number(env("BLOCK_WAIT_SECONDS", "30"));
 const retrySeconds = Number(env("RETRY_SECONDS", "540"));
+const searchSeconds = Number(env("SEARCH_SECONDS", "180"));
+const scanStateFile = env("SCAN_STATE_FILE", "./keeper-scan.json");
+const ownersFile = process.env.OWNERS_FILE;
 const sendRetryBlocks = Number(env("SEND_RETRY_BLOCKS", "30"));
 const gasLimit = BigInt(env("GAS_LIMIT", "1000000"));
 const configuredFeePolicy = {
@@ -199,6 +216,11 @@ if (!isAddress(rebalancer)) throw new Error("REBALANCER is geen geldig adres");
 if (!Number.isFinite(minRunEurc) || minRunEurc < 0) throw new Error("MIN_RUN_EURC moet een getal >= 0 zijn");
 if (!Number.isInteger(blockRetries) || blockRetries < 0) throw new Error("BLOCK_RETRIES moet een geheel getal >= 0 zijn");
 if (!Number.isFinite(retrySeconds) || retrySeconds < 0) throw new Error("RETRY_SECONDS moet een getal >= 0 zijn");
+if (!Number.isFinite(searchSeconds) || searchSeconds < 0 || searchSeconds > retrySeconds) {
+  throw new Error("SEARCH_SECONDS moet een getal tussen 0 en RETRY_SECONDS zijn");
+}
+/** Eindreview F-2: adressen die elke run eerst worden bediend. Een ongeldig bestand stopt de run vóór er iets gebeurt. */
+const priorityOwners: Address[] = ownersFile === undefined || ownersFile === "" ? [] : parseOwnersFile(readFileSync(ownersFile, "utf8"));
 if (!Number.isInteger(sendRetryBlocks) || sendRetryBlocks < 1) throw new Error("SEND_RETRY_BLOCKS moet een geheel getal >= 1 zijn");
 if (configuredFeePolicy.base > configuredFeePolicy.max) throw new Error("PRIORITY_FEE_GWEI mag niet boven MAX_PRIORITY_FEE_GWEI liggen");
 if (gasEstimate <= 0n) throw new Error("GAS_ESTIMATE moet een geheel getal > 0 zijn");
@@ -251,6 +273,8 @@ const walletClient = account ? createWalletClient({ account, chain: base, transp
 const nowSec = () => Math.floor(Date.now() / 1000);
 const startSeconds = nowSec();
 const deadline = retryDeadline(startSeconds, retrySeconds);
+/** Eindreview F-2: eigen tijdsgrens voor het zoeken in het register, gescheiden van het retry-budget. */
+const searchDeadline = startSeconds + searchSeconds;
 
 /** Leest de node het volgende blok (blok-overrides)? Eén keer per run gecontroleerd met de probe. */
 let readsNextBlock = false;
@@ -664,67 +688,118 @@ const multicallResults = async (
   return (results as { status: string; result?: unknown }[]).map((r) => (r.status === "success" ? r.result : undefined));
 };
 
+/** Een kandidaat, met zijn plek in het register (null voor een adres uit OWNERS_FILE). */
+type Candidate = { owner: Address; index: bigint | null };
+
+/** Wat het filter nodig heeft: de tokens van het contract, de feedkoers en de ondergrens. */
+type FilterContext = { eurcToken: Address; cbbtcToken: Address; price: bigint; minRun: bigint };
+
 /**
- * Lead 9: alle geregistreerde owners die in minstens één richting een run kunnen halen (`filterCandidates`). Een
- * owner waarvan een lezing mislukt, blijft voorzichtigheidshalve kandidaat. Geeft een lege lijst als de feedkoers niet
- * te lezen is: dan is volgens het contract niemand due.
+ * Lead 9: welke van deze owners kunnen in minstens één richting een run halen (`filterCandidates`)? Eén multicall. Een
+ * owner waarvan een lezing mislukt, blijft voorzichtigheidshalve kandidaat. Een fout van de node gooit; de aanroeper
+ * slaat de portie dan over.
  */
-const findCandidates = async (): Promise<Address[]> => {
+const fundedAmong = async (owners: readonly Address[], ctx: FilterContext): Promise<Set<string>> => {
+  const results = await multicallResults(
+    owners.flatMap((owner) => [
+      { address: rebalancer, functionName: "params", args: [owner] },
+      { address: ctx.eurcToken, functionName: "balanceOf", args: [owner] },
+      { address: ctx.eurcToken, functionName: "allowance", args: [owner, rebalancer] },
+      { address: ctx.cbbtcToken, functionName: "balanceOf", args: [owner] },
+      { address: ctx.cbbtcToken, functionName: "allowance", args: [owner, rebalancer] },
+    ]),
+  );
+  const keep = new Set<string>();
+  const rows: OwnerFunds[] = [];
+  owners.forEach((owner, i) => {
+    const [params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance] = results.slice(i * 5, i * 5 + 5);
+    if ([params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance].some((r) => r === undefined)) {
+      console.warn(`${owner}: saldo of allowance niet te lezen; blijft kandidaat`);
+      keep.add(owner.toLowerCase());
+      return;
+    }
+    rows.push({
+      owner,
+      active: (params as readonly [boolean, ...unknown[]])[0],
+      eurcBalance: eurcBalance as bigint,
+      eurcAllowance: eurcAllowance as bigint,
+      cbbtcBalance: cbbtcBalance as bigint,
+      cbbtcAllowance: cbbtcAllowance as bigint,
+    });
+  });
+  for (const owner of filterCandidates(rows, ctx.price, ctx.minRun)) keep.add(owner.toLowerCase());
+  return keep;
+};
+
+/**
+ * Tokens, feedkoers en ondergrens voor het filter. undefined als de feedkoers revert: dan is volgens het contract niemand
+ * due. Een fout van de node bij deze paar lezingen breekt de run af (er is dan nog niets gedaan).
+ */
+const filterContext = async (): Promise<FilterContext | undefined> => {
   const [eurcToken, cbbtcToken, floor] = await Promise.all([
     read<Address>("EURC"),
     read<Address>("CBBTC"),
     read<bigint>("MIN_TRADE_FLOOR"),
   ]);
-  let price: bigint;
   try {
-    price = await read<bigint>("quote");
+    const price = await read<bigint>("quote");
+    return { eurcToken, cbbtcToken, price, minRun: minRunBaseUnits(floor, minRunEurc) };
   } catch (error) {
-    // Alleen een revert van de feed (storing, verouderd) betekent "niemand due"; een RPC-fout breekt de run af.
     if (revertOf(error) === undefined) throw error;
     console.warn(`feedkoers niet te lezen (${describeError(error)}); niemand due`);
-    return [];
+    return undefined;
   }
-  const minRun = minRunBaseUnits(floor, minRunEurc);
-  const found: Address[] = [];
-  for (let offset = 0n; offset < checked; offset += REGISTER_PAGE) {
-    const page = await read<readonly Address[]>("owners", [offset, REGISTER_PAGE]);
-    for (const batch of chunks(page, FUNDS_BATCH)) {
-      const results = await multicallResults(
-        batch.flatMap((owner) => [
-          { address: rebalancer, functionName: "params", args: [owner] },
-          { address: eurcToken, functionName: "balanceOf", args: [owner] },
-          { address: eurcToken, functionName: "allowance", args: [owner, rebalancer] },
-          { address: cbbtcToken, functionName: "balanceOf", args: [owner] },
-          { address: cbbtcToken, functionName: "allowance", args: [owner, rebalancer] },
-        ]),
-      );
-      const rows: OwnerFunds[] = [];
-      batch.forEach((owner, i) => {
-        const [params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance] = results.slice(i * 5, i * 5 + 5);
-        if ([params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance].some((r) => r === undefined)) {
-          console.warn(`${owner}: saldo of allowance niet te lezen; blijft kandidaat`);
-          found.push(owner);
-          return;
-        }
-        rows.push({
-          owner,
-          active: (params as readonly [boolean, ...unknown[]])[0],
-          eurcBalance: eurcBalance as bigint,
-          eurcAllowance: eurcAllowance as bigint,
-          cbbtcBalance: cbbtcBalance as bigint,
-          cbbtcAllowance: cbbtcAllowance as bigint,
-        });
-      });
-      found.push(...filterCandidates(rows, price, minRun));
+};
+
+/**
+ * Eindreview F-2: kandidaten uit het register, vanaf de opgeslagen offset (`scanSegments`) en binnen de zoektijd
+ * (`SEARCH_SECONDS` na de start, los van het retry-budget). Een fout van de node bij een portie (`owners` of de
+ * multicall) slaat alleen die portie over. Geeft ook terug tot waar het register gelezen is.
+ */
+const scanRegister = async (
+  count: bigint,
+  start: bigint,
+  ctx: FilterContext,
+  skip: ReadonlySet<string>,
+): Promise<{ candidates: Candidate[]; scannedTo: bigint; read: bigint; complete: boolean }> => {
+  const candidates: Candidate[] = [];
+  let read_ = 0n;
+  for (const segment of scanSegments(start, count, REGISTER_PAGE)) {
+    if (nowSec() >= searchDeadline) {
+      console.warn(`Zoektijd (${searchSeconds} s) op na ${read_} van ${count} owners; de volgende run zoekt verder vanaf ${segment.offset}.`);
+      return { candidates, scannedTo: segment.offset, read: read_, complete: false };
     }
+    let page: readonly Address[];
+    try {
+      page = await read<readonly Address[]>("owners", [segment.offset, segment.limit]);
+    } catch (error) {
+      console.warn(`owners(${segment.offset}, ${segment.limit}) niet te lezen (${describeError(error)}); portie overgeslagen`);
+      read_ += segment.limit;
+      continue;
+    }
+    for (const [b, batch] of chunks(page, FUNDS_BATCH).entries()) {
+      const firstIndex = segment.offset + BigInt(b * FUNDS_BATCH);
+      let funded: Set<string>;
+      try {
+        funded = await fundedAmong(batch, ctx);
+      } catch (error) {
+        console.warn(`saldo en allowance van owners ${firstIndex}–${firstIndex + BigInt(batch.length) - 1n} niet te lezen (${describeError(error)}); portie overgeslagen`);
+        continue;
+      }
+      batch.forEach((owner, i) => {
+        if (funded.has(owner.toLowerCase()) && !skip.has(owner.toLowerCase())) {
+          candidates.push({ owner, index: firstIndex + BigInt(i) });
+        }
+      });
+    }
+    read_ += segment.limit;
   }
-  return found;
+  return { candidates, scannedTo: start, read: read_, complete: true };
 };
 
 /**
  * Welke van deze owners zijn nu due? `isDue` per owner in één multicall. `isDue` revert nooit, dus een mislukte call is
- * een fout van de node (viem vangt die met `allowFailure` ook af): dan breekt de run af in plaats van de owners stil
- * over te slaan.
+ * een fout van de node (viem vangt die met `allowFailure` ook af). Dan gooit dit; de aanroeper slaat de portie over.
  */
 const dueAmong = async (owners: readonly Address[], at: At): Promise<Address[]> => {
   const results = await multicallResults(
@@ -732,7 +807,7 @@ const dueAmong = async (owners: readonly Address[], at: At): Promise<Address[]> 
     at,
   );
   if (results.some((r) => r === undefined)) {
-    throw new Error("isDue niet te lezen voor een portie kandidaten (fout van de node); run gestopt");
+    throw new Error("isDue niet te lezen voor een portie kandidaten (fout van de node)");
   }
   return owners.filter((_, i) => (results[i] as readonly [boolean, bigint])[0] === true);
 };
@@ -758,24 +833,62 @@ const count = (owner: Address, result: { outcome: Outcome; block: bigint | null 
   if (result.outcome === "retry") retryQueue.push({ owner, block: result.block });
 };
 
-// Audit lead 9: filter het register eerst off-chain op actief, saldo en allowance (gebundeld met Multicall3), zodat
-// lege spam-registraties de run niet ophouden. Alleen de kandidaten krijgen een isDue.
-const candidates = await findCandidates();
-console.log(`${checked} owners geregistreerd, ${candidates.length} kandidaten na het filter op saldo en allowance`);
+// Audit lead 9 en eindreview F-2: eerst de adressen uit OWNERS_FILE, dan het register vanaf de opgeslagen offset, binnen
+// de zoektijd. Alles off-chain gefilterd op actief, saldo en allowance (gebundeld met Multicall3), zodat lege
+// spam-registraties de run niet ophouden. Alleen de kandidaten krijgen een isDue.
+const scanStart = nextScanOffset(parseScanState(existsSync(scanStateFile) ? readFileSync(scanStateFile, "utf8") : undefined), null, checked);
+const ctx = await filterContext();
+const candidates: Candidate[] = [];
+let scannedTo = scanStart;
+if (ctx !== undefined) {
+  if (priorityOwners.length > 0) {
+    for (const batch of chunks(priorityOwners, FUNDS_BATCH)) {
+      try {
+        const funded = await fundedAmong(batch, ctx);
+        for (const owner of batch) if (funded.has(owner.toLowerCase())) candidates.push({ owner, index: null });
+      } catch (error) {
+        // Eigen gebruikers niet stil laten vallen: bij een fout van de node gaan ze ongefilterd door naar isDue.
+        console.warn(`saldo en allowance van OWNERS_FILE niet te lezen (${describeError(error)}); ongefilterd verder`);
+        for (const owner of batch) candidates.push({ owner, index: null });
+      }
+    }
+    console.log(`${priorityOwners.length} adressen uit OWNERS_FILE, ${candidates.length} kandidaten`);
+  }
+  const scan = await scanRegister(checked, scanStart, ctx, new Set(priorityOwners.map((o) => o.toLowerCase())));
+  candidates.push(...scan.candidates);
+  scannedTo = scan.scannedTo;
+  console.log(
+    `${checked} owners geregistreerd, ${scan.read} gelezen vanaf ${scanStart}${scan.complete ? " (hele register)" : ""}, ${candidates.length} kandidaten na het filter op saldo en allowance`,
+  );
+}
 
-for (const [index, batch] of chunks(candidates, Number(pageSize)).entries()) {
+/** Eerste kandidaat uit het register die deze run niet meer gelezen is, als het retry-budget op raakt. */
+let firstUnprocessed: bigint | null = null;
+const batches = chunks(candidates, Number(pageSize));
+for (const [index, batch] of batches.entries()) {
   if (nowSec() >= deadline) {
-    console.warn(`Retry-budget (${retrySeconds} s) op: ${candidates.length - index * Number(pageSize)} kandidaten niet meer gelezen; de volgende run gaat door.`);
+    const rest = batches.slice(index).flat();
+    firstUnprocessed = rest.find((c) => c.index !== null)?.index ?? null;
+    console.warn(
+      `Retry-budget (${retrySeconds} s) op: ${rest.length} kandidaten niet meer gelezen; de volgende run begint in het register bij ${firstUnprocessed ?? scannedTo}.`,
+    );
     break;
   }
+  const owners = batch.map((c) => c.owner);
   let readBlock: bigint | null = null;
   for (let reads = 1; ; reads += 1) {
     // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze portie.
     const after = readBlock !== null && (lastRunBlock === null || readBlock > lastRunBlock) ? readBlock : lastRunBlock;
     if (!(await waitForBlockAfter(after))) break;
-    const latest = await publicClient.getBlock();
-    readBlock = latest.number;
-    const fresh = newOwners(await dueAmong(batch, atLatest(latest)), handled);
+    let fresh: Address[];
+    try {
+      const latest = await publicClient.getBlock();
+      readBlock = latest.number;
+      fresh = newOwners(await dueAmong(owners, atLatest(latest)), handled);
+    } catch (error) {
+      console.warn(`isDue voor ${owners.length} kandidaten niet te lezen (${describeError(error)}); portie overgeslagen`);
+      break;
+    }
 
     for (const owner of fresh) {
       handled.add(owner.toLowerCase());
@@ -798,6 +911,10 @@ while (retryQueue.length > 0) {
 }
 
 saveCooldowns();
+if (ctx !== undefined) {
+  const nextOffset = nextScanOffset(scannedTo, firstUnprocessed, checked);
+  writeFileSync(scanStateFile, `${JSON.stringify({ nextOffset: nextOffset.toString() }, null, 2)}\n`);
+}
 // Eindreview F-1: een run zonder blokkade en zonder eigen transactie laat de tip ook zakken.
 if (!blockadeThisRun && !sentThisRun && !dryRun) lowerFee();
-console.log(`Klaar: ${checked} owners gecontroleerd, ${executed} uitgevoerd, ${skipped} overgeslagen${dryRun ? " (dry-run)" : ""}.`);
+console.log(`Klaar: ${checked} owners geregistreerd, ${executed} uitgevoerd, ${skipped} overgeslagen${dryRun ? " (dry-run)" : ""}.`);

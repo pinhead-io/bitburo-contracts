@@ -31,6 +31,7 @@ import {
   newOwners,
   nextAttemptBlock,
   nextBlockOverrides,
+  nextScanOffset,
   nextSendBlock,
   onchainRevertVerdict,
   parseFeeState,
@@ -39,10 +40,13 @@ import {
   overridesApplied,
   parseCooldownState,
   parseGwei,
+  parseOwnersFile,
+  parseScanState,
   pruneExpired,
   recordFailure,
   retryDeadline,
   runSizeSkipReason,
+  scanSegments,
   servedBefore,
   shouldReadPageAgain,
 } from "./selection";
@@ -397,6 +401,89 @@ describe("competing keepers (final review F-1)", () => {
     let fee = policy.base;
     for (let i = 0; i < 10; i++) fee = nextPriorityFee(fee, 3n * GWEI, withBudget);
     expect(fee).toBe(withBudget.max);
+  });
+});
+
+describe("register scan rotation (final review F-2)", () => {
+  const total = (segments: { offset: bigint; limit: bigint }[]) => segments.reduce((sum, s) => sum + s.limit, 0n);
+  const indices = (segments: { offset: bigint; limit: bigint }[]) =>
+    segments.flatMap((s) => Array.from({ length: Number(s.limit) }, (_, i) => s.offset + BigInt(i)));
+
+  test("from offset 0 the register is read in order, in pages", () => {
+    expect(scanSegments(0n, 1_200n, 500n)).toEqual([
+      { offset: 0n, limit: 500n },
+      { offset: 500n, limit: 500n },
+      { offset: 1_000n, limit: 200n },
+    ]);
+  });
+
+  test("from a stored offset: to the end, then from 0 up to the offset, every owner exactly once", () => {
+    const segments = scanSegments(1_200n, 2_000n, 500n);
+    expect(segments).toEqual([
+      { offset: 1_200n, limit: 500n },
+      { offset: 1_700n, limit: 300n },
+      { offset: 0n, limit: 500n },
+      { offset: 500n, limit: 500n },
+      { offset: 1_000n, limit: 200n },
+    ]);
+    expect(total(segments)).toBe(2_000n);
+    const seen = indices(segments);
+    expect(new Set(seen).size).toBe(2_000);
+    expect(seen[0]).toBe(1_200n);
+  });
+
+  test("an offset beyond the register wraps; an empty register or page gives nothing", () => {
+    expect(scanSegments(2_500n, 2_000n, 500n)[0]).toEqual({ offset: 500n, limit: 500n });
+    expect(scanSegments(0n, 0n, 500n)).toEqual([]);
+    expect(scanSegments(5n, 10n, 0n)).toEqual([]);
+  });
+
+  test("the next run starts where this one stopped, or at the first candidate it did not read", () => {
+    expect(nextScanOffset(12_500n, null, 20_001n)).toBe(12_500n);
+    expect(nextScanOffset(12_500n, 3_000n, 20_001n)).toBe(3_000n);
+    // Hele register gelezen: scannedTo is weer de start.
+    expect(nextScanOffset(20_001n, null, 20_001n)).toBe(0n);
+    expect(nextScanOffset(7n, null, 0n)).toBe(0n);
+  });
+
+  test("with spam in front of a real owner, the rotation reaches him within ceil(count / per run) runs", () => {
+    // 20.000 spam-adressen op 0..19.999, de echte owner op 20.000; per run passen 3.000 owners in de zoektijd.
+    const count = 20_001n;
+    const perRun = 3_000n;
+    let start = 0n;
+    let runs = 0;
+    for (; runs < 100; runs++) {
+      const segments = scanSegments(start, count, 500n);
+      let read = 0n;
+      let stoppedAt = start;
+      let found = false;
+      for (const s of segments) {
+        if (read >= perRun) {
+          stoppedAt = s.offset;
+          break;
+        }
+        if (20_000n >= s.offset && 20_000n < s.offset + s.limit) found = true;
+        read += s.limit;
+      }
+      if (found) break;
+      start = nextScanOffset(stoppedAt, null, count);
+    }
+    expect(runs + 1).toBeLessThanOrEqual(Math.ceil(20_001 / 3_000));
+  });
+
+  test("parseScanState reads its own format and falls back to 0", () => {
+    expect(parseScanState('{"nextOffset":"12500"}')).toBe(12_500n);
+    expect(parseScanState(undefined)).toBe(0n);
+    expect(parseScanState("{}")).toBe(0n);
+    expect(parseScanState('{"nextOffset":-1}')).toBe(0n);
+    expect(parseScanState("geen json")).toBe(0n);
+  });
+
+  test("parseOwnersFile: addresses separated by lines, spaces or commas, comments, deduplicated", () => {
+    const text = `# eigen gebruikers\n${OWNER}\n${OTHER}, ${OWNER.toLowerCase()}  # dubbel\n\n`;
+    expect(parseOwnersFile(text)).toEqual([OWNER, OTHER]);
+    expect(parseOwnersFile("")).toEqual([]);
+    expect(() => parseOwnersFile("0x123")).toThrow("geen geldig adres");
   });
 });
 
