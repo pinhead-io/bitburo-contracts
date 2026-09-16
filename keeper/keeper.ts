@@ -31,10 +31,14 @@
  *   (een blokkade), dan verstuurt het script pas na een willekeurig aantal blokken opnieuw (gemiddeld
  *   SEND_RETRY_BLOCKS, zodat een aanvaller het moment niet kan voorspellen), met minstens het dubbele
  *   van de vorige tip en minstens 10% boven de hoogste tip van wie de pool eerder in dat blok aanraakte, tot
- *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei). De verhoogde tip wordt bewaard in FEE_STATE_FILE en geldt zolang de
- *   laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een revert telt alleen als blokkade als
- *   een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit) én een transactie vóór de eigen
- *   transactie een pool aanraakte (Swap, Mint of Burn).
+ *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei) en het plafond uit wat een run oplevert (`capFeePolicy`: tip × GAS_ESTIMATE
+ *   ≤ TIP_REWARD_SHARE_BPS van de beloning + TIP_BUDGET_ETH). De verhoogde tip wordt bewaard in FEE_STATE_FILE en geldt
+ *   zolang de laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een revert telt alleen als
+ *   blokkade als een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit) én een transactie vóór
+ *   de eigen transactie een pool aanraakte (Swap, Mint of Burn) die zelf geen directe `execute` op de Rebalancer was.
+ * - Concurrerende keepers (eindreview F-1): staat vóór de eigen gerevertte transactie een `Executed` voor dezelfde
+ *   owner, dan is die owner bediend: geen blokkade, geen cool-down, geen hogere tip. Na een eigen transactie zonder
+ *   blokkade, en aan het eind van een run zonder blokkade en zonder eigen transactie, halveert de tip tot de basis.
  * - Eén run tegelijk (LOCK_FILE), en de run leest na het retry-budget geen nieuwe kandidaten meer.
  *
  * Registratiespam (audit lead 9): iedereen kan zich registreren, ook zonder saldo, en het register krimpt nooit. Het
@@ -52,6 +56,8 @@
  * Optioneel: REWARD_TO=0x…  PAGE_SIZE=20  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
  *            RETRY_SECONDS=540  SEND_RETRY_BLOCKS=30  PRIORITY_FEE_GWEI=0.05  MAX_PRIORITY_FEE_GWEI=3
  *            GAS_LIMIT=1000000  FEE_STATE_FILE=./keeper-fee.json  FEE_HOLD_SECONDS=3600  LOCK_FILE=./keeper.lock
+ *            GAS_ESTIMATE=500000  TIP_REWARD_SHARE_BPS=10000  TIP_BUDGET_ETH=0.0015
+ *            FEED_ETH_USD=0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70
  *            COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600  COOLDOWN_MAX_SECONDS=86400
  */
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -63,6 +69,7 @@ import {
   http,
   isAddress,
   parseAbi,
+  parseEther,
   type Address,
   type Hex,
   type TransactionReceipt,
@@ -78,10 +85,14 @@ import {
   type OwnerFunds,
   OVERRIDE_PROBE_CODE,
   blockerTip,
+  blockingTransactions,
+  capFeePolicy,
   chunks,
   clearFailure,
   cooldownUntil,
+  decayPriorityFee,
   effectiveTip,
+  eurcToWei,
   failureAction,
   filterCandidates,
   formatEurc,
@@ -104,6 +115,7 @@ import {
   recordFailure,
   retryDeadline,
   runSizeSkipReason,
+  servedBefore,
   shouldReadPageAgain,
   startPriorityFee,
 } from "./selection";
@@ -122,6 +134,9 @@ const abi = parseAbi([
   "function allowance(address owner, address spender) view returns (uint256)",
   "function POOL_EURC_USDC() view returns (address)",
   "function POOL_USDC_CBBTC() view returns (address)",
+  "function KEEPER_REWARD_EURC() view returns (uint256)",
+  "function FEED_EURC_USD() view returns (address)",
+  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
   // Custom errors, zodat viem de revert-reden kan decoderen.
   "error BlockMoveExceeded(address pool)",
   "error PoolTouchedThisBlock(address pool)",
@@ -143,6 +158,11 @@ const poolEvents = parseAbi([
   "event Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
 ]);
 
+/** `Executed` van de Rebalancer: welke owner in welk blok al bediend is (eindreview F-1). */
+const executedEvent = parseAbi([
+  "event Executed(address indexed owner, bool isBuy, uint256 amountIn, uint256 fee, uint256 reward, address rewardTo, uint256 amountOut, uint256 priceEurcPerBtc, uint256 totalValueEurc, uint256 fractionBps)",
+]);
+
 const env = (name: string, fallback?: string): string => {
   const value = process.env[name] ?? fallback;
   if (value === undefined) throw new Error(`${name} ontbreekt`);
@@ -159,10 +179,14 @@ const blockWaitSeconds = Number(env("BLOCK_WAIT_SECONDS", "30"));
 const retrySeconds = Number(env("RETRY_SECONDS", "540"));
 const sendRetryBlocks = Number(env("SEND_RETRY_BLOCKS", "30"));
 const gasLimit = BigInt(env("GAS_LIMIT", "1000000"));
-const feePolicy = {
+const configuredFeePolicy = {
   base: parseGwei(env("PRIORITY_FEE_GWEI", "0.05")),
   max: parseGwei(env("MAX_PRIORITY_FEE_GWEI", "3")),
 };
+const gasEstimate = BigInt(env("GAS_ESTIMATE", "500000"));
+const tipRewardShareBps = BigInt(env("TIP_REWARD_SHARE_BPS", "10000"));
+const tipBudgetWei = parseEther(env("TIP_BUDGET_ETH", "0.0015"));
+const feedEthUsd = env("FEED_ETH_USD", "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70") as Address;
 const cooldownFile = env("COOLDOWN_FILE", "./keeper-cooldowns.json");
 const feeStateFile = env("FEE_STATE_FILE", "./keeper-fee.json");
 const feeHoldSeconds = Number(env("FEE_HOLD_SECONDS", "3600"));
@@ -176,7 +200,11 @@ if (!Number.isFinite(minRunEurc) || minRunEurc < 0) throw new Error("MIN_RUN_EUR
 if (!Number.isInteger(blockRetries) || blockRetries < 0) throw new Error("BLOCK_RETRIES moet een geheel getal >= 0 zijn");
 if (!Number.isFinite(retrySeconds) || retrySeconds < 0) throw new Error("RETRY_SECONDS moet een getal >= 0 zijn");
 if (!Number.isInteger(sendRetryBlocks) || sendRetryBlocks < 1) throw new Error("SEND_RETRY_BLOCKS moet een geheel getal >= 1 zijn");
-if (feePolicy.base > feePolicy.max) throw new Error("PRIORITY_FEE_GWEI mag niet boven MAX_PRIORITY_FEE_GWEI liggen");
+if (configuredFeePolicy.base > configuredFeePolicy.max) throw new Error("PRIORITY_FEE_GWEI mag niet boven MAX_PRIORITY_FEE_GWEI liggen");
+if (gasEstimate <= 0n) throw new Error("GAS_ESTIMATE moet een geheel getal > 0 zijn");
+if (tipRewardShareBps < 0n) throw new Error("TIP_REWARD_SHARE_BPS moet >= 0 zijn");
+if (tipBudgetWei < 0n) throw new Error("TIP_BUDGET_ETH moet >= 0 zijn");
+if (!isAddress(feedEthUsd)) throw new Error("FEED_ETH_USD is geen geldig adres");
 if (!Number.isFinite(feeHoldSeconds) || feeHoldSeconds < 0) throw new Error("FEE_HOLD_SECONDS moet een getal >= 0 zijn");
 
 /**
@@ -250,6 +278,9 @@ const overridesFor = (latest: { number: bigint; timestamp: bigint }): BlockOverr
 
 const read = <T>(
   functionName:
+    | "KEEPER_REWARD_EURC"
+    | "FEED_EURC_USD"
+    | "latestRoundData"
     | "ownerCount"
     | "owners"
     | "isDue"
@@ -261,9 +292,10 @@ const read = <T>(
     | "POOL_USDC_CBBTC",
   args: readonly unknown[] = [],
   at: At = {},
+  address: Address = rebalancer,
 ) =>
   publicClient.readContract({
-    address: rebalancer,
+    address,
     abi,
     functionName,
     args,
@@ -362,35 +394,94 @@ const readFeeState = (): FeeState | undefined => {
     return undefined;
   }
 };
-let priorityFee = startPriorityFee(readFeeState(), startSeconds, feePolicy, feeHoldSeconds);
-const saveFeeState = (blockadeAt: number) =>
-  writeFileSync(feeStateFile, `${JSON.stringify({ priorityFeeWei: priorityFee.toString(), lastBlockadeAt: blockadeAt }, null, 2)}\n`);
+
+/**
+ * Eindreview F-1: plafond van de tip uit wat een run oplevert (`capFeePolicy`). De beloning in wei volgt uit
+ * KEEPER_REWARD_EURC en de Chainlink-koersen EURC/USD (de feed van het contract) en ETH/USD. Is een koers niet te lezen,
+ * dan telt de beloning als 0 en geldt alleen TIP_BUDGET_ETH: liever te weinig bieden dan te veel.
+ */
+const readRewardWei = async (): Promise<bigint> => {
+  if (/^0x0{40}$/i.test(rewardTo)) return 0n;
+  try {
+    const [reward, eurcFeed] = await Promise.all([read<bigint>("KEEPER_REWARD_EURC"), read<Address>("FEED_EURC_USD")]);
+    type Round = readonly [bigint, bigint, bigint, bigint, bigint];
+    const [eurcRound, ethRound] = await Promise.all([
+      read<Round>("latestRoundData", [], {}, eurcFeed),
+      read<Round>("latestRoundData", [], {}, feedEthUsd),
+    ]);
+    return eurcToWei(reward, eurcRound[1], ethRound[1]);
+  } catch (error) {
+    console.warn(`beloning in ETH niet te lezen (${describeError(error)}); tipplafond alleen uit TIP_BUDGET_ETH`);
+    return 0n;
+  }
+};
+const feePolicy = capFeePolicy(configuredFeePolicy, {
+  rewardWei: await readRewardWei(),
+  rewardShareBps: tipRewardShareBps,
+  budgetWei: tipBudgetWei,
+  gasEstimate,
+});
+if (feePolicy.max < configuredFeePolicy.max) {
+  console.log(`tipplafond ${formatGwei(feePolicy.max)} gwei (tip × ${gasEstimate} gas ≤ beloning × ${tipRewardShareBps}/10000 + budget)`);
+}
+const initialFeeState = readFeeState();
+let lastBlockadeAt = initialFeeState?.lastBlockadeAt ?? 0;
+let priorityFee = startPriorityFee(initialFeeState, startSeconds, feePolicy, feeHoldSeconds);
+const saveFeeState = () =>
+  writeFileSync(feeStateFile, `${JSON.stringify({ priorityFeeWei: priorityFee.toString(), lastBlockadeAt }, null, 2)}\n`);
+/** Een blokkade of een eigen transactie in deze run; zonder beide zakt de tip aan het eind van de run. */
+let blockadeThisRun = false;
+let sentThisRun = false;
+/** Eindreview F-1: na een eigen transactie zonder blokkade zakt de tip (halveren, niet onder de basis). */
+const lowerFee = () => {
+  const next = decayPriorityFee(priorityFee, feePolicy);
+  if (next === priorityFee) return;
+  priorityFee = next;
+  saveFeeState();
+};
 
 let pools: readonly Address[] | undefined;
 
 /**
- * Transacties die vóór de eigen transactie in dat blok een van beide pools aanraakten (Swap, Mint of Burn), en de
- * hoogste tip daarvan. Bij een leesfout: `touched` onbekend (false) en geen tip; dan loopt de fee niet op.
+ * Transacties die vóór de eigen transactie in dat blok een van beide pools aanraakten (Swap, Mint of Burn), zonder directe
+ * `execute`'s van andere keepers, en de hoogste tip daarvan; en of `owner` vóór ons al door een andere keeper is uitgevoerd
+ * (`Executed`-log, eindreview F-1). Bij een leesfout: `touched` onbekend (false), geen tip en niet bediend; dan loopt de
+ * fee niet op.
  */
-const blockersOf = async (receipt: TransactionReceipt): Promise<{ touched: boolean; tip: bigint | undefined }> => {
+const blockersOf = async (
+  owner: Address,
+  receipt: TransactionReceipt,
+): Promise<{ touched: boolean; tip: bigint | undefined; served: boolean }> => {
   try {
     pools ??= [await read<Address>("POOL_EURC_USDC"), await read<Address>("POOL_USDC_CBBTC")];
-    const [block, logs] = await Promise.all([
+    const [block, logs, executed] = await Promise.all([
       publicClient.getBlock({ blockHash: receipt.blockHash }),
       publicClient.getLogs({ address: [...pools], events: poolEvents, blockHash: receipt.blockHash }),
+      publicClient.getLogs({ address: rebalancer, event: executedEvent[0], args: { owner }, blockHash: receipt.blockHash }),
     ]);
+    const served = servedBefore(
+      executed.map((log) => ({ owner: log.args.owner ?? ("0x" as Address), transactionIndex: log.transactionIndex ?? Infinity })),
+      owner,
+      receipt.transactionIndex,
+    );
     const hashes = [
       ...new Set(logs.filter((log) => (log.transactionIndex ?? Infinity) < receipt.transactionIndex).map((log) => log.transactionHash)),
     ].filter((hash): hash is Hex => hash !== null);
     const txs = await Promise.all(hashes.map((hash) => publicClient.getTransaction({ hash })));
-    const tip = blockerTip(
-      txs.map((tx) => ({ transactionIndex: tx.transactionIndex ?? Infinity, tip: effectiveTip(tx, block.baseFeePerGas ?? 0n) })),
+    const blocking = blockingTransactions(
+      txs.map((tx) => ({
+        transactionIndex: tx.transactionIndex ?? Infinity,
+        to: tx.to,
+        input: tx.input,
+        tip: effectiveTip(tx, block.baseFeePerGas ?? 0n),
+      })),
       receipt.transactionIndex,
+      rebalancer,
     );
-    return { touched: hashes.length > 0, tip };
+    return { touched: blocking.length > 0, tip: blockerTip(blocking, receipt.transactionIndex), served };
   } catch (error) {
     console.warn(`aanrakers in blok ${receipt.blockNumber} niet te lezen: ${describeError(error)}`);
-    return { touched: false, tip: undefined };
+    return { touched: false, tip: undefined, served: false };
   }
 };
 
@@ -500,26 +591,38 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
       }
       console.log(`${owner}: ${direction} ≈ ${eurc} EURC → ${receipt.status} ${hash} (tip ${formatGwei(priorityFee)} gwei)`);
       lastRunBlock = receipt.blockNumber;
+      sentThisRun = true;
       if (receipt.status === "success") {
         cooldowns = clearFailure(cooldowns, owner);
         saveCooldowns();
+        lowerFee();
         return { outcome: "executed", block: receipt.blockNumber };
       }
       // Gerevert na een geslaagde simulatie: de staat veranderde in de tussentijd. Hersimuleer op het begin van dat
       // blok voor de reden, en kijk wie vóór ons een pool aanraakte.
       failure = new Error(`transactie ${hash} is gerevert`);
-      const [resimulation, blockers] = await Promise.all([resimulateAtBlockStart(owner, receipt), blockersOf(receipt)]);
-      const judged = onchainRevertVerdict(resimulation, blockers.touched);
+      const [resimulation, blockers] = await Promise.all([resimulateAtBlockStart(owner, receipt), blockersOf(owner, receipt)]);
+      const judged = onchainRevertVerdict(resimulation, blockers.touched, blockers.served);
       verdict = judged.failure;
+      if (judged.failure.servedByOther) {
+        // Eindreview F-1: een andere keeper voerde deze owner eerder in het blok uit. Bediend; geen cool-down, geen hogere tip.
+        console.log(`${owner}: al uitgevoerd door een andere keeper in blok ${receipt.blockNumber}; geen cool-down, geen hogere tip`);
+        lowerFee();
+        return { outcome: "skipped", block: null };
+      }
       if (resimulation.kind === "reverted") failure = new Error(`transactie ${hash} is gerevert (${resimulation.errorName ?? "revert"})`);
       if (judged.blockade) {
         // Blokkade: een andere transactie raakte vóór ons een pool aan. Hogere tip, en pas gemiddeld SEND_RETRY_BLOCKS later.
         sendFromBlock = nextSendBlock(receipt.blockNumber, sendRetryBlocks, Math.random());
         priorityFee = nextPriorityFee(priorityFee, blockers.tip, feePolicy);
-        saveFeeState(nowSec());
+        lastBlockadeAt = nowSec();
+        blockadeThisRun = true;
+        saveFeeState();
         console.warn(
           `${owner}: blokkade in blok ${receipt.blockNumber} (tip aanraker ${blockers.tip === undefined ? "onbekend" : `${formatGwei(blockers.tip)} gwei`}); volgende tip ${formatGwei(priorityFee)} gwei`,
         );
+      } else {
+        lowerFee();
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes("run gestopt")) throw error;
@@ -695,4 +798,6 @@ while (retryQueue.length > 0) {
 }
 
 saveCooldowns();
+// Eindreview F-1: een run zonder blokkade en zonder eigen transactie laat de tip ook zakken.
+if (!blockadeThisRun && !sentThisRun && !dryRun) lowerFee();
 console.log(`Klaar: ${checked} owners gecontroleerd, ${executed} uitgevoerd, ${skipped} overgeslagen${dryRun ? " (dry-run)" : ""}.`);

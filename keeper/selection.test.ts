@@ -6,13 +6,20 @@ import {
   type OwnerFunds,
   GWEI,
   OVERRIDE_PROBE_CODE,
+  BPS,
+  EXECUTE_SELECTOR,
   blockerTip,
+  blockingTransactions,
+  capFeePolicy,
   chunks,
   clearFailure,
+  decayPriorityFee,
   effectiveTip,
+  eurcToWei,
   failureAction,
   filterCandidates,
   isCandidate,
+  isDirectExecute,
   formatEurc,
   formatGwei,
   isBlockWindowRevert,
@@ -36,8 +43,10 @@ import {
   recordFailure,
   retryDeadline,
   runSizeSkipReason,
+  servedBefore,
   shouldReadPageAgain,
 } from "./selection";
+import { toFunctionSelector } from "viem";
 
 const OWNER = "0xAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
 const OTHER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
@@ -125,11 +134,23 @@ describe("on-chain revert verdict (L-3)", () => {
       failure: { errorName: undefined, resimulationPassed: true },
       blockade: true,
     });
-    // Bijvoorbeeld een andere keeper die dezelfde owner eerder in het blok uitvoerde, zonder pool-log vóór ons: geen
-    // hogere tip, wel tijdelijk (geen cool-down).
+    // Bijvoorbeeld een feed-update eerder in het blok, zonder pool-log van een aanraker vóór ons: geen hogere tip, wel
+    // tijdelijk (geen cool-down). Een andere keeper laat wél Swap-logs achter; die gevallen staan hieronder.
     const noTouch = onchainRevertVerdict({ kind: "passed" }, false);
     expect(noTouch.blockade).toBe(false);
     expect(failureAction(noTouch.failure, 0, 540)).toBe("retry");
+  });
+
+  test("an Executed log for the same owner before us: served by another keeper, no blockade, no retry, no cool-down (F-1)", () => {
+    // Keeper A voerde de owner eerder in het blok uit: zijn swaps staan als pool-logs vóór ons (touched = true), en de
+    // hersimulatie op het begin van het blok slaagt. Toch geen blokkade.
+    const v = onchainRevertVerdict({ kind: "passed" }, true, true);
+    expect(v.blockade).toBe(false);
+    expect(v.failure.servedByOther).toBe(true);
+    expect(failureAction(v.failure, 0, 540)).toBe("skip");
+    expect(failureAction(v.failure, 1_000, 540)).toBe("skip");
+    // Ook als de hersimulatie iets anders zegt: bediend gaat voor.
+    expect(onchainRevertVerdict({ kind: "reverted", errorName: "SpotDeviatesFromOracle" }, true, true).failure.servedByOther).toBe(true);
   });
 
   test("a real revert at block start is the real reason, even if a pool was touched", () => {
@@ -295,6 +316,87 @@ describe("priority fee (L-3)", () => {
     expect(sum / 59n).toBe(30n);
     // SEND_RETRY_BLOCKS = 1: altijd het volgende blok.
     expect(nextSendBlock(1_000n, 1, 0.7)).toBe(1_001n);
+  });
+});
+
+describe("competing keepers (final review F-1)", () => {
+  const REBALANCER = "0x1234567890123456789012345678901234567890" as Address;
+  const policy = { base: parseGwei("0.05"), max: parseGwei("3") };
+
+  test("EXECUTE_SELECTOR is execute(address,address)", () => {
+    expect(EXECUTE_SELECTOR as string).toBe(toFunctionSelector("function execute(address owner, address rewardTo)"));
+  });
+
+  test("a direct execute on the Rebalancer is not a blocker; a bundling contract or another call is", () => {
+    const execInput = `${EXECUTE_SELECTOR}${"00".repeat(64)}` as `0x${string}`;
+    expect(isDirectExecute({ to: REBALANCER, input: execInput }, REBALANCER)).toBe(true);
+    expect(isDirectExecute({ to: REBALANCER.toUpperCase().replace("0X", "0x") as Address, input: execInput }, REBALANCER)).toBe(true);
+    expect(isDirectExecute({ to: OTHER, input: execInput }, REBALANCER)).toBe(false);
+    expect(isDirectExecute({ to: REBALANCER, input: "0xa9059cbb" }, REBALANCER)).toBe(false);
+    expect(isDirectExecute({ to: null, input: execInput }, REBALANCER)).toBe(false);
+
+    const txs = [
+      { transactionIndex: 1, to: REBALANCER, input: execInput, tip: 3n * GWEI }, // andere keeper
+      { transactionIndex: 2, to: OTHER, input: "0x12345678" as `0x${string}`, tip: 7n }, // aanraker
+      { transactionIndex: 9, to: OTHER, input: "0x12345678" as `0x${string}`, tip: 100n }, // na ons
+    ];
+    const blocking = blockingTransactions(txs, 5, REBALANCER);
+    expect(blocking.map((tx) => tx.transactionIndex)).toEqual([2]);
+    expect(blockerTip(blocking, 5)).toBe(7n);
+    // Alleen een andere keeper vóór ons: geen aanraker, dus geen blokkade.
+    expect(blockingTransactions(txs.slice(0, 1), 5, REBALANCER)).toEqual([]);
+  });
+
+  test("servedBefore only counts an Executed for the same owner before our transaction", () => {
+    const logs = [
+      { owner: OWNER, transactionIndex: 3 },
+      { owner: OTHER, transactionIndex: 1 },
+    ];
+    expect(servedBefore(logs, OWNER, 4)).toBe(true);
+    expect(servedBefore(logs, OWNER.toLowerCase() as Address, 4)).toBe(true);
+    expect(servedBefore(logs, OWNER, 3)).toBe(false);
+    expect(servedBefore(logs, OTHER, 0)).toBe(false);
+    expect(servedBefore([], OWNER, 10)).toBe(false);
+  });
+
+  test("the tip halves after a run without blockade, down to the base, in 6 steps from 3 gwei", () => {
+    const steps: string[] = [];
+    let fee = policy.max;
+    for (let i = 0; i < 7; i++) {
+      fee = decayPriorityFee(fee, policy);
+      steps.push(formatGwei(fee));
+    }
+    expect(steps).toEqual(["1.5", "0.75", "0.375", "0.1875", "0.09375", "0.05", "0.05"]);
+    expect(decayPriorityFee(0n, policy)).toBe(policy.base);
+  });
+
+  test("eurcToWei converts with two 8-decimal Chainlink answers", () => {
+    // 0,05 EURC, EURC/USD 1,146, ETH/USD 2.403,58: 0,05 × 1,146 / 2.403,58 ETH = 23.839.439.502.741 wei (afgerond naar beneden).
+    expect(eurcToWei(50_000n, 114_600_000n, 240_358_000_000n)).toBe(23_839_439_502_741n);
+    expect(eurcToWei(50_000n, 0n, 240_358_000_000n)).toBe(0n);
+    expect(eurcToWei(50_000n, 114_600_000n, -1n)).toBe(0n);
+  });
+
+  test("the tip cap: tip × gas never above the reward share plus the budget", () => {
+    const rewardWei = eurcToWei(50_000n, 114_600_000n, 240_358_000_000n);
+    const gasEstimate = 500_000n;
+    // Alleen de beloning (budget 0): 23.839.439.502.741 wei / 500.000 gas = 47.678.879 wei ≈ 0,048 gwei < basis -> basis.
+    const rewardOnly = capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 0n, gasEstimate });
+    expect(rewardOnly.max).toBe(policy.base);
+    // Budget 0,0005 ETH: (23.839.439.502.741 + 5 × 10^14) / 500.000 = 1.047.678.879 wei ≈ 1,05 gwei.
+    const withBudget = capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 500_000_000_000_000n, gasEstimate });
+    expect(withBudget.max).toBe(1_047_678_879n);
+    expect(withBudget.max * gasEstimate).toBeLessThanOrEqual(rewardWei + 500_000_000_000_000n);
+    // Half van de beloning: de helft van dat deel.
+    expect(capFeePolicy(policy, { rewardWei, rewardShareBps: 5_000n, budgetWei: 500_000_000_000_000n, gasEstimate }).max).toBe(
+      (rewardWei / 2n + 500_000_000_000_000n) / gasEstimate,
+    );
+    // Een ruim budget verandert het geconfigureerde plafond niet.
+    expect(capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 10n ** 18n, gasEstimate }).max).toBe(policy.max);
+    // Escalatie stopt op het plafond, wat de concurrent ook biedt.
+    let fee = policy.base;
+    for (let i = 0; i < 10; i++) fee = nextPriorityFee(fee, 3n * GWEI, withBudget);
+    expect(fee).toBe(withBudget.max);
   });
 });
 

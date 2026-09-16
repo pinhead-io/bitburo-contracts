@@ -1,7 +1,7 @@
 /**
  * Selectielogica van het keeper-script, los van RPC en bestandssysteem zodat het te testen is.
  */
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 
 export const EURC_UNIT = 1_000_000n;
 
@@ -42,6 +42,12 @@ export type Failure = {
    * over de owner, dus geen cool-down.
    */
   transient?: boolean;
+  /**
+   * Eindreview F-1: de owner is in hetzelfde blok vóór de eigen transactie al door een andere keeper uitgevoerd (een
+   * `Executed`-log voor die owner met een lagere `transactionIndex`). Geen blokkade en geen mislukking: de owner is
+   * bediend. Geen nieuwe poging, geen cool-down, geen hogere tip.
+   */
+  servedByOther?: boolean;
 };
 
 export const isTemporaryFailure = (failure: Failure): boolean =>
@@ -56,17 +62,24 @@ export type Resimulation = { kind: "passed" } | { kind: "reverted"; errorName: s
 
 /**
  * Oordeel over een on-chain revert:
+ * - staat vóór de eigen transactie een `Executed` voor dezelfde owner (`servedBefore`), dan heeft een andere keeper de
+ *   run gedaan: bediend, geen blokkade, geen cool-down (eindreview F-1). Dat gaat vóór alles, want elke `execute`
+ *   swapt door beide pools en logt daar een Swap; zonder deze regel zag elke verloren race eruit als een blokkade;
  * - de hersimulatie slaagt: iets eerder in het blok liet de transactie reverten; tijdelijk;
  * - de hersimulatie revert met een blokvenster-error, of de node gaf een fout: tijdelijk;
  * - de hersimulatie revert met een andere error: die error is de echte reden (cool-down);
- * - `blockade`: tijdelijk én een transactie vóór de eigen raakte een pool aan (Swap, Mint of Burn). Alleen dan loopt
- *   de priority fee op; een eerdere feed-update of een andere keeper die dezelfde owner uitvoerde, is geen reden om
- *   meer te bieden.
+ * - `blockade`: tijdelijk én een transactie vóór de eigen raakte een pool aan (Swap, Mint of Burn) en was zelf geen
+ *   directe `execute` op de Rebalancer (`blockingTransactions`). Alleen dan loopt de priority fee op; een eerdere
+ *   feed-update of een andere keeper die een owner uitvoerde, is geen reden om meer te bieden.
  */
 export const onchainRevertVerdict = (
   resimulation: Resimulation,
   touchedBefore: boolean,
+  servedBefore = false,
 ): { failure: Failure; blockade: boolean } => {
+  if (servedBefore) {
+    return { failure: { errorName: undefined, servedByOther: true }, blockade: false };
+  }
   const failure: Failure =
     resimulation.kind === "passed"
       ? { errorName: undefined, resimulationPassed: true }
@@ -82,6 +95,7 @@ export const onchainRevertVerdict = (
  *   opnieuw in een volgend blok, zolang het retry-budget van deze keeper-run loopt (`nowSeconds < retryDeadline`);
  * - "skip": het budget is op en het is nog steeds tijdelijk; niets boeken, de volgende keeper-run probeert het weer;
  * - "fail": een echte mislukking, die telt voor de cool-down.
+ * Een owner die een andere keeper in hetzelfde blok al uitvoerde (`servedByOther`), is altijd "skip".
  *
  * Het budget is een tijd en geen aantal pogingen: een aanvaller die een pool elk blok aanraakt, moet dat dan het hele
  * budget volhouden, niet alleen een paar voorspelbare blokken.
@@ -92,6 +106,9 @@ export const failureAction = (
   retryDeadline: number,
 ): "retry" | "skip" | "fail" => {
   const f: Failure = typeof failure === "object" ? failure : { errorName: failure };
+  if (f.servedByOther === true) {
+    return "skip";
+  }
   if (!isTemporaryFailure(f)) {
     return "fail";
   }
@@ -280,6 +297,92 @@ export const blockerTip = (
   poolTxs
     .filter((tx) => tx.transactionIndex < ownIndex)
     .reduce<bigint | undefined>((max, tx) => (max === undefined || tx.tip > max ? tx.tip : max), undefined);
+
+/** Selector van `execute(address,address)` op de Rebalancer. */
+export const EXECUTE_SELECTOR = "0xd80aea15" as const;
+
+/**
+ * Eindreview F-1: is deze transactie een directe `execute` op de Rebalancer? Zo'n transactie swapt door beide pools en
+ * laat dus Swap-logs achter, maar is een andere keeper die een owner bedient, geen aanvaller die de pool aanraakt. Een
+ * contract dat een aanraking en een `execute` bundelt, is geen directe aanroep en telt wel als aanraker.
+ */
+export const isDirectExecute = (tx: { to?: Address | null; input?: Hex }, rebalancer: Address): boolean =>
+  tx.to != null &&
+  tx.to.toLowerCase() === rebalancer.toLowerCase() &&
+  tx.input !== undefined &&
+  tx.input.slice(0, 10).toLowerCase() === EXECUTE_SELECTOR;
+
+/**
+ * Transacties vóór de eigen transactie die een pool aanraakten (een pool-log met een lagere `transactionIndex`), zonder
+ * directe `execute`'s op de Rebalancer (`isDirectExecute`). Alleen die tellen voor een blokkade en voor `blockerTip`.
+ */
+export const blockingTransactions = <T extends { transactionIndex: number; to?: Address | null; input?: Hex }>(
+  poolTxs: readonly T[],
+  ownIndex: number,
+  rebalancer: Address,
+): T[] => poolTxs.filter((tx) => tx.transactionIndex < ownIndex && !isDirectExecute(tx, rebalancer));
+
+/**
+ * Eindreview F-1: staat er vóór de eigen transactie (`ownIndex`) een `Executed`-log voor `owner`? Dan heeft een andere
+ * keeper die owner in dit blok al bediend.
+ */
+export const servedBefore = (
+  executedLogs: readonly { owner: Address; transactionIndex: number }[],
+  owner: Address,
+  ownIndex: number,
+): boolean =>
+  executedLogs.some((log) => log.transactionIndex < ownIndex && log.owner.toLowerCase() === owner.toLowerCase());
+
+/**
+ * Eindreview F-1: de tip zakt weer. Na een eigen transactie die geen blokkade was (geslaagd, of bediend door een ander),
+ * en aan het eind van een run zonder blokkade en zonder eigen transactie, halveert de tip, niet lager dan de basis. Van
+ * het plafond van 3 gwei naar 0,05 gwei zijn dat 6 stappen: bij een run per 10 minuten zonder concurrentie hooguit een
+ * uur, en sneller zodra runs slagen. Halveren (en niet meteen de basis) houdt een aanvaller die even stopt niet
+ * goedkoop: hij moet een reeks blokken laten lopen voordat de tip weer laag is.
+ */
+export const decayPriorityFee = (current: bigint, policy: FeePolicy): bigint => {
+  const next = current / 2n;
+  if (next < policy.base) return policy.base;
+  return next > policy.max ? policy.max : next;
+};
+
+export const BPS = 10_000n;
+
+/**
+ * Omrekening van EURC-basiseenheden (6 decimalen) naar wei, met twee Chainlink-koersen van 8 decimalen (EURC/USD en
+ * ETH/USD): wei = eurc × 10^12 × EURC/USD ÷ ETH/USD. 0 bij een ongeldige koers.
+ */
+export const eurcToWei = (eurcBaseUnits: bigint, eurcUsd: bigint, ethUsd: bigint): bigint =>
+  eurcUsd <= 0n || ethUsd <= 0n ? 0n : (eurcBaseUnits * 10n ** 12n * eurcUsd) / ethUsd;
+
+/**
+ * Eindreview F-1: plafond van de tip uit wat een run oplevert. Per geslaagde run betaalt de keeper tip × gas aan de
+ * sequencer en krijgt hij de beloning (`rewardWei`, KEEPER_REWARD_EURC in wei; 0 zonder REWARD_TO). De tip mag daarom
+ * niet hoger zijn dan
+ *
+ *   tip × gasEstimate ≤ rewardShareBps / 10.000 × rewardWei + budgetWei
+ *
+ * - `rewardShareBps` (TIP_REWARD_SHARE_BPS): welk deel van de beloning de keeper aan tip wil uitgeven;
+ * - `budgetWei` (TIP_BUDGET_ETH, standaard 0,0015 ETH): wat hij per run bovenop de beloning wil betalen om een blokkade
+ *   te breken (L-3). De standaard houdt het plafond van 3 gwei bereikbaar (3 gwei × 500.000 gas = 0,0015 ETH), waarop
+ *   het L-3-criterium van ≥ 1.000 EURC per uur voor de aanvaller rust. Bij 0 is er geen verhoging boven wat de beloning
+ *   dekt, en hoeft een aanvaller die elk blok aanraakt alleen meer te bieden dan dat;
+ * - `gasEstimate` (GAS_ESTIMATE): gas van een geslaagde run, niet de GAS_LIMIT: de tip wordt over het verbruikte gas
+ *   betaald (gemeten 475.267 voor een koop op blok 51.403.300). Een gerevertte poging verbruikt minder.
+ *
+ * Zo kan concurrentie tussen keepers de tip nooit opdrijven tot boven wat de keeper per run wil betalen, ook niet als
+ * die tot het plafond van MAX_PRIORITY_FEE_GWEI zou oplopen. Het plafond is nooit lager dan de basistip: die blijft
+ * nodig om te versturen.
+ */
+export const capFeePolicy = (
+  policy: FeePolicy,
+  input: { rewardWei: bigint; rewardShareBps: bigint; budgetWei: bigint; gasEstimate: bigint },
+): FeePolicy => {
+  if (input.gasEstimate <= 0n) return policy;
+  const cap = ((input.rewardWei * input.rewardShareBps) / BPS + input.budgetWei) / input.gasEstimate;
+  const max = cap < policy.max ? cap : policy.max;
+  return { base: policy.base, max: max < policy.base ? policy.base : max };
+};
 
 /**
  * Na een blokkade verstuurt de keeper pas weer na een willekeurig aantal blokken, gemiddeld `sendRetryBlocks`
