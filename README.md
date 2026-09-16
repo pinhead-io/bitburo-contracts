@@ -18,7 +18,7 @@ De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBT
 | Functie | Wat |
 |---|---|
 | `setParams(Params)` | Eigen instellingen zetten of wijzigen. Grenzen: `minTradeEurc` ≥ `MIN_TRADE_FLOOR` (20 EURC), `maxCorrectionBps` 10–10000, `maxSlippageBps` 60–100, `interval` ≥ 1 uur. Na `retire` alleen nog met `active = false` (mandaat intrekken); anders `ContractRetired`. |
-| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. Na `retire` altijd `(false, 0)`. |
+| `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Het bedrag is wat `execute` nu werkelijk zou handelen, dus al begrensd op saldo en allowance (bij verkopen de te verkopen cbBTC tegen de Chainlink-koers). Revert nooit. Na `retire` altijd `(false, 0)`. |
 | `owners(offset, limit) → address[]` / `ownerCount()` | Pagina uit alle geregistreerde owners (ook inactieve); het aantal. Revert nooit, ook niet bij `limit = type(uint256).max`. |
 | `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn, zelfde regels als `isDue`. Dit is wat de wekkers gebruiken. Revert nooit, ook niet bij een grote `limit`. Na `retire` altijd leeg. |
 | `execute(owner, rewardTo)` | Eén rebalance-stap; iedereen mag dit aanroepen. `rewardTo` = contract zelf telt als `address(0)`. Revert met `NoOutput` als de koop 0 cbBTC zou opleveren, en met `ContractRetired` na `retire`. |

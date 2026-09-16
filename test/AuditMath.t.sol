@@ -76,8 +76,10 @@ contract AuditMathTest is RebalancerTestBase {
         if (!due) return;
         bool isBuy = delta > 0;
         uint256 absDelta = isBuy ? uint256(delta) : uint256(-delta);
-        (, uint256 totalBefore) = _fraction(alice, price);
+        (uint256 fracBefore, uint256 totalBefore) = _fraction(alice, price);
         uint256 capEurc = Math.max(Math.mulDiv(totalBefore, p.maxCorrectionBps, BPS), p.minTradeEurc);
+        // Sinds L-C is `delta` het begrensde inputbedrag; de correctie zelf reken ik hier na.
+        uint256 correction = Math.min(Math.mulDiv(_absDrift(fracBefore, p.targetBps), totalBefore, 1e18), capEurc);
 
         uint256 treasuryBefore = eurc.balanceOf(treasury);
         uint256 keeperBefore = eurc.balanceOf(keeper);
@@ -115,8 +117,9 @@ contract AuditMathTest is RebalancerTestBase {
             assertGt(router.lastAmountOutMinimum(), 0, "amountOutMinimum 0");
             assertGe(feePaid, r.KEEPER_REWARD_EURC(), "verkoop-fee onder de beloning");
             // Ceil op wantBtc: de verkochte waarde ligt hooguit 1 sat boven de correctie.
-            assertLe(amountInEurcValue, absDelta + price / 1e8, "meer dan 1 sat boven de correctie verkocht");
+            assertLe(amountInEurcValue, correction + price / 1e8, "meer dan 1 sat boven de correctie verkocht");
         }
+        assertEq(absDelta, amountInEurcValue, "isDue-delta != werkelijk verhandeld bedrag (L-C)");
         assertEq(feePaid, Math.mulDiv(feeBase, 25, BPS), "fee != 25 bps");
         assertLe(feePaid, feeBase * 25 / BPS, "fee naar boven afgerond");
         assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, feePaid), "reward != min(0,05, fee)");
@@ -125,8 +128,8 @@ contract AuditMathTest is RebalancerTestBase {
         (uint256 fracAfter, uint256 totalAfter) = _fraction(alice, price);
         uint256 driftAfter = _absDrift(fracAfter, p.targetBps);
         uint256 bandWad = uint256(p.bandBps) * 1e18 / BPS;
-        bool capped = absDelta == capEurc; // correctie is afgekapt op de cap (of minTrade-vloer)
-        bool clamped = amountInEurcValue + 2 < absDelta; // allowance/afronding beperkte de run
+        bool capped = correction == capEurc; // correctie is afgekapt op de cap (of minTrade-vloer)
+        bool clamped = amountInEurcValue + 2 < correction; // allowance/afronding beperkte de run
         if (!capped && !clamped) {
             // Volledige correctie: enige restdrift is het verlies (fee + slippage) op het run-bedrag.
             // |drift'| <= (fee+slip) * amountIn / total' , ruim onder 1,25% * 1.
@@ -219,7 +222,7 @@ contract AuditMathTest is RebalancerTestBase {
         eurc.approve(address(r), 20e6); // precies minTrade
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
-        assertEq(delta, 100e6);
+        assertEq(delta, 20e6, "L-C: delta is de begrensde run, niet de correctie van 100 EURC");
         r.execute(alice, keeper);
         assertEq(eurc.balanceOf(alice), 980e6, "slechts 20 EURC verhandeld");
         assertEq(r.lastExecutedAt(alice), uint64(START));
@@ -298,13 +301,13 @@ contract AuditMathTest is RebalancerTestBase {
         _setUser(alice, 0, btc, p);
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due, "verkoop van 20 EURC is due ondanks de afronding");
-        assertEq(delta, -20e6);
         r.execute(alice, keeper);
 
         uint256 sold = btc - cbbtc.balanceOf(alice);
         uint256 wantFloor = Math.mulDiv(20e6, 1e8, price); // 24.961: waarde 19,9996 < 20 -> vroeger geblokkeerd
         assertEq(sold, wantFloor + 1, "naar boven afgerond");
         uint256 soldValue = Math.mulDiv(sold, price, 1e8);
+        assertEq(delta, -int256(soldValue), "L-C: delta is de waarde van de verkochte sats");
         assertGe(soldValue, 20e6);
         assertLe(soldValue, 20e6 + price / 1e8, "hooguit 1 sat boven de correctie");
 
@@ -333,10 +336,10 @@ contract AuditMathTest is RebalancerTestBase {
         vm.assume(Math.mulDiv(total, 9500, BPS) >= minTrade); // drift*total >= minTrade: correction == minTrade
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due, "verkoop op de vloer is altijd due");
-        assertEq(delta, -int256(uint256(minTrade)));
         r.execute(alice, keeper);
         uint256 sold = btc - cbbtc.balanceOf(alice);
         assertEq(sold, Math.mulDiv(minTrade, 1e8, price, Math.Rounding.Ceil));
+        assertEq(delta, -int256(Math.mulDiv(sold, price, 1e8)), "L-C: delta is de waarde van de verkochte sats");
         assertGe(Math.mulDiv(sold, price, 1e8), minTrade, "verkochte waarde onder minTrade");
     }
 

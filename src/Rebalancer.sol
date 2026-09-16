@@ -261,6 +261,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     }
 
     /// @notice Zou `execute(owner, …)` nu iets doen? `eurcDelta` > 0 = kopen voor dat bedrag, < 0 = verkopen.
+    ///         Het bedrag is wat `execute` nu werkelijk zou handelen, dus al begrensd op saldo en allowance: bij
+    ///         kopen het EURC-inputbedrag, bij verkopen de cbBTC-input tegen de oraclekoers (audit L-C).
     /// @dev Revert nooit: een storing in de feeds of sequencer, of een te grote spot-afwijking, geeft (false, 0).
     ///      Na `retire` altijd (false, 0).
     function isDue(address owner) external view returns (bool due, int256 eurcDelta) {
@@ -310,11 +312,13 @@ contract Rebalancer is ReentrancyGuardTransient {
     }
 
     function _dueAt(address owner, Params memory p, uint256 price) internal view returns (bool due, int256 eurcDelta) {
-        (bool isBuy, uint256 amountIn, uint256 correctionEurc,,) = _plan(owner, p, price);
+        (bool isBuy, uint256 amountIn,,,) = _plan(owner, p, price);
         if (amountIn == 0) {
             return (false, 0);
         }
-        eurcDelta = isBuy ? int256(correctionEurc) : -int256(correctionEurc);
+        // Van `amountIn`, niet van de correctie vóór begrenzing: anders meldt isDue een grotere run dan execute doet.
+        uint256 eurcAmount = isBuy ? amountIn : Math.mulDiv(amountIn, price, CBBTC_UNIT);
+        eurcDelta = isBuy ? int256(eurcAmount) : -int256(eurcAmount);
         return (true, eurcDelta);
     }
 

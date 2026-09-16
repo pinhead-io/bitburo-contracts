@@ -423,7 +423,7 @@ contract RebalancerTest is RebalancerTestBase {
         eurc.approve(address(r), 40e6);
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
-        assertEq(delta, 100e6); // correctie vóór begrenzing
+        assertEq(delta, 40e6); // L-C: wat execute werkelijk handelt, niet de correctie van 100 EURC
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(alice, true, 40e6, 0, 0, address(0), 0, 0, 0, 0);
         r.execute(alice, address(0));
@@ -1179,13 +1179,34 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(delta, -100e6);
     }
 
-    function test_isDue_deltaIsCorrectionBeforeAllowanceBound() public {
+    /// @dev L-C: de delta is wat `execute` werkelijk verkoopt (begrensd op de allowance), niet de correctie van
+    ///      100 EURC. Vroeger legde deze test het oude gedrag vast (delta -100 EURC).
+    function test_isDue_deltaIsAllowanceBoundedAmount() public {
         _setUser(alice, 0, 1_250_000, _defaultParams());
         vm.prank(alice);
         cbbtc.approve(address(r), 30_000); // 24 EURC: boven de vloer, ver onder de correctie
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
-        assertEq(delta, -100e6);
+        assertEq(delta, -24e6);
+        vm.expectEmit(true, false, false, false, address(r));
+        emit Rebalancer.Executed(alice, false, 30_000, 0, 0, keeper, 0, 0, 0, 0);
+        r.execute(alice, keeper);
+        assertEq(cbbtc.balanceOf(alice), 1_250_000 - 30_000);
+    }
+
+    /// @dev L-C, voorbeeld uit de audit: wallet 10.000 EURC, correctie 1.000 EURC, allowance 20 EURC. `isDue`
+    ///      meldde 1.000 EURC terwijl `execute` 20 EURC handelt; nu meldt het 20 EURC.
+    function test_isDue_deltaMatchesExecutedAmountWhenAllowanceBinds() public {
+        _setUser(alice, 10_000e6, 0, _defaultParams());
+        (, int256 unbounded) = r.isDue(alice);
+        assertEq(unbounded, 1_000e6, "opzet: correctie 1.000 EURC");
+        vm.prank(alice);
+        eurc.approve(address(r), 20e6);
+        (bool due, int256 delta) = r.isDue(alice);
+        assertTrue(due);
+        assertEq(delta, 20e6);
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 10_000e6 - uint256(delta), "execute handelt precies de gemelde delta");
     }
 
     // dueOwners ─────────────────────────────────────────────────────────────────────────────────────────
@@ -1592,7 +1613,8 @@ contract RebalancerTest is RebalancerTestBase {
             return;
         }
         uint256 absDelta = delta > 0 ? uint256(delta) : uint256(-delta);
-        assertLe(absDelta, capEurc, "correctie boven cap");
+        // Bij verkopen is de delta de naar boven afgeronde sats-hoeveelheid tegen de koers: tot 1 sat boven de cap.
+        assertLe(absDelta, capEurc + PRICE / 1e8, "correctie boven cap");
         assertGe(absDelta, p.minTradeEurc, "correctie onder minTrade");
 
         uint256 treasuryBefore = eurc.balanceOf(treasury);
@@ -1682,7 +1704,16 @@ contract RebalancerTest is RebalancerTestBase {
             r.execute(alice, keeper);
             return;
         }
-        assertEq(delta, isBuy ? int256(correction) : -int256(correction));
+        // L-C: de delta is het werkelijke inputbedrag. Bij verkopen is dat de naar boven afgeronde sats-hoeveelheid
+        // (hooguit het saldo) tegen de koers, dus tot 1 sat aan waarde boven de correctie.
+        int256 expectedDelta;
+        if (isBuy) {
+            expectedDelta = int256(correction);
+        } else {
+            uint256 sats = Math.min(Math.mulDiv(correction, 1e8, price, Math.Rounding.Ceil), btc);
+            expectedDelta = -int256(Math.mulDiv(sats, price, 1e8));
+        }
+        assertEq(delta, expectedDelta);
         r.execute(alice, keeper);
         assertEq(r.lastExecutedAt(alice), uint64(START));
     }

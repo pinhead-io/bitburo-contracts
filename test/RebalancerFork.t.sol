@@ -264,7 +264,9 @@ contract RebalancerForkTest is Test {
         uint256 total = 2_000_000 * price / 1e8;
         (bool due, int256 delta) = r.isDue(seller);
         assertTrue(due);
-        assertEq(delta, -int256(total / 10), "cap 10% van de totale waarde");
+        // L-C: de delta is de waarde van de naar boven afgeronde sats, dus hooguit 1 sat boven de cap van 10%.
+        uint256 sats = (total / 10 * 1e8 + price - 1) / price;
+        assertEq(delta, -int256(sats * price / 1e8), "cap 10% van de totale waarde, als verkochte sats");
 
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(seller, false, 0, 0, 0, keeper, 0, 0, 0, 0);
