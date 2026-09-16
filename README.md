@@ -97,7 +97,7 @@ RUN_FORK=false ~/.foundry/bin/forge test              # zonder fork
 ~/.foundry/bin/forge test --no-match-path "test/RebalancerFork.t.sol"   # idem, zonder RPC-aanroep
 ```
 
-`test/AuditMath.t.sol` bevat de fuzz-, invariant- en PoC-tests uit de interne audit van 15 september 2026 (`audit/2026-09-15/`). Let op bij tijdreeksen onder `via_ir`: Solidity cachet `block.timestamp` binnen een testfunctie, gebruik na `vm.warp` dus `vm.getBlockTimestamp()`.
+`test/AuditMath.t.sol`, `test/CrePoC.t.sol`, `test/PocFork.t.sol` en `test/OracleSandwich.t.sol` komen uit de interne audit van 15 september 2026; `audit/2026-09-15/poc/README.md` zegt per bestand wat ervan is overgenomen en wat is omgeschreven van bewijs-van-lek naar bewijs-van-fix. Let op bij tijdreeksen onder `via_ir`: Solidity cachet `block.timestamp` binnen een testfunctie, gebruik na `vm.warp` dus `vm.getBlockTimestamp()`.
 
 Deployen naar Base mainnet:
 
