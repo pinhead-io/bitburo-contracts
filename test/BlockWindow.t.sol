@@ -99,6 +99,20 @@ contract BlockWindowTest is RebalancerTestBase {
         assertEq(w.sqrtPriceX96, poolEurcUsdc.sqrtPriceX96());
     }
 
+    /// @notice Aan de randen van het tickbereik kapt de bovengrens niet af (geen uint160-overloop) en revert niets.
+    function test_window_extremeTicksDoNotOverflow() public {
+        poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MAX_TICK - 1));
+        (bool ok, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
+        assertTrue(ok);
+        assertEq(w.upper, type(uint160).max, "bovengrens afgekapt");
+        assertLe(w.lower, poolEurcUsdc.sqrtPriceX96());
+
+        poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MIN_TICK));
+        (ok, w) = h.window(poolEurcUsdc);
+        assertTrue(ok);
+        assertGe(w.upper, poolEurcUsdc.sqrtPriceX96());
+    }
+
     /// @notice Na een tickwissel in dit blok komt de begintick uit de observations, ook bij negatieve ticks.
     function testFuzz_window_startTickFromObservations(int24 startTick, uint32 delta, int24 moved) public {
         startTick = int24(bound(startTick, -200_000, 200_000));

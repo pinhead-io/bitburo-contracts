@@ -615,9 +615,10 @@ contract Rebalancer is ReentrancyGuardTransient {
         uint256 down =
             Math.sqrt(Math.mulDiv(BPS - MAX_BLOCK_MOVE_BPS, Q96 * Q96, BPS, Math.Rounding.Ceil), Math.Rounding.Ceil);
         uint256 up = Math.sqrt(Math.mulDiv(BPS + MAX_BLOCK_MOVE_BPS, Q96 * Q96, BPS));
-        // TickMath rondt naar boven af; voor de bovengrens daarom 1 eraf, zodat P(t) nooit te hoog is.
+        // TickMath rondt naar boven af; voor de bovengrens daarom 1 eraf, zodat P(t) nooit te hoog is. Vlak onder
+        // MAX_TICK past P(t) × √(1 + 6 bp) niet meer in uint160; dan geldt de grootste sqrtPriceX96 als grens.
         w.lower = uint160(Math.mulDiv(TickMath.getSqrtPriceAtTick(t + 1), down, Q96, Math.Rounding.Ceil));
-        w.upper = uint160(Math.mulDiv(TickMath.getSqrtPriceAtTick(t) - 1, up, Q96));
+        w.upper = uint160(Math.min(Math.mulDiv(TickMath.getSqrtPriceAtTick(t) - 1, up, Q96), type(uint160).max));
         ok = true;
     }
 
