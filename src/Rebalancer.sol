@@ -29,21 +29,27 @@ import {TickMath} from "./libraries/TickMath.sol";
  *      onomkeerbare uitschakelaar die het contract definitief stopt (zie daar). Die kan niets met fondsen.
  *
  *      Sandwich-bescherming (audit M-1, L-3), in drie lagen:
- *      1. Blokvenster per pool. Uniswap v3 schrijft een observatie zodra de tick in een blok voor het eerst
- *         verandert (of in-range liquiditeit wijzigt), en hooguit één per blok. Daaruit volgt de tick aan het
- *         begin van het huidige blok, net als in Uniswaps OracleLibrary.getBlockStartingTickAndLiquidity en
- *         OracleSlippage (hier herschreven, niet gekopieerd). Vóór én na de swap moet de koers van beide pools
- *         binnen MAX_BLOCK_MOVE_BPS van die beginkoers liggen, inclusief de eigen swap. Wie de pool in dezelfde
- *         transactie of eerder in hetzelfde blok duwt, gebruikt dus dezelfde 6 bp als de run zelf. Per eenheid
- *         die een aanvaller vooraf duwt en daarna terugruilt, is zijn opbrengst hooguit de koersbeweging
- *         tussen blokbegin en het einde van de run (≤ 6 bp), terwijl hij twee keer de poolfee betaalt (10 bp).
- *         Een atomaire zelf-sandwich levert dus verlies op. Uitzondering: een aanvaller die zelf een groot deel
- *         van de actieve liquiditeit bezit, krijgt een deel van die poolfee terug (gemeten in de fork-tests).
- *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster; in de praktijk past er per pool per
- *         blok één volle run in.
- *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers (constante
- *         liquiditeit) op SIZING_BPS van de resterende ruimte tot de vensterrand blijft. Past de correctie daar
- *         niet in, dan gaat hij in delen (zie `rounds`).
+ *      1. Blokcheck en blokvenster per pool. Een run gebeurt alleen als geen van beide pools in dit blok al een
+ *         oracle-observatie schreef (`observations[slot0.observationIndex].blockTimestamp == block.timestamp`,
+ *         anders `PoolTouchedThisBlock`). Volgens Uniswap v3-core (commit d8b1c635) schrijven precies deze acties
+ *         een observatie:
+ *         - een swap die de tick verandert (UniswapV3Pool.sol:732-748);
+ *         - een mint of burn met liquiditeit > 0 van een positie waarvan de range de huidige tick bevat
+ *           (`_modifyPosition`, :327 en :336-348).
+ *         Hooguit één per blok (Oracle.sol:90). Een swap binnen de tick, een mint of burn buiten de range, een
+ *         burn van 0, `collect` en `flash` schrijven niets. Is er in dit blok geen observatie, dan staan tick en
+ *         in-range liquiditeit nog zoals aan het begin van het blok: een aanvaller kan in dit blok hooguit binnen
+ *         de begintick duwen (≤ 1 tick ≈ 1 bp per pool) en geen JIT-liquiditeit in de range zetten. Vóór én na de
+ *         swap moet de koers bovendien binnen MAX_BLOCK_MOVE_BPS van die begintick liggen, inclusief de eigen
+ *         swap. Restrisico: een LP met een groot aandeel die in een eerder blok minde, krijgt een deel van de
+ *         poolfee terug. Bij de huidige protocolfee levert dat met een push binnen de tick geen winst op; zet
+ *         Uniswap de protocolfee op 0, dan hooguit ~1 bp van de run (gemeten in de fork-tests). Niet gezien wordt
+ *         duwen aan het eind van het vorige blok (niet atomair; laag 3 en arbitrage begrenzen het).
+ *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick
+ *         verandert; daarna is de pool in dit blok aangeraakt.
+ *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers op SIZING_BPS van
+ *         de resterende ruimte tot de vensterrand blijft. Past de correctie daar niet in, dan gaat hij in delen
+ *         (zie `rounds`).
  *      3. Spot tegen Chainlink. Vóór én na elke swap moet de spot van beide pools binnen
  *         MAX_SPOT_DEVIATION_BPS van de Chainlink-koers liggen, en `amountOutMinimum` volgt uit Chainlink en
  *         `maxSlippageBps`. Dat begrenst duwen over meerdere blokken, wat het blokvenster niet ziet. Het
@@ -55,10 +61,11 @@ import {TickMath} from "./libraries/TickMath.sol";
  *      budget van de ronde (maxCorrectionBps van de waarde bij de eerste run) op is. Elk deel is een gewone run
  *      met fee en keeperbeloning.
  *
- *      Uitval: een run revert met `BlockMoveExceeded` als een pool in dit blok al te ver bewogen is (door
- *      anderen of door een eerdere run) of als de run de rand haalt; in een volgend blok opnieuw proberen lost
- *      dat op. `BlockStartUnknown` is onbereikbaar voor echte Uniswap v3-pools met minstens twee observaties
- *      (afgedwongen in de constructor); een pool waarvan de beginkoers niet vast te stellen is, doet niets.
+ *      Uitval: een run revert vóór de swap met `PoolTouchedThisBlock` als een pool in dit blok al een observatie
+ *      schreef (door anderen of door een eerdere run), en met `BlockMoveExceeded` als er te weinig ruimte of
+ *      liquiditeit is of de run de vensterrand haalt. Beide zijn tijdelijk: in een volgend blok opnieuw proberen.
+ *      Gemeten op Base (2.000 blokken rond blok 51.390.800) valt door de blokcheck 0% van de pogingen uit als de
+ *      transactie bovenaan het blok staat, 4,3% halverwege en 7 tot 11% onderaan.
  *
  *      Beschikbaarheid: de fee-transfer naar de treasury en de beloning worden met een niet-reverterende
  *      transfer gedaan. Faalt de treasury-transfer (bijvoorbeeld een Circle-blacklist), dan blijft de fee in
@@ -202,14 +209,13 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @notice De pool is niet de POOL_FEE-pool van de factory van de router, dus niet de pool van de swap.
     error PoolNotFromRouterFactory(address pool);
     error SpotDeviatesFromOracle(uint256 spot, uint256 oracle);
-    /// @notice De koers van `pool` ligt (vóór of na de swap) verder dan MAX_BLOCK_MOVE_BPS van de koers aan het begin
-    ///         van dit blok, of er is in dit blok te weinig ruimte over voor een run van MIN_TRADE_FLOOR. Tijdelijk:
-    ///         in een volgend blok opnieuw proberen.
+    /// @notice De koers van `pool` ligt na de swap verder dan MAX_BLOCK_MOVE_BPS van de koers aan het begin van dit
+    ///         blok, of er is te weinig ruimte of liquiditeit voor een run van MIN_TRADE_FLOOR. Tijdelijk: in een
+    ///         volgend blok opnieuw proberen.
     error BlockMoveExceeded(address pool);
-    /// @notice De koers aan het begin van dit blok is voor `pool` niet vast te stellen (te weinig observaties).
-    error BlockStartUnknown(address pool);
-    /// @notice De pool bewaart minder dan twee observaties; dan is de begintick niet altijd vast te stellen.
-    error ObservationCardinalityTooLow(address pool);
+    /// @notice `pool` schreef in dit blok al een oracle-observatie (tickwissel door een swap, of een mint of burn in
+    ///         de range), vóór deze run. Tijdelijk: in een volgend blok opnieuw proberen.
+    error PoolTouchedThisBlock(address pool);
     error UnexpectedFeedDecimals(address feed);
     error NoOutput();
     /// @notice Het contract is buiten gebruik gesteld; alleen `setParams` met `active = false` en `sweep` kunnen nog.
@@ -287,10 +293,6 @@ contract Rebalancer is ReentrancyGuardTransient {
     function _requireSwapPool(IUniswapV3Factory factory, IUniswapV3Pool pool, address a, address b) private view {
         if (pool.fee() != POOL_FEE) revert UnexpectedPoolFee(address(pool));
         if (factory.getPool(a, b, POOL_FEE) != address(pool)) revert PoolNotFromRouterFactory(address(pool));
-        // Het blokvenster leidt de begintick af uit de laatste twee observaties. Het aantal kan in Uniswap v3 alleen
-        // groeien, dus deze check geldt voor de hele levensduur van het contract.
-        (,,, uint16 cardinality,,,) = pool.slot0();
-        if (cardinality < 2) revert ObservationCardinalityTooLow(address(pool));
     }
 
     // ─── Gebruiker ──────────────────────────────────────────────────────────────────────────────────────────
@@ -344,8 +346,9 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///         Het bedrag is wat `execute` nu werkelijk zou handelen, dus al begrensd op saldo en allowance: bij
     ///         kopen het EURC-inputbedrag, bij verkopen de cbBTC-input tegen de oraclekoers (audit L-C).
     ///         Tijdens een ronde is dit het volgende deel, dus hooguit wat nu in het blokvenster past.
-    /// @dev Revert nooit: een storing in de feeds of sequencer, een te grote spot-afwijking, te weinig ruimte in het
-    ///      blokvenster of een onbekende blokbeginkoers geeft (false, 0). Na `retire` altijd (false, 0).
+    /// @dev Revert nooit: een storing in de feeds of sequencer, een te grote spot-afwijking, een pool die in dit blok
+    ///      al een observatie schreef, of te weinig ruimte in het blokvenster geeft (false, 0). Na `retire` altijd
+    ///      (false, 0).
     function isDue(address owner) external view returns (bool due, int256 eurcDelta) {
         Params memory p = params[owner];
         if (retired || !p.active) {
@@ -359,8 +362,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (!ok) {
             return (false, 0);
         }
-        (address unknown, Window memory w1, Window memory w2) = _windows();
-        if (unknown != address(0)) {
+        (address touched, Window memory w1, Window memory w2) = _windows();
+        if (touched != address(0)) {
             return (false, 0);
         }
         return _dueAt(owner, p, price, chunk, w1, w2);
@@ -370,7 +373,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @dev Een owner die structureel revert (blacklist, te krappe slippage) blijft in de lijst staan; het
     ///      contract onthoudt mislukte pogingen niet. De wekkers simuleren daarom eerst en houden zelf een
     ///      cool-down per owner bij. Na `retire` altijd een lege lijst. Alle owners in de lijst delen hetzelfde
-    ///      blokvenster: na één run in dit blok is er voor de rest meestal geen ruimte meer.
+    ///      blokvenster: na één run in dit blok is er voor de rest meestal geen ruimte meer (een run die de tick
+    ///      verandert, raakt de pool aan). Heeft een pool in dit blok al een observatie, dan is de lijst leeg.
     function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory due) {
         uint256 total = _owners.length;
         if (retired || offset >= total) {
@@ -380,8 +384,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (!ok) {
             return new address[](0);
         }
-        (address unknown, Window memory w1, Window memory w2) = _windows();
-        if (unknown != address(0)) {
+        (address touched, Window memory w1, Window memory w2) = _windows();
+        if (touched != address(0)) {
             return new address[](0);
         }
         // Niet `offset + limit`: dat overflowt bij een grote `limit` (audit L-A).
@@ -439,9 +443,9 @@ contract Rebalancer is ReentrancyGuardTransient {
 
     /// @notice Voert één rebalance-stap uit voor `owner`. Iedereen mag dit aanroepen.
     /// @param rewardTo Ontvanger van de beloning uit de fee; address(0) = hele fee naar de treasury.
-    /// @dev Revert met `ContractRetired` zodra de treasury `retire` heeft aangeroepen, met `BlockMoveExceeded` als
-    ///      een pool in dit blok te ver van zijn beginkoers ligt (vóór of na de swap) of er te weinig ruimte over
-    ///      is, en met `BlockStartUnknown` als die beginkoers niet vast te stellen is.
+    /// @dev Revert met `ContractRetired` zodra de treasury `retire` heeft aangeroepen, vóór de swap met
+    ///      `PoolTouchedThisBlock` als een pool in dit blok al een observatie schreef, met `BlockMoveExceeded` als er
+    ///      te weinig ruimte of liquiditeit is of de koers na de swap buiten het venster ligt.
     function execute(address owner, address rewardTo) external nonReentrant {
         if (retired) revert ContractRetired();
         Params memory p = params[owner];
@@ -451,9 +455,10 @@ contract Rebalancer is ReentrancyGuardTransient {
         // Een beloning aan het contract zelf zou blijven hangen; dan liever de hele fee naar de treasury.
         if (rewardTo == address(this)) rewardTo = address(0);
 
+        // Eerst de blokcheck: een push in dit blok die ook de spot-check zou raken, meldt zich zo als tijdelijk.
+        (address touched, Window memory w1, Window memory w2) = _windows();
+        if (touched != address(0)) revert PoolTouchedThisBlock(touched);
         uint256 price = _quoteChecked();
-        (address unknown, Window memory w1, Window memory w2) = _windows();
-        if (unknown != address(0)) revert BlockStartUnknown(unknown);
         Plan memory pl = _plan(owner, p, price, chunk, w1, w2);
         if (pl.blockedBy != address(0)) revert BlockMoveExceeded(pl.blockedBy);
         if (pl.amountIn == 0) revert NothingToDo();
@@ -574,52 +579,51 @@ contract Rebalancer is ReentrancyGuardTransient {
         uint128 liquidity;
     }
 
-    /// @return unknown address(0), of de pool waarvan de koers aan het begin van dit blok niet vast te stellen is.
-    function _windows() internal view returns (address unknown, Window memory w1, Window memory w2) {
-        bool ok;
-        (ok, w1) = _window(POOL_EURC_USDC);
-        if (!ok) return (address(POOL_EURC_USDC), w1, w2);
-        (ok, w2) = _window(POOL_USDC_CBBTC);
-        if (!ok) return (address(POOL_USDC_CBBTC), w1, w2);
+    /// @return touched address(0), of de eerste pool die in dit blok al een observatie schreef.
+    function _windows() internal view returns (address touched, Window memory w1, Window memory w2) {
+        bool t;
+        (t, w1) = _window(POOL_EURC_USDC);
+        if (t) return (address(POOL_EURC_USDC), w1, w2);
+        (t, w2) = _window(POOL_USDC_CBBTC);
+        if (t) return (address(POOL_USDC_CBBTC), w1, w2);
     }
 
-    /// @dev Venster [lower, upper] voor sqrtPriceX96 van `pool` in dit blok. Revert niet; `ok = false` als de begintick
-    ///      niet vast te stellen is.
+    /// @dev Blokcheck en venster [lower, upper] voor sqrtPriceX96 van `pool` in dit blok. Revert niet.
     ///
-    ///      Begintick. Uniswap v3 schrijft een observatie bij de eerste tickwissel of in-range liquiditeitswijziging
-    ///      van een blok (UniswapV3Pool.swap en _modifyPosition), en hooguit één per blok (Oracle.write). Is de laatste
-    ///      observatie ouder dan dit blok, dan is de tick sinds het blokbegin niet veranderd: begintick = slot0.tick.
-    ///      Is hij van dit blok, dan heeft hij tickCumulative = vorige + begintick × (tijd tussen beide), want tussen
-    ///      twee schrijfmomenten staat de tick stil. De deling is dus exact, ook bij negatieve ticks.
+    ///      Blokcheck. `touched = true` als de pool in dit blok al een observatie schreef; het venster is dan leeg en
+    ///      wordt niet gebruikt. Welke acties schrijven staat bovenaan het contract. Oracle.write zet
+    ///      `observationIndex` op de nieuwe observatie (ook bij cardinality 1, dan overschrijft hij index 0), dus
+    ///      `observations(observationIndex)` is altijd de laatste.
     ///
-    ///      Afronding. De werkelijke beginkoers ligt ergens in [P(t), P(t+1)] (sqrtPriceX96 bij tick t en t+1). De
-    ///      ondergrens wordt vanaf P(t+1) gerekend en de bovengrens vanaf P(t), zodat de toegestane beweging vanaf de
-    ///      werkelijke beginkoers in beide richtingen hooguit MAX_BLOCK_MOVE_BPS is. De afronding van TickMath, de
-    ///      wortel en mulDiv gaat steeds naar een smaller venster.
-    function _window(IUniswapV3Pool pool) internal view returns (bool ok, Window memory w) {
-        (uint160 sqrtPriceX96, int24 tick, uint16 index, uint16 cardinality,,,) = pool.slot0();
+    ///      Begintick. Zonder observatie in dit blok is de tick sinds het blokbegin niet veranderd (elke tickwissel
+    ///      schrijft, en de eerste schrijfactie van een blok gaat altijd door): begintick = slot0.tick. Een afleiding
+    ///      uit twee observaties is daardoor niet nodig. Dat blijft zo tot na de swap: het venster wordt vóór de swap
+    ///      berekend en na de swap tegen de nieuwe koers gehouden.
+    ///
+    ///      Afronding. De werkelijke beginkoers ligt ergens in [P(t), P(t+1)] (sqrtPriceX96 bij tick t en t+1), want
+    ///      een swap binnen de tick verschuift de koers zonder observatie. De ondergrens wordt vanaf P(t+1) gerekend en
+    ///      de bovengrens vanaf P(t), zodat de toegestane beweging vanaf de werkelijke beginkoers in beide richtingen
+    ///      hooguit MAX_BLOCK_MOVE_BPS is. De afronding van TickMath, de wortel en mulDiv gaat steeds naar een smaller
+    ///      venster.
+    function _window(IUniswapV3Pool pool) internal view returns (bool touched, Window memory w) {
+        (uint160 sqrtPriceX96, int24 tick, uint16 index,,,,) = pool.slot0();
+        (uint32 lastTimestamp,,,) = pool.observations(index);
+        if (lastTimestamp == uint32(block.timestamp)) return (true, w);
         w.sqrtPriceX96 = sqrtPriceX96;
         w.liquidity = pool.liquidity();
-        int256 startTick = tick;
-        (uint32 lastTimestamp, int56 lastCumulative,,) = pool.observations(index);
-        if (lastTimestamp == uint32(block.timestamp)) {
-            if (cardinality < 2) return (false, w);
-            (uint32 prevTimestamp, int56 prevCumulative,, bool prevInitialized) =
-                pool.observations((uint256(index) + cardinality - 1) % cardinality);
-            if (!prevInitialized || prevTimestamp >= lastTimestamp) return (false, w);
-            startTick = (int256(lastCumulative) - prevCumulative) / int256(uint256(lastTimestamp - prevTimestamp));
+        // Een echte pool heeft altijd MIN_TICK <= tick < MAX_TICK (de swap weigert MIN/MAX_SQRT_RATIO als limiet).
+        // Anders een leeg venster: geen run (BlockMoveExceeded), en geen revert in TickMath.
+        if (tick < TickMath.MIN_TICK || tick >= TickMath.MAX_TICK) {
+            w.lower = type(uint160).max;
+            return (false, w);
         }
-        if (startTick < TickMath.MIN_TICK || startTick >= TickMath.MAX_TICK) return (false, w);
-        // forge-lint: disable-next-line(unsafe-typecast)
-        int24 t = int24(startTick);
         uint256 down =
             Math.sqrt(Math.mulDiv(BPS - MAX_BLOCK_MOVE_BPS, Q96 * Q96, BPS, Math.Rounding.Ceil), Math.Rounding.Ceil);
         uint256 up = Math.sqrt(Math.mulDiv(BPS + MAX_BLOCK_MOVE_BPS, Q96 * Q96, BPS));
         // TickMath rondt naar boven af; voor de bovengrens daarom 1 eraf, zodat P(t) nooit te hoog is. Vlak onder
         // MAX_TICK past P(t) × √(1 + 6 bp) niet meer in uint160; dan geldt de grootste sqrtPriceX96 als grens.
-        w.lower = uint160(Math.mulDiv(TickMath.getSqrtPriceAtTick(t + 1), down, Q96, Math.Rounding.Ceil));
-        w.upper = uint160(Math.min(Math.mulDiv(TickMath.getSqrtPriceAtTick(t) - 1, up, Q96), type(uint160).max));
-        ok = true;
+        w.lower = uint160(Math.mulDiv(TickMath.getSqrtPriceAtTick(tick + 1), down, Q96, Math.Rounding.Ceil));
+        w.upper = uint160(Math.min(Math.mulDiv(TickMath.getSqrtPriceAtTick(tick) - 1, up, Q96), type(uint160).max));
     }
 
     /// @dev Revert met `BlockMoveExceeded` als de huidige koers van `pool` buiten het venster ligt.

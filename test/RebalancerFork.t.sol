@@ -42,6 +42,10 @@ contract RebalancerForkTest is Test {
             return;
         }
         vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
+        // Een fork staat op de stand ná het laatste blok, met diens timestamp. Had dat blok een tickwissel in een van
+        // de pools, dan ziet de blokcheck die als "in dit blok aangeraakt". Begin daarom in een vers blok.
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 2);
 
         r = new Rebalancer(
             Rebalancer.Deployment({
@@ -178,7 +182,12 @@ contract RebalancerForkTest is Test {
         uint256 g = gasleft();
         r.execute(buyer, keeper);
         uint256 buyGas = g - gasleft();
+        uint64 buyTime = uint64(vm.getBlockTimestamp());
 
+        // De koop kan de tick van een pool veranderen; dan weigert de blokcheck een tweede run in hetzelfde blok
+        // (PoolTouchedThisBlock). De verkoop gaat daarom in het volgende blok, zoals een wekker dat ook doet.
+        vm.roll(block.number + 1);
+        vm.warp(vm.getBlockTimestamp() + 2);
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(seller, false, 0, 0, 0, treasury, 0, 0, 0, 0);
         g = gasleft();
@@ -186,8 +195,8 @@ contract RebalancerForkTest is Test {
         uint256 sellGas = g - gasleft();
 
         console.log("gas koop:", buyGas, "gas verkoop:", sellGas);
-        assertEq(r.lastExecutedAt(buyer), uint64(block.timestamp));
-        assertEq(r.lastExecutedAt(seller), uint64(block.timestamp));
+        assertEq(r.lastExecutedAt(buyer), buyTime);
+        assertEq(r.lastExecutedAt(seller), uint64(vm.getBlockTimestamp()));
         assertLt(buyGas, 1_000_000, "koop past niet meer in het begrote gas");
         assertLt(sellGas, 1_000_000, "verkoop past niet meer in het begrote gas");
     }

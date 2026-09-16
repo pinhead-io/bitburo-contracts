@@ -1857,6 +1857,7 @@ contract RebalancerHandler is Test {
     uint256 public revertsSlippage;
     uint256 public revertsRetired;
     uint256 public revertsBlockMove;
+    uint256 public revertsPoolTouched;
     uint256 public revertsOther;
     /// @dev Ronde-ghosts (audit M-1): budget en richting van de lopende ronde per owner, en wat er in die ronde al
     ///      verhandeld is. Een run is een nieuwe ronde als `interval` sinds de vorige run verstreken is, anders een deel.
@@ -1977,7 +1978,8 @@ contract RebalancerHandler is Test {
         else poolUsdcCbbtc.setLiquidity(uint128(Math.min(uint256(value) * 1e3, type(uint128).max)));
     }
 
-    /// @dev Een swap van iemand anders in dit blok (tot ±10 bp), zodat het blokvenster vooraf geraakt wordt.
+    /// @dev Een swap van iemand anders in dit blok (tot ±10 bp). Verandert die de tick, dan raakt hij de blokcheck
+    ///      (PoolTouchedThisBlock); binnen de tick het blokvenster.
     function pushInBlock(bool eurcPool, uint16 bps, bool up) external afterCall {
         bps = uint16(bound(bps, 0, 10));
         MockUniswapV3Pool pool = eurcPool ? poolEurcUsdc : poolUsdcCbbtc;
@@ -2062,6 +2064,7 @@ contract RebalancerHandler is Test {
             else if (sel == Rebalancer.SpotDeviatesFromOracle.selector) revertsSpot++;
             else if (sel == Rebalancer.ContractRetired.selector) revertsRetired++;
             else if (sel == Rebalancer.BlockMoveExceeded.selector) revertsBlockMove++;
+            else if (sel == Rebalancer.PoolTouchedThisBlock.selector) revertsPoolTouched++;
             else if (sel == bytes4(keccak256("Error(string)"))) revertsSlippage++;
             else revertsOther++;
         }
@@ -2110,7 +2113,7 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
     }
 
     /// @dev Zonder router-slippage en met de spot binnen ±1% mag een execute alleen falen op NothingToDo, Inactive,
-    ///      NotDue, de spot-check, het blokvenster of ContractRetired; "Too little received" of iets anders zou
+    ///      NotDue, de spot-check, de blokcheck, het blokvenster of ContractRetired; "Too little received" of iets anders zou
     ///      liveness-uitval zijn.
     function invariant_executeFailsOnlyForKnownReasons() public view {
         assertEq(handler.revertsSlippage(), 0, "router-slippage zonder oorzaak");
@@ -2119,7 +2122,7 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
             handler.executes(),
             handler.executesSucceeded() + handler.revertsNothingToDo() + handler.revertsInactive()
                 + handler.revertsNotDue() + handler.revertsSpot() + handler.revertsRetired()
-                + handler.revertsBlockMove()
+                + handler.revertsBlockMove() + handler.revertsPoolTouched()
         );
     }
 
@@ -2129,7 +2132,9 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
         console.log("revert BlockMoveExceeded:", handler.revertsBlockMove(), " NotDue:", handler.revertsNotDue());
         console.log("execute totaal:", handler.executes(), " NothingToDo:", handler.revertsNothingToDo());
         console.log("revert spot:", handler.revertsSpot(), " retired:", handler.revertsRetired());
-        console.log("revert inactive:", handler.revertsInactive());
+        console.log(
+            "revert inactive:", handler.revertsInactive(), " PoolTouchedThisBlock:", handler.revertsPoolTouched()
+        );
     }
 
     /// @dev Audit M-1: de runs van één ronde (eerste run plus delen) blijven samen binnen het budget van die ronde

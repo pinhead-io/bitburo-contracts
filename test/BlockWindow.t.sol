@@ -13,7 +13,7 @@ import {RebalancerTestBase} from "./Rebalancer.t.sol";
 contract RebalancerWindowHarness is Rebalancer {
     constructor(Deployment memory d) Rebalancer(d) {}
 
-    function window(IUniswapV3Pool pool) external view returns (bool ok, Window memory w) {
+    function window(IUniswapV3Pool pool) external view returns (bool touched, Window memory w) {
         return _window(pool);
     }
 }
@@ -88,8 +88,8 @@ contract BlockWindowTest is RebalancerTestBase {
         poolEurcUsdc.setSqrtPriceX96(uint160(p0 + Math.mulDiv(p1 - p0 - 1, frac, 1e18)));
         assertEq(poolEurcUsdc.tick(), tick, "opzet: tick");
 
-        (bool ok, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
-        assertTrue(ok);
+        (bool touched, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
+        assertFalse(touched);
         // P(t) uit TickMath is naar boven afgerond; de echte P(t) ligt boven p0 - 1.
         assertGe(uint256(w.lower) * w.lower * 10_000, p1 * p1 * 9994, "ondergrens te ruim");
         assertLe(uint256(w.upper) * w.upper * 10_000, (p0 - 1) * (p0 - 1) * 10_006, "bovengrens te ruim");
@@ -102,95 +102,128 @@ contract BlockWindowTest is RebalancerTestBase {
     /// @notice Aan de randen van het tickbereik kapt de bovengrens niet af (geen uint160-overloop) en revert niets.
     function test_window_extremeTicksDoNotOverflow() public {
         poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MAX_TICK - 1));
-        (bool ok, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
-        assertTrue(ok);
+        (bool touched, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
+        assertFalse(touched);
         assertEq(w.upper, type(uint160).max, "bovengrens afgekapt");
         assertLe(w.lower, poolEurcUsdc.sqrtPriceX96());
 
         poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MIN_TICK));
-        (ok, w) = h.window(poolEurcUsdc);
-        assertTrue(ok);
+        (touched, w) = h.window(poolEurcUsdc);
+        assertFalse(touched);
         assertGe(w.upper, poolEurcUsdc.sqrtPriceX96());
+
+        // Tick MAX_TICK kan een echte pool niet hebben; dan een leeg venster in plaats van een revert in TickMath.
+        poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MAX_TICK));
+        assertEq(poolEurcUsdc.tick(), TickMath.MAX_TICK, "opzet");
+        (touched, w) = h.window(poolEurcUsdc);
+        assertFalse(touched);
+        assertGt(w.lower, w.upper, "venster niet leeg");
     }
 
-    /// @notice Na een tickwissel in dit blok komt de begintick uit de observations, ook bij negatieve ticks.
-    function testFuzz_window_startTickFromObservations(int24 startTick, uint32 delta, int24 moved) public {
-        startTick = int24(bound(startTick, -200_000, 200_000));
-        delta = uint32(bound(delta, 1, 30 days));
-        moved = int24(bound(moved, -500, 500));
-        poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(startTick));
-        (, Rebalancer.Window memory before) = h.window(poolEurcUsdc);
+    /// @notice Blokcheck: een observatie van dit blok op `observationIndex` (bij elke index en cardinality, ook 1)
+    ///         markeert de pool als aangeraakt; een oudere observatie niet, en dan volgt het venster uit slot0.tick.
+    ///         Vervangt de fuzz-test op de afleiding van de begintick uit twee observaties: die afleiding is weg,
+    ///         want zonder observatie in dit blok is slot0.tick de begintick, en met een observatie is er geen run.
+    function testFuzz_window_observationThisBlockMeansTouched(int24 tick, uint16 index, uint16 cardinality, uint32 age)
+        public
+    {
+        tick = int24(bound(tick, -200_000, 200_000));
+        cardinality = uint16(bound(cardinality, 1, type(uint16).max));
+        index = uint16(bound(index, 0, cardinality - 1));
+        age = uint32(bound(age, 1, block.timestamp - 1));
+        poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(tick));
+        (, Rebalancer.Window memory ref) = h.window(poolEurcUsdc);
+        poolEurcUsdc.setObservationCardinality(cardinality);
+        poolEurcUsdc.setObservationIndex(index);
 
-        // Zoals Oracle.write na een swap in dit blok: vorige observatie `delta` geleden, nieuwe nu.
-        int56 cum0 = -123_456_789;
-        poolEurcUsdc.setObservation(0, uint32(block.timestamp) - delta, cum0, true);
-        poolEurcUsdc.setObservation(1, uint32(block.timestamp), cum0 + int56(startTick) * int56(uint56(delta)), true);
-        poolEurcUsdc.setObservationIndex(1);
-        poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(startTick + moved));
+        poolEurcUsdc.setObservation(index, uint32(block.timestamp) - age, 0, true);
+        (bool touched, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
+        assertFalse(touched, "oude observatie telt als aangeraakt");
+        assertEq(w.lower, ref.lower, "lower volgt niet slot0.tick");
+        assertEq(w.upper, ref.upper, "upper volgt niet slot0.tick");
+        assertLt(w.lower, TickMath.getSqrtPriceAtTick(tick), "venster niet rond slot0.tick");
+        assertGt(w.upper, TickMath.getSqrtPriceAtTick(tick + 1), "venster niet rond slot0.tick");
 
-        (bool ok, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
-        assertTrue(ok);
-        assertEq(w.lower, before.lower, "lower volgt niet de begintick");
-        assertEq(w.upper, before.upper, "upper volgt niet de begintick");
+        poolEurcUsdc.setObservation(index, uint32(block.timestamp), 0, true);
+        (touched,) = h.window(poolEurcUsdc);
+        assertTrue(touched, "observatie van dit blok niet gezien");
     }
 
-    /// @notice Een swap in dit blok (mock schrijft zoals Uniswap) verschuift het venster niet.
-    function test_window_swapInThisBlockKeepsWindow() public {
+    /// @notice Een swap binnen de tick schrijft geen observatie en laat het venster staan; een swap die de tick
+    ///         verandert (mock schrijft zoals Uniswap) raakt de pool aan. Een volgend blok begint op de nieuwe koers.
+    function test_window_swapWithinTickKeepsWindow_tickChangeTouches() public {
         (, Rebalancer.Window memory before) = h.window(poolEurcUsdc);
-        poolEurcUsdc.swapToPrice(1e6, 1.002e6);
-        (, Rebalancer.Window memory afterSwap) = h.window(poolEurcUsdc);
-        assertEq(afterSwap.lower, before.lower);
-        assertEq(afterSwap.upper, before.upper);
-        // Een volgend blok begint op de nieuwe koers.
+        poolEurcUsdc.swapToPrice(1e6, 1.00005e6); // 0,5 bp omhoog, binnen tick 0
+        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
+        (bool touched, Rebalancer.Window memory within) = h.window(poolEurcUsdc);
+        assertFalse(touched, "swap binnen de tick telt als aangeraakt");
+        assertEq(within.lower, before.lower);
+        assertEq(within.upper, before.upper);
+
+        poolEurcUsdc.swapToPrice(1e6, 1.002e6); // 20 bp: tickwissel
+        (touched,) = h.window(poolEurcUsdc);
+        assertTrue(touched, "tickwissel niet gezien");
+
         _nextBlock();
-        (, Rebalancer.Window memory next) = h.window(poolEurcUsdc);
+        Rebalancer.Window memory next;
+        (touched, next) = h.window(poolEurcUsdc);
+        assertFalse(touched, "volgend blok nog aangeraakt");
         assertGt(next.upper, before.upper);
     }
 
-    function test_constructor_rejectsPoolWithCardinalityBelowTwo() public {
+    /// @notice De constructor eist geen minimum aantal observaties meer: de blokcheck leest alleen de laatste.
+    ///         (Vervangt `test_constructor_rejectsPoolWithCardinalityBelowTwo`; die check was alleen nodig voor de
+    ///         afleiding van de begintick uit de vorige observatie.)
+    function test_constructor_acceptsCardinalityOne() public {
         poolEurcUsdc.setObservationCardinality(1);
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.ObservationCardinalityTooLow.selector, poolEurcUsdc));
-        new Rebalancer(_deployment());
-        poolEurcUsdc.setObservationCardinality(2);
         poolUsdcCbbtc.setObservationCardinality(1);
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.ObservationCardinalityTooLow.selector, poolUsdcCbbtc));
-        new Rebalancer(_deployment());
+        Rebalancer fresh = new Rebalancer(_deployment());
+        assertEq(address(fresh.POOL_EURC_USDC()), address(poolEurcUsdc));
     }
 
-    /// @notice Cardinality 1 na een write in dit blok, of een niet-geïnitialiseerde vorige observatie: de begintick
-    ///         is onbekend. Veilig: execute revert, isDue en dueOwners melden niets.
-    function test_blockStartUnknown_revertsAndNotDue() public {
+    /// @notice Een observatie van dit blok in een van beide pools: execute revert vóór de swap met
+    ///         PoolTouchedThisBlock, isDue en dueOwners melden niets. Een volgend blok wel. Ook bij cardinality 1.
+    ///         (Vervangt `test_blockStartUnknown_revertsAndNotDue`: een onbekende begintick bestaat niet meer.)
+    function test_poolTouchedThisBlock_revertsAndNotDue() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
-        poolUsdcCbbtc.setObservation(0, uint32(block.timestamp), 0, true);
-        poolUsdcCbbtc.setObservationCardinality(1);
-        (bool due,) = r.isDue(alice);
-        assertFalse(due);
-        assertEq(r.dueOwners(0, 10).length, 0);
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockStartUnknown.selector, poolUsdcCbbtc));
-        r.execute(alice, keeper);
-
-        poolUsdcCbbtc.setObservationCardinality(2); // vorige (index 1) is niet geïnitialiseerd
-        (due,) = r.isDue(alice);
-        assertFalse(due);
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockStartUnknown.selector, poolUsdcCbbtc));
-        r.execute(alice, keeper);
-
-        poolUsdcCbbtc.setObservation(0, 1, 0, true); // weer een oude observatie
-        (due,) = r.isDue(alice);
-        assertTrue(due);
+        MockUniswapV3Pool[2] memory pools = [poolEurcUsdc, poolUsdcCbbtc];
+        for (uint256 i; i < 2; i++) {
+            pools[i].setObservationCardinality(1);
+            pools[i].setObservation(0, uint32(vm.getBlockTimestamp()), 0, true);
+            (bool due, int256 delta) = r.isDue(alice);
+            assertFalse(due, "isDue");
+            assertEq(delta, 0);
+            assertEq(r.dueOwners(0, 10).length, 0, "dueOwners");
+            vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, pools[i]));
+            r.execute(alice, keeper);
+            assertEq(router.calls(), 0, "swap gedaan");
+            assertEq(r.lastExecutedAt(alice), 0);
+            pools[i].setObservation(0, 1, 0, true); // weer een oude observatie
+        }
+        _nextBlock();
+        (bool dueNext,) = r.isDue(alice);
+        assertTrue(dueNext);
         r.execute(alice, keeper);
     }
 
-    // ─── Vooraf: pool in dit blok al te ver ─────────────────────────────────────────────────────────────────
+    /// @notice De selector die wekkers als tijdelijke revert herkennen.
+    function test_poolTouchedThisBlock_selector() public pure {
+        assertEq(Rebalancer.PoolTouchedThisBlock.selector, bytes4(keccak256("PoolTouchedThisBlock(address)")));
+        assertEq(Rebalancer.PoolTouchedThisBlock.selector, bytes4(0x817a53db));
+    }
 
-    function test_execute_revertsBlockMoveExceededBeforeSwap() public {
+    // ─── Vooraf: pool in dit blok al bewogen ────────────────────────────────────────────────────────────────
+
+    /// @notice Een push van 7 bp in dit blok verandert de tick en raakt dus de blokcheck. Vóór de blokcheck strandde
+    ///         dit op het venster (BlockMoveExceeded); de weigering vooraf is nu strenger en heeft een eigen error.
+    function test_execute_revertsPoolTouchedBeforeSwap() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
-        // 7 bp in dit blok (tegen de koop in, dus omhoog): buiten het venster, ongeacht de richting.
+        // 7 bp in dit blok (tegen de koop in, dus omhoog).
         poolEurcUsdc.swapToPrice(1e6, 1.0007e6);
         (bool due,) = r.isDue(alice);
         assertFalse(due, "isDue");
         assertEq(r.dueOwners(0, 10).length, 0, "dueOwners");
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
         r.execute(alice, keeper);
         assertEq(router.calls(), 0, "swap gedaan");
         assertEq(r.lastExecutedAt(alice), 0);
@@ -202,20 +235,36 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
-    function test_execute_revertsBlockMoveExceededBeforeSwapInCbbtcPool() public {
+    function test_execute_revertsPoolTouchedBeforeSwapInCbbtcPool() public {
         _setUser(bob, 0, 1_250_000, _defaultParams());
         poolUsdcCbbtc.swapToPrice(PRICE, 0.9993e8); // ~7 bp
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolUsdcCbbtc));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolUsdcCbbtc));
         r.execute(bob, keeper);
     }
 
-    function test_execute_pushWithinWindowAllowed() public {
+    /// @notice Een push binnen de begintick schrijft geen observatie en mag; een push over de tickgrens niet, ook
+    ///         niet als hij binnen het venster van 6 bp blijft. Vroeger mocht een push van 4 bp
+    ///         (`test_execute_pushWithinWindowAllowed`): dat is precies de ruimte die push-then-JIT gebruikte
+    ///         (review PR #18, M-1).
+    function test_execute_pushWithinTickAllowed_pushOverTickRefused() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
-        poolEurcUsdc.swapToPrice(1.0004e6, 1e6); // 4 bp in de richting van de koop
+        // Vorig blok: koers midden in tick 0.
+        poolEurcUsdc.setPrice(1e6, 1.00005e6);
+        uint256 snap = vm.snapshotState();
+
+        poolEurcUsdc.swapToPrice(1e6, 1.000001e6); // ~0,5 bp in de richting van de koop, binnen tick 0
+        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
         (bool due,) = r.isDue(alice);
-        assertTrue(due);
+        assertTrue(due, "push binnen de tick");
         r.execute(alice, keeper);
         assertEq(eurc.balanceOf(alice), 900e6);
+
+        vm.revertToState(snap);
+        poolEurcUsdc.swapToPrice(1.0004e6, 1e6); // 4 bp in de richting van de koop: tickwissel
+        (due,) = r.isDue(alice);
+        assertFalse(due, "push over de tick");
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
+        r.execute(alice, keeper);
     }
 
     // ─── Achteraf: push plus eigen swap ─────────────────────────────────────────────────────────────────────
@@ -237,10 +286,14 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(bob, keeper);
         assertEq(cbbtc.balanceOf(bob), 1_250_000);
 
-        // Push vooraf (3 bp) plus eigen impact (nog 3 bp) staat samen 6 bp van de beginkoers. De koers begon precies
-        // op tick 0 en het venster rekent omlaag vanaf tick 1, dus hier is de ruimte omlaag 5 bp: revert. Een eigen
-        // impact van nog 2 bp (samen 5 bp) past wel.
-        poolEurcUsdc.swapToPrice(1.0003e6, 1e6);
+        // Een push vooraf kan alleen nog binnen de begintick (anders PoolTouchedThisBlock), en het venster blijft vanaf
+        // de randen van die tick gerekend. Vorig blok: koers midden in tick 0. Push binnen de tick naar net boven P(0),
+        // dan eigen impact tot 6 bp onder P(0): buiten het venster, dat omlaag vanaf P(1) rekent en dus 5 bp onder P(0)
+        // eindigt. Tot 5 bp onder P(0) past wel. (Vroeger was de push hier 3 bp over de tickgrens; die raakt nu de
+        // blokcheck.)
+        poolEurcUsdc.setPrice(1e6, 1.00005e6);
+        poolEurcUsdc.swapToPrice(1e6, 1.000001e6);
+        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
         router.setPoolShift(poolEurcUsdc, 1.0006e6, 1e6);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
         r.execute(alice, keeper);
@@ -285,8 +338,8 @@ contract BlockWindowTest is RebalancerTestBase {
         assertEq(remaining, 10_000e6 - Math.mulDiv(sats, PRICE, 1e8, Math.Rounding.Ceil));
     }
 
-    /// @notice Lead 2: twee runs in hetzelfde blok delen het venster. De eerste gebruikt de ruimte, de tweede past
-    ///         niet meer (onder MIN_TRADE_FLOOR) en revert vooraf; een blok later wel.
+    /// @notice Lead 2: twee runs in hetzelfde blok. De run van alice verandert de tick (5 bp); bob revert daarom
+    ///         vooraf op de blokcheck (vroeger op het venster, BlockMoveExceeded), een blok later niet.
     function test_execute_twoOwnersSameBlockShareWindow() public {
         poolEurcUsdc.setLiquidity(1e12);
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
@@ -300,12 +353,30 @@ contract BlockWindowTest is RebalancerTestBase {
         assertFalse(due, "bob due in hetzelfde blok");
         address[] memory list = r.dueOwners(0, 10);
         assertEq(list.length, 0);
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
         r.execute(bob, keeper);
 
         _nextBlock();
         (due,) = r.isDue(bob);
         assertTrue(due, "bob een blok later");
+        r.execute(bob, keeper);
+    }
+
+    /// @notice Twee runs in hetzelfde blok die de tick niet veranderen, delen het venster van de begintick: de tweede
+    ///         mag, en wordt gesized op de ruimte die de eerste overliet.
+    function test_execute_twoOwnersSameBlockWithinTickShareWindow() public {
+        poolEurcUsdc.setLiquidity(1e12);
+        poolEurcUsdc.setPrice(1e6, 1.00009e6); // vorig blok: bovenin tick 0
+        _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
+        _setUser(bob, 10_000e6, 0, _params(10_000, 20e6));
+        (, int256 deltaAliceAlone) = r.isDue(alice);
+        router.setPoolShift(poolEurcUsdc, 1e6, 1.00001e6); // run van alice blijft binnen tick 0
+        r.execute(alice, keeper);
+        router.setPoolShift(MockUniswapV3Pool(address(0)), 0, 0);
+        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
+        (bool due, int256 deltaBob) = r.isDue(bob);
+        assertTrue(due, "bob mag in hetzelfde blok zolang de tick staat");
+        assertLt(deltaBob, deltaAliceAlone, "bob krijgt de resterende ruimte, niet het hele venster");
         r.execute(bob, keeper);
     }
 
@@ -463,10 +534,12 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(alice, keeper);
         (, uint256 remaining) = _round(alice);
         _warp(10 minutes);
-        poolEurcUsdc.swapToPrice(1.0005e6, 1e6); // iemand anders gebruikt de ruimte in dit blok
+        // Iemand anders duwt de pool in dit blok over de tick. Vroeger viel het deel dan onder de vloer
+        // (BlockMoveExceeded); nu weigert de blokcheck het eerder. De ronde blijft in beide gevallen staan.
+        poolEurcUsdc.swapToPrice(1.0005e6, 1e6);
         (bool due,) = r.isDue(alice);
         assertFalse(due);
-        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
         r.execute(alice, keeper);
         (, uint256 stillRemaining) = _round(alice);
         assertEq(stillRemaining, remaining, "ronde verdwenen");
