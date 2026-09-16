@@ -13,6 +13,9 @@ Scope: `src/Rebalancer.sol` op solc 0.8.37 (via-IR, cancun), commit `48cc7f9`.
 
 Vergeleken met `audit/2026-09-15/RAPPORT.md`: **M-1 is nog open** — de post-swap-check verkleint de sandwich-winst, maar sluit hem niet. De overige punten hieronder zijn nieuw. Of de andere punten uit dat rapport (H-1, H-2, M-2 t/m M-9, L-1 t/m L-9) zijn opgelost, is in deze ronde niet systematisch nagelopen.
 
+## Compiler (opgelost in deze branch)
+Solc 0.8.28 had 6 bekende compilerbugs (bron: `argotorg/solidity` `docs/bugs_by_version.json`), allemaal opgelost in 0.8.37. De zwaarste is **SOL-2026-1 TransientStorageClearingHelperCollision (high)**, die geldt voor via-IR + cancun (0.8.28–0.8.33). De bug treedt op bij `delete` op een `transient`-variabele in dezelfde bytecode als het clearen van storage. `Rebalancer.sol` bevat geen `delete`/`pop()`, en OZ `ReentrancyGuardTransient` gebruikt `TransientSlot` (assembly) in plaats van het `transient`-keyword, dus het contract werd waarschijnlijk niet geraakt. Commit `48cc7f9` zet de compiler op 0.8.37; 127/127 tests groen.
+
 ---
 
 ## Findings
@@ -53,7 +56,7 @@ Fix: `uint256 end = limit > total - offset ? total : offset + limit;`
 Fix: fee over `max(received, expectedOut)`, of de floor controleren op `received`, of de NatSpec corrigeren.
 
 ### L-C — `isDue` rapporteert een grotere run dan `execute` uitvoert (2 agents)
-`_dueAt` (r314) geeft `correctionEurc` terug, dus zonder de allowance-cap. `execute` handelt `amountIn`, en dat is wél gecapt. Voorbeeld: allowance 20 EURC → `eurcDelta` 1.000 EURC, run 20 EURC. De keeper-filter `runSizeSkipReason` (keeper.ts:111) vertrouwt op dat getal. Zolang `MIN_RUN_EURC = 20` gelijk is aan de floor heeft dit geen effect.
+`_dueAt` (r314) geeft `correctionEurc` terug, dus zonder de allowance-cap. `execute` handelt `amountIn`, en dat is wél gecapt. Voorbeeld: allowance 20 EURC → `eurcDelta` 1.000 EURC, run 20 EURC. De keeper-filter `runSizeSkipReason` (keeper.ts:111) vertrouwt op dat getal. Zolang `MIN_RUN_EURC = 20` gelijk is aan de floor heeft dit geen effect. Agent 11: als de CRE-workflow zijn top-N sorteert op `eurcDelta`, kan een owner met allowance 20 EURC bovenaan komen te staan. Dat maakt H-2-starvation goedkoper. Niet nagelopen.
 Fix: `eurcDelta` afleiden van `amountIn`.
 
 ---
@@ -66,9 +69,16 @@ Fix: `eurcDelta` afleiden van `amountIn`.
 - **Front-run van `setParams`/`approve(0)`** (agent 5). Een run op de oude parameters vlak vóór een wijziging. Op Base (FCFS-sequencer) is dat onbewezen.
 - **Oracle mogelijk deels afgeleid van DEX-prijzen** (oracle-agent). De Chainlink-directory labelt beide feeds `dex_state_price`. Als daar de Base EURC/USDC-pool in zit, controleert de oracle deels zichzelf. Navragen bij Chainlink.
 - **Geen absolute min/max op feed-antwoorden** (oracle-agent). Alleen relevant als een feed eerst ernstig faalt.
+- **Eerlijke runs reverten zonder aanvaller** (agent 1). De feeds mogen samen ~0,4% van de markt afwijken (cbBTC/USD 0,3% + EURC/USD 0,1% deviation). De post-swap-check telt daar de eigen prijsimpact van de run bij op. Grote runs kunnen zo boven de 50 bps komen en met `SpotDeviatesFromOracle` falen tot de feed bijwerkt. Alleen beschikbaarheid, geen verlies; hoe vaak dit gebeurt is niet gemeten.
 - **Goedkope DoS via spot-push** (agent 3). Ongeveer 8 EURC aan poolfees laat alle runs tijdelijk reverten. Dit is bekend als L-3.
 - **H-2-restant** (agent 11). Starvation van keeper-slots kost met `MIN_TRADE_FLOOR` ~8 EURC per dag voor 5 slots, tenzij de CRE-wekker zijn start-offset rouleert. Nagaan of die rotatie er is.
 - **`_spotOut` deelt door 0 bij `sqrtPriceX96 < 2^48`** (agent 6). Latent; niet bereikbaar met de huidige pools.
+
+## Opgemerkt, geen impact
+- `setParams(active=false)` moet nog steeds geldige params meesturen (agents 2, 8). De owner kan zijn opgeslagen params meesturen en zit dus niet vast.
+- Na `retire` kan een nieuw adres zich nog registreren in `_owners` (agent 8). `execute` revert dan al, en de reads zijn gepagineerd.
+- Treasury op de Circle-blacklist: fee blijft in het contract en `sweep` revert tot de blacklist is opgeheven (agents 2, 6). Geen verlies voor gebruikers; bekend als M-6.
+- Donatie om een trade af te dwingen of de richting te draaien kost de aanvaller meer dan het slachtoffer verliest (agents 2, 3, 6, 7).
 
 ## Gecontroleerd en in orde
 - **Chainlink-validatie:** `answer > 0`, `updatedAt` niet in de toekomst, MAX_AGE boven de heartbeat (1200 s / 3600 s), 8 decimals, sequencer + 1 uur grace period.
