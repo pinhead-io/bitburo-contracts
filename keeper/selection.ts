@@ -160,8 +160,8 @@ export type FeePolicy = {
  *
  * Base ordent binnen een Flashblock op priority fee; wie vóór de aanraker staat, draait. De stap:
  * - minstens een verdubbeling. Van 0,05 naar het plafond van 3 gwei zijn dat 6 stappen (0,1 – 0,2 – 0,4 – 0,8 – 1,6 –
- *   3). Met hooguit één verzending per `SEND_RETRY_BLOCKS` (standaard 30 blokken ≈ 1 minuut) zit de keeper binnen
- *   ~6 minuten, dus binnen één run van 10 minuten, op het plafond; bij een stap van +25% zijn dat 19 pogingen en
+ *   3). Met gemiddeld één verzending per `SEND_RETRY_BLOCKS` (standaard 30 blokken ≈ 1 minuut) zit de keeper
+ *   binnen ~6 minuten, dus binnen één run van 10 minuten, op het plafond; bij een stap van +25% zijn dat 19 pogingen en
  *   verliest hij twee runs. Tegelijk betaalt hij hooguit het dubbele van de tip die nodig was.
  * - is de tip van de aanraker bekend (`blockerTip`), dan direct 10% daarboven als dat meer is: één poging in plaats
  *   van een reeks verdubbelingen, en een marge tegen een aanvaller die zijn tip steeds een beetje verhoogt.
@@ -211,12 +211,20 @@ export const blockerTip = (
     .reduce<bigint | undefined>((max, tx) => (max === undefined || tx.tip > max ? tx.tip : max), undefined);
 
 /**
- * Na een blokkade verstuurt de keeper pas weer `sendRetryBlocks` blokken later (simuleren mag elk blok). Een
- * gerevertte poging kost ~40k gas; één per ~30 blokken houdt de kosten voor de keeper onder aanval rond 1/69 van die
- * van de aanvaller, die elk blok moet aanraken (L-3-metingen).
+ * Na een blokkade verstuurt de keeper pas weer na een willekeurig aantal blokken, gemiddeld `sendRetryBlocks`
+ * (uniform 1 tot 2 × `sendRetryBlocks` − 1; simuleren mag elk blok). Twee redenen:
+ * - een gerevertte poging kost ~40k gas; gemiddeld één per ~30 blokken (≈ 1 minuut) houdt de kosten voor de keeper
+ *   onder aanval rond 1/69 van die van de aanvaller, die elk blok moet aanraken (L-3-metingen);
+ * - willekeurig, want de gerevertte transactie staat on-chain: bij een vaste wachttijd weet de aanvaller precies in
+ *   welk blok de volgende poging komt en hoeft hij alleen dáár een hoge tip te betalen. Nu moet hij dat in elk blok
+ *   van het hele bereik.
+ * `random` in [0, 1), bijvoorbeeld `Math.random()`; één keer trekken per blokkade.
  */
-export const firstSendBlock = (lastBlockadeBlock: bigint | null, sendRetryBlocks: number): bigint | null =>
-  lastBlockadeBlock === null ? null : lastBlockadeBlock + BigInt(sendRetryBlocks);
+export const nextSendBlock = (blockadeBlock: bigint, sendRetryBlocks: number, random: number): bigint => {
+  const span = 2 * sendRetryBlocks - 1;
+  const offset = Math.min(Math.floor(random * span), span - 1);
+  return blockadeBlock + 1n + BigInt(Math.max(offset, 0));
+};
 
 // ─── Audit lead 9: registratiespam ─────────────────────────────────────────────────────────────────────────────
 
@@ -280,7 +288,7 @@ export const chunks = <T>(items: readonly T[], size: number): T[][] => {
  * - ná de vorige poging voor die owner (`retryAfterBlock`) en ná de laatste eigen transactie (`lastRunBlock`). Een run
  *   die de tick van een pool verandert, raakt die pool voor de rest van het blok aan; lees en simuleer de volgende
  *   owner (en de volgende pagina) dus pas in een later blok;
- * - na een blokkade niet vóór `sendFrom` (`firstSendBlock`); `throttled` zegt dat die grens bepaalt.
+ * - na een blokkade niet vóór `sendFrom` (`nextSendBlock`); `throttled` zegt dat die grens bepaalt.
  * `target` null: niet wachten.
  */
 export const nextAttemptBlock = (

@@ -13,7 +13,6 @@ import {
   failureAction,
   filterCandidates,
   isCandidate,
-  firstSendBlock,
   formatEurc,
   formatGwei,
   isBlockWindowRevert,
@@ -25,6 +24,7 @@ import {
   newOwners,
   nextAttemptBlock,
   nextBlockOverrides,
+  nextSendBlock,
   nextPriorityFee,
   overridesApplied,
   parseCooldownState,
@@ -227,9 +227,16 @@ describe("priority fee (L-3)", () => {
     expect(blockerTip([], 10)).toBeUndefined();
   });
 
-  test("after a blockade the next send waits SEND_RETRY_BLOCKS blocks", () => {
-    expect(firstSendBlock(null, 30)).toBeNull();
-    expect(firstSendBlock(1_000n, 30)).toBe(1_030n);
+  test("after a blockade the next send waits a random 1 to 59 blocks, 30 on average", () => {
+    expect(nextSendBlock(1_000n, 30, 0)).toBe(1_001n);
+    expect(nextSendBlock(1_000n, 30, 0.999_999)).toBe(1_059n);
+    // Uniform over 59 blokken: het midden is 30.
+    expect(nextSendBlock(1_000n, 30, 29 / 59)).toBe(1_030n);
+    let sum = 0n;
+    for (let i = 0; i < 59; i++) sum += nextSendBlock(0n, 30, i / 59);
+    expect(sum / 59n).toBe(30n);
+    // SEND_RETRY_BLOCKS = 1: altijd het volgende blok.
+    expect(nextSendBlock(1_000n, 1, 0.7)).toBe(1_001n);
   });
 });
 
@@ -241,7 +248,7 @@ describe("nextAttemptBlock", () => {
     expect(nextAttemptBlock(99n, 100n, null)).toEqual({ target: 101n, throttled: false });
   });
 
-  test("after a blockade not before SEND_RETRY_BLOCKS later (L-3)", () => {
+  test("after a blockade not before the drawn send block (L-3)", () => {
     expect(nextAttemptBlock(105n, 100n, 130n)).toEqual({ target: 130n, throttled: true });
     expect(nextAttemptBlock(null, null, 130n)).toEqual({ target: 130n, throttled: true });
     // Throttle al voorbij: gewoon het volgende blok.

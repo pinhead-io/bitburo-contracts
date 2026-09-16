@@ -28,7 +28,8 @@
  *   venster af te dekken.
  * - Versturen met een expliciete priority fee (PRIORITY_FEE_GWEI, standaard 0,05 gwei), zodat de transactie in de
  *   Flashblock vóór een aanraker met een lagere tip staat. Revert een transactie on-chain door een tijdelijke oorzaak
- *   (een blokkade), dan verstuurt het script pas SEND_RETRY_BLOCKS blokken later opnieuw, met minstens het dubbele
+ *   (een blokkade), dan verstuurt het script pas na een willekeurig aantal blokken opnieuw (gemiddeld
+ *   SEND_RETRY_BLOCKS, zodat een aanvaller het moment niet kan voorspellen), met minstens het dubbele
  *   van de vorige tip en minstens 10% boven de hoogste tip van wie de pool eerder in dat blok aanraakte, tot
  *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei). De verhoogde tip geldt voor de rest van deze run.
  *
@@ -76,7 +77,6 @@ import {
   effectiveTip,
   failureAction,
   filterCandidates,
-  firstSendBlock,
   formatEurc,
   formatGwei,
   isBlockWindowRevert,
@@ -86,6 +86,7 @@ import {
   newOwners,
   nextAttemptBlock,
   nextBlockOverrides,
+  nextSendBlock,
   nextPriorityFee,
   overridesApplied,
   parseCooldownState,
@@ -278,8 +279,8 @@ const failed = (owner: Address, error: unknown) => {
 
 /** Blok van de laatste eigen transactie in deze keeper-run; de volgende owner pas in een later blok. */
 let lastRunBlock: bigint | null = null;
-/** Blok van de laatste blokkade (eigen transactie on-chain gerevert door een tijdelijke oorzaak). */
-let lastBlockadeBlock: bigint | null = null;
+/** Na een blokkade (eigen transactie on-chain gerevert door een tijdelijke oorzaak): vroegste blok voor een nieuwe send. */
+let sendFromBlock: bigint | null = null;
 /** Priority fee voor de volgende transactie; loopt op na een blokkade, tot MAX_PRIORITY_FEE_GWEI. */
 let priorityFee = feePolicy.base;
 
@@ -317,8 +318,8 @@ type Outcome = "executed" | "skipped" | "dry-run" | "retry";
  * `isRetry`: een herhaalde poging, begrensd door het retry-budget.
  */
 const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRetry: boolean): Promise<{ outcome: Outcome; block: bigint | null }> => {
-  // Na een blokkade pas SEND_RETRY_BLOCKS later opnieuw; simuleren zonder te mogen versturen heeft geen zin.
-  const { target, throttled } = nextAttemptBlock(retryAfterBlock, lastRunBlock, dryRun ? null : firstSendBlock(lastBlockadeBlock, sendRetryBlocks));
+  // Na een blokkade pas gemiddeld SEND_RETRY_BLOCKS later opnieuw; simuleren zonder te mogen versturen heeft geen zin.
+  const { target, throttled } = nextAttemptBlock(retryAfterBlock, lastRunBlock, dryRun ? null : sendFromBlock);
   if (!(await waitForBlock(target, isRetry || throttled ? deadline : undefined))) {
     console.log(`${owner}: overgeslagen, geen blok ${target} binnen het wachtbudget; geen cool-down`);
     return { outcome: "skipped", block: null };
@@ -392,8 +393,8 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
         if (errorNameOf(error) !== undefined) failure = error;
       }
       if (resimulationPassed || isBlockWindowRevert(errorNameOf(failure))) {
-        // Blokkade: een andere transactie stond vóór ons in het blok. Hogere tip, en pas SEND_RETRY_BLOCKS later.
-        lastBlockadeBlock = receipt.blockNumber;
+        // Blokkade: een andere transactie stond vóór ons in het blok. Hogere tip, en pas gemiddeld SEND_RETRY_BLOCKS later.
+        sendFromBlock = nextSendBlock(receipt.blockNumber, sendRetryBlocks, Math.random());
         const tip = await blockerTipOf(receipt);
         priorityFee = nextPriorityFee(priorityFee, tip, feePolicy);
         console.warn(
