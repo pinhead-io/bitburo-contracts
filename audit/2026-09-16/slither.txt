@@ -1,0 +1,81 @@
+'forge clean' running (wd: /Users/arjan/Code/bitburo-contracts)
+'forge config --json' running
+'forge build --build-info --deny never src/Rebalancer.sol' running (wd: /Users/arjan/Code/bitburo-contracts)
+INFO:Detectors:
+Detector: arbitrary-send-erc20
+Rebalancer._buy(address,Rebalancer.Params,uint256,uint256,address) (src/Rebalancer.sol#518-540) uses arbitrary from in transferFrom: EURC.safeTransferFrom(owner,address(this),amountIn) (src/Rebalancer.sol#522)
+Rebalancer._sell(address,Rebalancer.Params,uint256,uint256,address) (src/Rebalancer.sol#544-569) uses arbitrary from in transferFrom: CBBTC.safeTransferFrom(owner,address(this),amountIn) (src/Rebalancer.sol#548)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#arbitrary-from-in-transferfrom
+INFO:Detectors:
+Detector: incorrect-equality
+Rebalancer._buy(address,Rebalancer.Params,uint256,uint256,address) (src/Rebalancer.sol#518-540) uses a dangerous strict equality:
+	- amountOut == 0 (src/Rebalancer.sol#538)
+Rebalancer._dueAt(address,Rebalancer.Params,uint256) (src/Rebalancer.sol#307-314) uses a dangerous strict equality:
+	- amountIn == 0 (src/Rebalancer.sol#309)
+Rebalancer._plan(address,Rebalancer.Params,uint256) (src/Rebalancer.sol#467-511) uses a dangerous strict equality:
+	- total == 0 (src/Rebalancer.sol#476)
+Rebalancer.execute(address,address) (src/Rebalancer.sol#321-346) uses a dangerous strict equality:
+	- amountIn == 0 (src/Rebalancer.sol#331)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+INFO:Detectors:
+Detector: uninitialized-local
+Rebalancer.dueOwners(uint256,uint256).n (src/Rebalancer.sol#289) is a local variable never initialized
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#uninitialized-local-variables
+INFO:Detectors:
+Detector: unused-return
+Rebalancer._quote() (src/Rebalancer.sol#379-390) ignores return value by (None,seqAnswer,seqStartedAt,None,None) = SEQUENCER_FEED.latestRoundData() (src/Rebalancer.sol#380)
+Rebalancer._spotOut(IUniswapV3Pool,bool,uint256) (src/Rebalancer.sol#417-421) ignores return value by (sqrtPriceX96,None,None,None,None,None,None) = pool.slot0() (src/Rebalancer.sol#418)
+Rebalancer._readFeed(IAggregatorV3,uint256) (src/Rebalancer.sol#423-431) ignores return value by (None,answer,None,updatedAt,None) = feed.latestRoundData() (src/Rebalancer.sol#424)
+Rebalancer._sell(address,Rebalancer.Params,uint256,uint256,address) (src/Rebalancer.sol#544-569) ignores return value by ROUTER.exactInput(IV3SwapRouter.ExactInputParams({path:abi.encodePacked(address(CBBTC),POOL_FEE,USDC,POOL_FEE,address(EURC)),recipient:address(this),amountIn:amountIn,amountOutMinimum:minOut})) (src/Rebalancer.sol#555-562)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unused-return
+INFO:Detectors:
+Detector: calls-loop
+Rebalancer._plan(address,Rebalancer.Params,uint256) (src/Rebalancer.sol#467-511) has external calls inside a loop: cash = EURC.balanceOf(owner) (src/Rebalancer.sol#472)
+	Calls stack containing the loop:
+		Rebalancer.dueOwners(uint256,uint256)
+		Rebalancer._dueAt(address,Rebalancer.Params,uint256)
+Rebalancer._plan(address,Rebalancer.Params,uint256) (src/Rebalancer.sol#467-511) has external calls inside a loop: btcBal = CBBTC.balanceOf(owner) (src/Rebalancer.sol#473)
+	Calls stack containing the loop:
+		Rebalancer.dueOwners(uint256,uint256)
+		Rebalancer._dueAt(address,Rebalancer.Params,uint256)
+Rebalancer._plan(address,Rebalancer.Params,uint256) (src/Rebalancer.sol#467-511) has external calls inside a loop: amountIn = Math.min(correctionEurc,Math.min(cash,EURC.allowance(owner,address(this)))) (src/Rebalancer.sol#502)
+	Calls stack containing the loop:
+		Rebalancer.dueOwners(uint256,uint256)
+		Rebalancer._dueAt(address,Rebalancer.Params,uint256)
+Rebalancer._plan(address,Rebalancer.Params,uint256) (src/Rebalancer.sol#467-511) has external calls inside a loop: amountIn = Math.min(wantBtc,Math.min(btcBal,CBBTC.allowance(owner,address(this)))) (src/Rebalancer.sol#508)
+	Calls stack containing the loop:
+		Rebalancer.dueOwners(uint256,uint256)
+		Rebalancer._dueAt(address,Rebalancer.Params,uint256)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation/#calls-inside-a-loop
+INFO:Detectors:
+Detector: timestamp
+Rebalancer.isDue(address) (src/Rebalancer.sol#262-272) uses timestamp for comparisons
+	Dangerous comparisons:
+	- retired || ! p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval (src/Rebalancer.sol#264)
+Rebalancer.dueOwners(uint256,uint256) (src/Rebalancer.sol#278-305) uses timestamp for comparisons
+	Dangerous comparisons:
+	- ! p.active || block.timestamp < uint256(lastExecutedAt[owner]) + p.interval (src/Rebalancer.sol#293)
+Rebalancer.execute(address,address) (src/Rebalancer.sol#321-346) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < uint256(lastExecutedAt[owner]) + p.interval (src/Rebalancer.sol#325)
+Rebalancer._quote() (src/Rebalancer.sol#379-390) uses timestamp for comparisons
+	Dangerous comparisons:
+	- seqAnswer != 0 || seqStartedAt == 0 || block.timestamp - seqStartedAt < GRACE_PERIOD (src/Rebalancer.sol#382)
+Rebalancer._readFeed(IAggregatorV3,uint256) (src/Rebalancer.sol#423-431) uses timestamp for comparisons
+	Dangerous comparisons:
+	- updatedAt > block.timestamp || block.timestamp - updatedAt > maxAge (src/Rebalancer.sol#427)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Detectors:
+Detector: naming-convention
+Variable Rebalancer.EURC (src/Rebalancer.sol#49) is not in mixedCase
+Variable Rebalancer.CBBTC (src/Rebalancer.sol#50) is not in mixedCase
+Variable Rebalancer.USDC (src/Rebalancer.sol#51) is not in mixedCase
+Variable Rebalancer.ROUTER (src/Rebalancer.sol#52) is not in mixedCase
+Variable Rebalancer.FEED_CBBTC_USD (src/Rebalancer.sol#53) is not in mixedCase
+Variable Rebalancer.FEED_EURC_USD (src/Rebalancer.sol#54) is not in mixedCase
+Variable Rebalancer.SEQUENCER_FEED (src/Rebalancer.sol#55) is not in mixedCase
+Variable Rebalancer.TREASURY (src/Rebalancer.sol#56) is not in mixedCase
+Variable Rebalancer.POOL_EURC_USDC (src/Rebalancer.sol#58) is not in mixedCase
+Variable Rebalancer.POOL_USDC_CBBTC (src/Rebalancer.sol#60) is not in mixedCase
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions
+INFO:Slither:src/Rebalancer.sol analyzed (13 contracts with 102 detectors), 30 result(s) found

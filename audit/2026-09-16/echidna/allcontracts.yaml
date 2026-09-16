@@ -1,0 +1,8 @@
+cryticArgs: ["--foundry-compile-all"]
+testMode: foundry
+allContracts: true
+workers: 8
+timeout: 1800
+corpusDir: "echidna-corpus"
+testLimit: 2000000
+seqLen: 100

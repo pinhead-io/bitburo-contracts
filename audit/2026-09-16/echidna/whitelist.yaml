@@ -1,0 +1,10 @@
+cryticArgs: ["--foundry-compile-all"]
+testMode: foundry
+allContracts: true
+filterBlacklist: false
+filterFunctions: ["RebalancerHandler.setParams(uint256,uint16,uint16,uint16,uint64,uint16,bool)", "RebalancerHandler.approve(uint256,uint256,uint256)", "RebalancerHandler.deposit(uint256,uint256,uint256)", "RebalancerHandler.warp(uint32)", "RebalancerHandler.setPrice(uint256)", "RebalancerHandler.shiftSpot(uint16,bool)", "RebalancerHandler.sweep(bool)", "RebalancerHandler.retire(uint256)", "RebalancerHandler.execute(uint256,uint256)", "RebalancerInvariantTest.invariant_ownerBalancesOnlyMoveThroughExecute()", "RebalancerInvariantTest.invariant_contractNeverHoldsBalance()", "RebalancerInvariantTest.invariant_treasuryMonotonic()", "RebalancerInvariantTest.invariant_executeFailsOnlyForKnownReasons()", "RebalancerInvariantTest.invariant_noExecutedAfterRetire()"]
+workers: 8
+timeout: 1800
+testLimit: 200000
+seqLen: 100
+corpusDir: "echidna-corpus2"
