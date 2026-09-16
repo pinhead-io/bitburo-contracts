@@ -5,6 +5,8 @@ pragma solidity 0.8.37;
 interface IUniswapV3Pool {
     function token0() external view returns (address);
     function token1() external view returns (address);
+    /// @dev Fee-tier in hondersten van een bp (500 = 0,05%).
+    function fee() external view returns (uint24);
     /// @dev sqrtPriceX96 = sqrt(token1 per token0, in basiseenheden) * 2^96.
     function slot0()
         external

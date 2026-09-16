@@ -12,6 +12,7 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAggregator} from "./mocks/MockAggregator.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 
 // ─── Gedeelde opzet ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,7 @@ abstract contract RebalancerTestBase is Test {
     MockRouter internal router;
     MockUniswapV3Pool internal poolEurcUsdc; // token0 = EURC, token1 = USDC, zoals op Base
     MockUniswapV3Pool internal poolUsdcCbbtc; // token0 = USDC, token1 = cbBTC, zoals op Base
+    MockUniswapV3Factory internal factory;
     Rebalancer internal r;
 
     address internal treasury = makeAddr("treasury");
@@ -52,6 +54,10 @@ abstract contract RebalancerTestBase is Test {
         sequencer.set(0, START - 1 days, START - 1 days);
 
         router = new MockRouter(address(eurc), address(usdc), address(cbbtc), PRICE);
+        factory = new MockUniswapV3Factory();
+        factory.setPool(address(eurc), address(usdc), 500, address(poolEurcUsdc));
+        factory.setPool(address(usdc), address(cbbtc), 500, address(poolUsdcCbbtc));
+        router.setFactory(address(factory));
 
         r = new Rebalancer(_deployment());
     }
@@ -656,6 +662,8 @@ contract RebalancerTest is RebalancerTestBase {
         MockUniswapV3Pool reversedBtc = new MockUniswapV3Pool(address(cbbtc), address(usdc));
         reversedEurc.setPrice(1e6, 1e6);
         reversedBtc.setPrice(1e8, PRICE);
+        factory.setPool(address(usdc), address(eurc), 500, address(reversedEurc));
+        factory.setPool(address(cbbtc), address(usdc), 500, address(reversedBtc));
         Rebalancer.Deployment memory d = _deployment();
         d.poolEurcUsdc = address(reversedEurc);
         d.poolUsdcCbbtc = address(reversedBtc);
@@ -1499,6 +1507,57 @@ contract RebalancerTest is RebalancerTestBase {
         d.poolUsdcCbbtc = address(wrong);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedPoolTokens.selector, address(wrong)));
         new Rebalancer(d);
+    }
+
+    /// @dev Lead 1: een pool met de juiste tokens maar een andere fee-tier dan POOL_FEE wordt geweigerd, ook als de
+    ///      factory hem onder 500 zou registreren.
+    function test_constructor_rejectsPoolWithWrongFee() public {
+        MockUniswapV3Pool wrongFee = new MockUniswapV3Pool(address(eurc), address(usdc));
+        wrongFee.setFee(3000);
+        factory.setPool(address(eurc), address(usdc), 500, address(wrongFee));
+        Rebalancer.Deployment memory d = _deployment();
+        d.poolEurcUsdc = address(wrongFee);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedPoolFee.selector, address(wrongFee)));
+        new Rebalancer(d);
+        factory.setPool(address(eurc), address(usdc), 500, address(poolEurcUsdc));
+
+        MockUniswapV3Pool wrongFeeBtc = new MockUniswapV3Pool(address(usdc), address(cbbtc));
+        wrongFeeBtc.setFee(100);
+        d = _deployment();
+        d.poolUsdcCbbtc = address(wrongFeeBtc);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedPoolFee.selector, address(wrongFeeBtc)));
+        new Rebalancer(d);
+    }
+
+    /// @dev Lead 1: een pool met de juiste tokens en fee die niet de pool van de factory van de router is (een
+    ///      nagebouwde pool, of een pool van een andere factory) wordt geweigerd.
+    function test_constructor_rejectsPoolNotFromRouterFactory() public {
+        MockUniswapV3Pool lookalike = new MockUniswapV3Pool(address(eurc), address(usdc));
+        Rebalancer.Deployment memory d = _deployment();
+        d.poolEurcUsdc = address(lookalike);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolNotFromRouterFactory.selector, address(lookalike)));
+        new Rebalancer(d);
+
+        MockUniswapV3Pool lookalikeBtc = new MockUniswapV3Pool(address(usdc), address(cbbtc));
+        d = _deployment();
+        d.poolUsdcCbbtc = address(lookalikeBtc);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolNotFromRouterFactory.selector, address(lookalikeBtc)));
+        new Rebalancer(d);
+
+        // De echte pools, maar de router wijst naar een andere factory waarin ze niet staan.
+        MockUniswapV3Factory otherFactory = new MockUniswapV3Factory();
+        router.setFactory(address(otherFactory));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolNotFromRouterFactory.selector, address(poolEurcUsdc)));
+        new Rebalancer(_deployment());
+
+        // Router zonder factory.
+        router.setFactory(address(0));
+        vm.expectRevert(Rebalancer.ZeroAddress.selector);
+        new Rebalancer(_deployment());
+
+        // Terug naar de juiste factory: de deploy slaagt.
+        router.setFactory(address(factory));
+        new Rebalancer(_deployment());
     }
 
     // Referentievectoren (PHP AutoTradeStrategy::rebalanceAmount) ──────────────────────────────────────

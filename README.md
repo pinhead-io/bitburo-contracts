@@ -27,7 +27,9 @@ De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBT
 | `retired() → bool` | Staat het contract buiten gebruik? |
 | `quote()` / `spot()` / `quoteChecked()` | Feedkoers; poolspot; feedkoers mét de spot-check van `execute`. Alle drie in EURC-basiseenheden per cbBTC. |
 
-Constanten: `FEE_BPS` 25, `KEEPER_REWARD_EURC` 0,05 EURC, `MIN_TRADE_FLOOR` 20 EURC (fee van de kleinste run = precies de keeperbeloning), `MIN_CORRECTION_BPS` 10, `MIN_SLIPPAGE_BPS` 60 / `MAX_SLIPPAGE_BPS` 100, `MAX_SPOT_DEVIATION_BPS` 50, `MAX_AGE_CBBTC` 1500 s, `MAX_AGE_EURC` 4500 s (uurfeed `0x9867…01e0`), `FEED_DECIMALS` 8 (afgedwongen in de constructor).
+Constanten: `FEE_BPS` 25, `KEEPER_REWARD_EURC` 0,05 EURC, `MIN_TRADE_FLOOR` 20 EURC (fee van de kleinste run = precies de keeperbeloning), `MIN_CORRECTION_BPS` 10, `MIN_SLIPPAGE_BPS` 60 / `MAX_SLIPPAGE_BPS` 100, `MAX_SPOT_DEVIATION_BPS` 50, `MAX_AGE_CBBTC` 1500 s, `MAX_AGE_EURC` 4500 s (uurfeed `0x9867…01e0`), `FEED_DECIMALS` 8 (afgedwongen in de constructor), `POOL_FEE` 500 (0,05%).
+
+De constructor controleert ook de twee pools: tokens (`UnexpectedPoolTokens`), fee-tier gelijk aan `POOL_FEE` (`UnexpectedPoolFee`) en dat het precies de pools zijn die `getPool(…, 500)` geeft op de factory van de router (`ROUTER.factory()`, anders `PoolNotFromRouterFactory`). Zo bewaakt de spotcheck gegarandeerd de pools waar de swap doorheen gaat (audit lead 1). Op Base geeft SwapRouter02 `0x2626…e481` factory `0x3312…FDfD`, en die geeft voor beide paren bij fee 500 de pools uit `script/Deploy.s.sol` (op 16 september 2026 met `cast call` gecontroleerd).
 
 ### Fee, beloning en maximaal verlies per run
 

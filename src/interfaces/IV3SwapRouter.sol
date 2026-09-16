@@ -12,4 +12,7 @@ interface IV3SwapRouter {
     }
 
     function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
+
+    /// @dev Uit IPeripheryImmutableState: de Uniswap v3-factory waarvan de router de pools gebruikt.
+    function factory() external view returns (address);
 }

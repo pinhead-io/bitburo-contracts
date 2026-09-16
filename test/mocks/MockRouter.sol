@@ -15,6 +15,8 @@ contract MockRouter is IV3SwapRouter {
     address public immutable EURC;
     address public immutable USDC;
     address public immutable CBBTC;
+    /// @notice Zoals SwapRouter02.factory(); instelbaar, zodat de constructorcheck op de pools te testen is.
+    address public factory;
 
     uint256 public price;
     uint256 public slippageBps;
@@ -36,6 +38,10 @@ contract MockRouter is IV3SwapRouter {
         USDC = usdc;
         CBBTC = cbbtc;
         price = price_;
+    }
+
+    function setFactory(address factory_) external {
+        factory = factory_;
     }
 
     function setPrice(uint256 price_) external {

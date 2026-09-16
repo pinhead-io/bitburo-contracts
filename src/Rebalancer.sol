@@ -7,6 +7,7 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
+import {IUniswapV3Factory} from "./interfaces/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "./interfaces/IUniswapV3Pool.sol";
 import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
 
@@ -54,9 +55,10 @@ contract Rebalancer is ReentrancyGuardTransient {
     IAggregatorV3 public immutable FEED_EURC_USD; // 8 decimalen
     IAggregatorV3 public immutable SEQUENCER_FEED; // L2 Sequencer Uptime, answer 0 = up
     address public immutable TREASURY;
-    /// @notice Uniswap v3-pool EURC/USDC (0,05%), alleen gelezen voor de spot-vs-oracle-check.
+    /// @notice Uniswap v3-pool EURC/USDC (0,05%), alleen gelezen voor de spot-vs-oracle-check. De constructor dwingt
+    ///         af dat dit de POOL_FEE-pool van de factory van ROUTER is, dus de pool waar de swap doorheen gaat.
     IUniswapV3Pool public immutable POOL_EURC_USDC;
-    /// @notice Uniswap v3-pool USDC/cbBTC (0,05%), alleen gelezen voor de spot-vs-oracle-check.
+    /// @notice Uniswap v3-pool USDC/cbBTC (0,05%), alleen gelezen voor de spot-vs-oracle-check. Zelfde constructorcheck.
     IUniswapV3Pool public immutable POOL_USDC_CBBTC;
     bool private immutable _eurcIsToken0;
     bool private immutable _usdcIsToken0;
@@ -147,6 +149,10 @@ contract Rebalancer is ReentrancyGuardTransient {
     error ZeroAddress();
     error NotAContract(address account);
     error UnexpectedPoolTokens(address pool);
+    /// @notice De pool heeft niet de fee-tier POOL_FEE waar de swap doorheen gaat.
+    error UnexpectedPoolFee(address pool);
+    /// @notice De pool is niet de POOL_FEE-pool van de factory van de router, dus niet de pool van de swap.
+    error PoolNotFromRouterFactory(address pool);
     error SpotDeviatesFromOracle(uint256 spot, uint256 oracle);
     error UnexpectedFeedDecimals(address feed);
     error NoOutput();
@@ -195,6 +201,12 @@ contract Rebalancer is ReentrancyGuardTransient {
 
         _eurcIsToken0 = _poolOrder(POOL_EURC_USDC, d.eurc, d.usdc);
         _usdcIsToken0 = _poolOrder(POOL_USDC_CBBTC, d.usdc, d.cbbtc);
+        // De spotcheck moet de pools bewaken waar de swap werkelijk doorheen gaat (audit lead 1): de POOL_FEE-pools
+        // van dezelfde factory als de router.
+        address factory = ROUTER.factory();
+        _requireContract(factory);
+        _requireSwapPool(IUniswapV3Factory(factory), POOL_EURC_USDC, d.eurc, d.usdc);
+        _requireSwapPool(IUniswapV3Factory(factory), POOL_USDC_CBBTC, d.usdc, d.cbbtc);
 
         // `_quote` deelt de twee feeds op elkaar; dat klopt alleen als beide dezelfde decimalen hebben.
         if (FEED_CBBTC_USD.decimals() != FEED_DECIMALS) revert UnexpectedFeedDecimals(d.feedCbbtcUsd);
@@ -213,6 +225,12 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (token0 == a && token1 == b) return true;
         if (token0 == b && token1 == a) return false;
         revert UnexpectedPoolTokens(address(pool));
+    }
+
+    /// @dev Revert als `pool` niet de POOL_FEE-pool van {a, b} uit `factory` is.
+    function _requireSwapPool(IUniswapV3Factory factory, IUniswapV3Pool pool, address a, address b) private view {
+        if (pool.fee() != POOL_FEE) revert UnexpectedPoolFee(address(pool));
+        if (factory.getPool(a, b, POOL_FEE) != address(pool)) revert PoolNotFromRouterFactory(address(pool));
     }
 
     // ─── Gebruiker ──────────────────────────────────────────────────────────────────────────────────────────
