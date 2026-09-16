@@ -96,7 +96,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 private constant WAD = 1e18;
     uint256 private constant EURC_UNIT = 1e6;
     uint256 private constant CBBTC_UNIT = 1e8;
-    uint256 private constant Q96 = 1 << 96;
+    uint256 private constant Q64 = 1 << 64;
+    uint256 private constant Q128 = 1 << 128;
 
     // ─── Per gebruiker ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -439,12 +440,15 @@ contract Rebalancer is ReentrancyGuardTransient {
     }
 
     /// @dev Hoeveel basiseenheden van het andere token `amountIn` basiseenheden waard zijn op de spot van
-    ///      `pool`. `inIsToken0` zegt of het inputtoken token0 is. Rekent via ratioX96 = sqrtPriceX96² / 2^96
-    ///      (past in uint256 voor elke uint160 sqrtPriceX96), zoals Uniswaps OracleLibrary.getQuoteAtTick.
+    ///      `pool`. `inIsToken0` zegt of het inputtoken token0 is. Rekent via ratioX128 = sqrtPriceX96² / 2^64
+    ///      (past in uint256 voor elke uint160 sqrtPriceX96), zoals Uniswaps OracleLibrary.getQuoteAtTick bij
+    ///      grote koersen. Niet via ratioX96 = sqrtPriceX96² / 2^96: die is 0 voor sqrtPriceX96 < 2^48 en de
+    ///      deling erdoor gaf dan een Panic (audit lead 10). ratioX128 is ≥ 1 voor elke sqrtPriceX96 ≥ 2^32, dus
+    ///      voor elke geldige Uniswap-koers (MIN_SQRT_RATIO = 4295128739 > 2^32).
     function _spotOut(IUniswapV3Pool pool, bool inIsToken0, uint256 amountIn) internal view returns (uint256) {
         (uint160 sqrtPriceX96,,,,,,) = pool.slot0();
-        uint256 ratioX96 = Math.mulDiv(sqrtPriceX96, sqrtPriceX96, Q96);
-        return inIsToken0 ? Math.mulDiv(amountIn, ratioX96, Q96) : Math.mulDiv(amountIn, Q96, ratioX96);
+        uint256 ratioX128 = Math.mulDiv(sqrtPriceX96, sqrtPriceX96, Q64);
+        return inIsToken0 ? Math.mulDiv(amountIn, ratioX128, Q128) : Math.mulDiv(amountIn, Q128, ratioX128);
     }
 
     function _readFeed(IAggregatorV3 feed, uint256 maxAge) internal view returns (uint256) {

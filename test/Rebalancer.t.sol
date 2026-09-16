@@ -795,6 +795,29 @@ contract RebalancerTest is RebalancerTestBase {
         assertTrue(dueAgain);
     }
 
+    /// @dev Lead 10: bij sqrtPriceX96 < 2^48 was ratioX96 = sqrtPriceX96² / 2^96 gelijk aan 0 en deelde `_spotOut`
+    ///      door 0 (Panic 0x12). Met ratioX128 blijft de spot berekenbaar; de run revert netjes op de spotcheck.
+    function test_spot_smallSqrtPriceDoesNotDivideByZero() public {
+        uint160 small = uint160(1 << 40);
+        assertEq(Math.mulDiv(small, small, 1 << 96), 0, "opzet: de oude ratioX96 is 0");
+        _setUser(alice, 1000e6, 0, _defaultParams());
+
+        // USDC/cbBTC-pool: cbBTC is token1, dus usdcPerBtc = 1e8 * 2^128 / 2^16; EURC/USDC staat op 1:1.
+        poolUsdcCbbtc.setSqrtPriceX96(small);
+        assertEq(r.spot(), 1e8 << 112);
+        // EURC/USDC-pool: USDC is token1, dus EURC = usdcPerBtc * 2^128 / 2^16.
+        _setSpot(PRICE);
+        poolEurcUsdc.setSqrtPriceX96(small);
+        assertEq(r.spot(), Math.mulDiv(PRICE, 1 << 128, 1 << 16));
+
+        uint256 spotPrice = r.spot();
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, spotPrice, PRICE));
+        r.execute(alice, keeper);
+        (bool due, int256 delta) = r.isDue(alice);
+        assertFalse(due);
+        assertEq(delta, 0);
+    }
+
     /// @dev Testgat oracle 8 (ORC-7): bij een EURC-depeg (feed 0,90 USD, pool volgt) stijgt de koers in EURC,
     ///      stijgt het cbBTC-aandeel en verkoopt de volgende run cbBTC voor de gedepegde EURC. Ontwerpkeuze
     ///      (EURC als numeraire); hier vastgelegd zodat het niet ongemerkt verandert.
