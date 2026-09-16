@@ -7,6 +7,14 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {IAggregatorV3} from "../src/interfaces/IAggregatorV3.sol";
 
+/// @dev Alleen voor de cadans-test: `getRoundData` staat niet in de minimale interface van het contract.
+interface IChainlinkRounds {
+    function getRoundData(uint80 roundId)
+        external
+        view
+        returns (uint80 roundId_, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
+}
+
 /// @notice Integratie tegen Base mainnet (fork). Overslaan met RUN_FORK=false.
 contract RebalancerForkTest is Test {
     IERC20 internal constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
@@ -118,6 +126,33 @@ contract RebalancerForkTest is Test {
         (, int256 seqAnswer, uint256 seqStartedAt,,) = IAggregatorV3(SEQUENCER).latestRoundData();
         assertEq(seqAnswer, 0);
         assertGt(seqStartedAt, 0);
+    }
+
+    /// @notice Testgat oracle 3, de cadans: over de laatste rondes van beide feeds ligt tussen twee opeenvolgende
+    ///         updates nooit meer dan MAX_AGE_*. Zo zijn de constanten getoetst aan de werkelijke heartbeat en niet
+    ///         alleen aan de leeftijd van de laatste ronde.
+    function test_fork_feedCadenceWithinMaxAge() public view {
+        _assertCadence(FEED_CBBTC_USD, r.MAX_AGE_CBBTC());
+        _assertCadence(FEED_EURC_USD, r.MAX_AGE_EURC());
+    }
+
+    function _assertCadence(address feed, uint256 maxAge) internal view {
+        uint256 rounds = 24;
+        (uint80 roundId,,, uint256 newerUpdatedAt,) = IAggregatorV3(feed).latestRoundData();
+        uint256 checked;
+        uint256 largestGap;
+        // Ronde-id = (phaseId << 64) | ronde binnen de fase; binnen één fase aflopen.
+        while (checked < rounds && uint64(roundId) > 1) {
+            roundId--;
+            (,,, uint256 updatedAt,) = IChainlinkRounds(feed).getRoundData(roundId);
+            uint256 gap = newerUpdatedAt - updatedAt;
+            if (gap > largestGap) largestGap = gap;
+            assertLe(gap, maxAge, "gat tussen twee rondes groter dan MAX_AGE");
+            newerUpdatedAt = updatedAt;
+            checked++;
+        }
+        console.log(IAggregatorV3(feed).description(), "grootste gat (s):", largestGap);
+        assertEq(checked, rounds, "te weinig rondes in de huidige fase om de cadans te toetsen");
     }
 
     /// @notice M-1: de spot na de swap ligt binnen de tolerantie; een run van 100 EURC/0,002 cbBTC haalt de
