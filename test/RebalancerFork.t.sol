@@ -116,8 +116,9 @@ contract RebalancerForkTest is Test {
         (, int256 btcAnswer,, uint256 btcUpdatedAt,) = btcFeed.latestRoundData();
         assertGt(eurcAnswer, 0);
         assertGt(btcAnswer, 0);
-        assertLe(block.timestamp - eurcUpdatedAt, 3600, "EURC-feed ouder dan zijn heartbeat van 1 uur");
-        assertLe(block.timestamp - eurcUpdatedAt, r.MAX_AGE_EURC());
+        // Toets aan de tolerantie van het contract, niet aan de nominale heartbeat: een late ronde (gemeten 3.632 s)
+        // ligt boven 1 uur maar ruim onder MAX_AGE_EURC.
+        assertLe(block.timestamp - eurcUpdatedAt, r.MAX_AGE_EURC(), "EURC-feed ouder dan MAX_AGE_EURC");
         assertLe(block.timestamp - btcUpdatedAt, r.MAX_AGE_CBBTC());
         // EURC/USD hoort rond 1,0–1,3 te liggen (8 decimalen).
         assertGt(eurcAnswer, 0.9e8);
