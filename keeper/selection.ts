@@ -71,9 +71,9 @@ export const failureAction = (
 export const retryDeadline = (startSeconds: number, retrySeconds: number): number => startSeconds + retrySeconds;
 
 /**
- * Review I-1: `dueOwners` is een momentopname. Een owner die op dat moment niet due leek omdat een pool in dat blok
- * al aangeraakt was (door iemand anders, of door een eigen run), valt anders tot de volgende cron buiten de boot. De
- * keeper leest een pagina daarom minstens twee keer, elke keer in een later blok, en behandelt alleen owners die hij in
+ * Review I-1: een lezing van `isDue` (per portie kandidaten) is een momentopname. Een owner die op dat moment niet due
+ * leek omdat een pool in dat blok al aangeraakt was (door iemand anders, of door een eigen run), valt anders tot de
+ * volgende cron buiten de boot. De keeper leest een portie daarom minstens twee keer, elke keer in een later blok, en behandelt alleen owners die hij in
  * deze run nog niet had. Na de tweede lezing gaat hij alleen door zolang een lezing nog iemand nieuw oplevert, en
  * nooit verder dan `maxReads` lezingen.
  *
@@ -217,6 +217,63 @@ export const blockerTip = (
  */
 export const firstSendBlock = (lastBlockadeBlock: bigint | null, sendRetryBlocks: number): bigint | null =>
   lastBlockadeBlock === null ? null : lastBlockadeBlock + BigInt(sendRetryBlocks);
+
+// ─── Audit lead 9: registratiespam ─────────────────────────────────────────────────────────────────────────────
+
+export const CBBTC_UNIT = 100_000_000n;
+
+/** Wat de keeper van een geregistreerde owner leest om vooraf te filteren (één multicall per portie). */
+export type OwnerFunds = {
+  owner: Address;
+  active: boolean;
+  eurcBalance: bigint;
+  eurcAllowance: bigint;
+  cbbtcBalance: bigint;
+  cbbtcAllowance: bigint;
+};
+
+const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
+
+/**
+ * Grootste run die het contract voor deze owner ooit kan doen, per richting, in EURC-basiseenheden. `_plan` begrenst
+ * de input op min(saldo, allowance) van het input-token: bij kopen EURC, bij verkopen cbBTC tegen de feedkoers
+ * (`quote()`, afgerond naar beneden zoals `Math.mulDiv`), en de run moet minstens MIN_TRADE_FLOOR zijn.
+ */
+export const maxRunValues = (funds: OwnerFunds, priceEurcPerBtc: bigint): { buy: bigint; sell: bigint } => ({
+  buy: min(funds.eurcBalance, funds.eurcAllowance),
+  sell: (min(funds.cbbtcBalance, funds.cbbtcAllowance) * priceEurcPerBtc) / CBBTC_UNIT,
+});
+
+/**
+ * Lead 9: filter het register off-chain vóór `isDue`. Een owner blijft over als hij actief is en in minstens één
+ * richting een run van `minRun` kan halen (min(saldo, allowance) van het input-token). Dat is een noodzakelijke
+ * voorwaarde van het contract (`value >= min(run, minTradeEurc)` met run en minTradeEurc allebei ≥ MIN_TRADE_FLOOR),
+ * dus met `minRun` = max(MIN_TRADE_FLOOR, MIN_RUN_EURC) valt er geen owner af die de keeper anders zou uitvoeren. Een
+ * lege of allowance-loze spam-registratie valt wel af: wie de keeper wil ophouden, moet per adres minstens die waarde
+ * met allowance aanhouden.
+ */
+export const isCandidate = (funds: OwnerFunds, priceEurcPerBtc: bigint, minRun: bigint): boolean => {
+  if (!funds.active) {
+    return false;
+  }
+  const { buy, sell } = maxRunValues(funds, priceEurcPerBtc);
+  return buy >= minRun || sell >= minRun;
+};
+
+export const filterCandidates = (rows: readonly OwnerFunds[], priceEurcPerBtc: bigint, minRun: bigint): Address[] =>
+  rows.filter((row) => isCandidate(row, priceEurcPerBtc, minRun)).map((row) => row.owner);
+
+/** Ondergrens voor het filter: de grootste van MIN_TRADE_FLOOR (contract) en MIN_RUN_EURC (keeper), in basiseenheden. */
+export const minRunBaseUnits = (minTradeFloor: bigint, minRunEurc: number): bigint => {
+  const keeper = BigInt(Math.ceil(minRunEurc * Number(EURC_UNIT)));
+  return keeper > minTradeFloor ? keeper : minTradeFloor;
+};
+
+export const chunks = <T>(items: readonly T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+};
 
 /**
  * Vroegste blok voor de volgende poging voor een owner:

@@ -1,8 +1,9 @@
 /**
  * Bitburo keeper-script. Iedereen mag dit draaien; Bitburo is niet nodig.
  *
- * Vraagt het Rebalancer-contract per pagina dueOwners(offset, limit), leest isDue(owner) voor de richting en
- * het bedrag, slaat runs onder MIN_RUN_EURC over (de fee dekt de gas dan niet), simuleert execute(owner, rewardTo)
+ * Leest het register van het Rebalancer-contract (owners), filtert het off-chain op actief, saldo en allowance, vraagt
+ * voor de overgebleven kandidaten isDue(owner) in porties van PAGE_SIZE (één Multicall3 per portie), slaat runs onder
+ * MIN_RUN_EURC over (de fee dekt de gas dan niet), simuleert execute(owner, rewardTo)
  * eerst met eth_call en roept het daarna pas echt aan. Een owner waarvan de simulatie of de transactie mislukt
  * krijgt een cool-down (verdubbelt per mislukking) in een klein JSON-bestand, zodat een owner die structureel
  * revert niet elke run opnieuw gas kost. De beloning (0,05 EURC per run) gaat naar REWARD_TO, standaard het
@@ -13,15 +14,15 @@
  * - Een revert met PoolTouchedThisBlock of BlockMoveExceeded is tijdelijk: het script probeert die owner in elk nieuw
  *   blok opnieuw, zolang het retry-budget van de run loopt (RETRY_SECONDS), en geeft geen cool-down. Dat geldt ook
  *   voor een transactie die on-chain revertte terwijl een nieuwe simulatie op dat blok slaagt.
- * - Na een geslaagde run wacht het script op een nieuw blok voordat het de volgende owner of pagina leest of
+ * - Na een eigen transactie wacht het script op een nieuw blok voordat het de volgende owner of portie leest of
  *   simuleert.
  *
  * Runs tegenhouden (audit L-3): wie een pool in elk blok aanraakt (een burn van 1 liquiditeit kost ~92.630 gas), houdt
  * alle runs in dat blok tegen. Daartegen:
- * - Lezen en simuleren alsof het het volgende blok is: isDue, dueOwners en de simulatie van execute gaan als eth_call
+ * - Lezen en simuleren alsof het het volgende blok is: isDue en de simulatie van execute gaan als eth_call
  *   met blok-overrides (nummer + 1, timestamp + 2 s) op de state van het laatste blok. Een aanraking in het laatste
  *   blok is dan geen reden meer om niets te versturen. Eén keer per run controleert het script met een kleine probe
- *   of de node de overrides toepast; zo niet, dan valt het terug op het laatste blok (en leest het elke pagina
+ *   of de node de overrides toepast; zo niet, dan valt het terug op het laatste blok (en leest het elke portie
  *   minstens twee keer, in opeenvolgende blokken, hooguit BLOCK_RETRIES + 1 keer) en logt het dat.
  * - Het hele retry-budget blijven proberen, niet een paar blokken: anders hoeft een aanvaller alleen een voorspelbaar
  *   venster af te dekken.
@@ -30,11 +31,20 @@
  *   (een blokkade), dan verstuurt het script pas SEND_RETRY_BLOCKS blokken later opnieuw, met minstens het dubbele
  *   van de vorige tip en minstens 10% boven de hoogste tip van wie de pool eerder in dat blok aanraakte, tot
  *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei). De verhoogde tip geldt voor de rest van deze run.
+ *
+ * Registratiespam (audit lead 9): iedereen kan zich registreren, ook zonder saldo, en het register krimpt nooit. Het
+ * script leest daarom per 500 owners in één Multicall3 per 100 owners `params(owner).active` en saldo en allowance van
+ * EURC en cbBTC, en houdt alleen owners over die in minstens één richting een run van max(MIN_TRADE_FLOOR,
+ * MIN_RUN_EURC) kunnen halen: min(saldo, allowance) van EURC, of van cbBTC tegen quote(). Dat is een noodzakelijke
+ * voorwaarde van het contract, dus er valt geen owner af die anders uitgevoerd zou worden. Wie het script wil
+ * ophouden, moet per adres dat bedrag met allowance aanhouden. Het filter draait één keer per run; wie tijdens de run
+ * stort, komt de volgende run aan de beurt.
+ *
  * Grote correcties gaan in delen die 10 minuten na elkaar mogen. Draai dit script daarom elke 10 minuten.
  *
  * Gebruik:
  *   RPC_URL=https://mainnet.base.org REBALANCER=0x… KEEPER_PRIVATE_KEY=0x… bun run keeper.ts
- * Optioneel: REWARD_TO=0x…  PAGE_SIZE=50  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
+ * Optioneel: REWARD_TO=0x…  PAGE_SIZE=20  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
  *            RETRY_SECONDS=540  SEND_RETRY_BLOCKS=30  PRIORITY_FEE_GWEI=0.05  MAX_PRIORITY_FEE_GWEI=3
  *            GAS_LIMIT=1000000  COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600
  *            COOLDOWN_MAX_SECONDS=86400
@@ -57,18 +67,22 @@ import { base } from "viem/chains";
 import {
   type BlockOverrides,
   type CooldownState,
+  type OwnerFunds,
   OVERRIDE_PROBE_CODE,
   blockerTip,
+  chunks,
   clearFailure,
   cooldownUntil,
   effectiveTip,
   failureAction,
+  filterCandidates,
   firstSendBlock,
   formatEurc,
   formatGwei,
   isBlockWindowRevert,
   isCoolingDown,
   maxFeePerGas,
+  minRunBaseUnits,
   newOwners,
   nextAttemptBlock,
   nextBlockOverrides,
@@ -85,9 +99,16 @@ import {
 
 const abi = parseAbi([
   "function ownerCount() view returns (uint256)",
-  "function dueOwners(uint256 offset, uint256 limit) view returns (address[])",
   "function isDue(address owner) view returns (bool due, int256 eurcDelta)",
   "function execute(address owner, address rewardTo)",
+  "function owners(uint256 offset, uint256 limit) view returns (address[])",
+  "function params(address owner) view returns (bool active, uint16 targetBps, uint16 bandBps, uint16 maxCorrectionBps, uint64 minTradeEurc, uint32 interval, uint16 maxSlippageBps)",
+  "function quote() view returns (uint256)",
+  "function EURC() view returns (address)",
+  "function CBBTC() view returns (address)",
+  "function MIN_TRADE_FLOOR() view returns (uint64)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function allowance(address owner, address spender) view returns (uint256)",
   "function POOL_EURC_USDC() view returns (address)",
   "function POOL_USDC_CBBTC() view returns (address)",
   // Custom errors, zodat viem de revert-reden kan decoderen.
@@ -112,7 +133,7 @@ const env = (name: string, fallback?: string): string => {
 
 const rpcUrl = env("RPC_URL", "https://mainnet.base.org");
 const rebalancer = env("REBALANCER") as Address;
-const pageSize = BigInt(env("PAGE_SIZE", "50"));
+const pageSize = BigInt(env("PAGE_SIZE", "20"));
 const dryRun = process.env.DRY_RUN === "1";
 const minRunEurc = Number(env("MIN_RUN_EURC", "20"));
 const blockRetries = Number(env("BLOCK_RETRIES", "3"));
@@ -153,7 +174,16 @@ const overridesFor = (latest: { number: bigint; timestamp: bigint }): BlockOverr
   readsNextBlock ? nextBlockOverrides(latest) : undefined;
 
 const read = <T>(
-  functionName: "ownerCount" | "dueOwners" | "isDue" | "POOL_EURC_USDC" | "POOL_USDC_CBBTC",
+  functionName:
+    | "ownerCount"
+    | "owners"
+    | "isDue"
+    | "quote"
+    | "EURC"
+    | "CBBTC"
+    | "MIN_TRADE_FLOOR"
+    | "POOL_EURC_USDC"
+    | "POOL_USDC_CBBTC",
   args: readonly unknown[] = [],
   blockOverrides?: BlockOverrides,
 ) =>
@@ -388,6 +418,91 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
   return { outcome: "retry", block: lastRunBlock !== null && lastRunBlock > latest.number ? lastRunBlock : latest.number };
 };
 
+/** Owners per `owners(offset, limit)`-lezing en per multicall voor saldo en allowance (5 calls per owner). */
+const REGISTER_PAGE = 500n;
+const FUNDS_BATCH = 100;
+
+/** Multicall3 over losse contract-calls, één eth_call per portie; een mislukte call geeft undefined. */
+const multicallResults = async (
+  contracts: readonly { address: Address; functionName: string; args?: readonly unknown[] }[],
+  blockOverrides?: BlockOverrides,
+): Promise<unknown[]> => {
+  const results = await publicClient.multicall({
+    contracts: contracts.map((c) => ({ abi, ...c })),
+    allowFailure: true,
+    batchSize: 0,
+    ...(blockOverrides === undefined ? {} : { blockOverrides }),
+    // biome-ignore lint/suspicious/noExplicitAny: gemengde functies in één multicall
+  } as any);
+  return (results as { status: string; result?: unknown }[]).map((r) => (r.status === "success" ? r.result : undefined));
+};
+
+/**
+ * Lead 9: alle geregistreerde owners die in minstens één richting een run kunnen halen (`filterCandidates`). Een
+ * owner waarvan een lezing mislukt, blijft voorzichtigheidshalve kandidaat. Geeft een lege lijst als de feedkoers niet
+ * te lezen is: dan is volgens het contract niemand due.
+ */
+const findCandidates = async (): Promise<Address[]> => {
+  const [eurcToken, cbbtcToken, floor] = await Promise.all([
+    read<Address>("EURC"),
+    read<Address>("CBBTC"),
+    read<bigint>("MIN_TRADE_FLOOR"),
+  ]);
+  let price: bigint;
+  try {
+    price = await read<bigint>("quote");
+  } catch (error) {
+    // Alleen een revert van de feed (storing, verouderd) betekent "niemand due"; een RPC-fout breekt de run af.
+    if (revertOf(error) === undefined) throw error;
+    console.warn(`feedkoers niet te lezen (${describeError(error)}); niemand due`);
+    return [];
+  }
+  const minRun = minRunBaseUnits(floor, minRunEurc);
+  const found: Address[] = [];
+  for (let offset = 0n; offset < checked; offset += REGISTER_PAGE) {
+    const page = await read<readonly Address[]>("owners", [offset, REGISTER_PAGE]);
+    for (const batch of chunks(page, FUNDS_BATCH)) {
+      const results = await multicallResults(
+        batch.flatMap((owner) => [
+          { address: rebalancer, functionName: "params", args: [owner] },
+          { address: eurcToken, functionName: "balanceOf", args: [owner] },
+          { address: eurcToken, functionName: "allowance", args: [owner, rebalancer] },
+          { address: cbbtcToken, functionName: "balanceOf", args: [owner] },
+          { address: cbbtcToken, functionName: "allowance", args: [owner, rebalancer] },
+        ]),
+      );
+      const rows: OwnerFunds[] = [];
+      batch.forEach((owner, i) => {
+        const [params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance] = results.slice(i * 5, i * 5 + 5);
+        if ([params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance].some((r) => r === undefined)) {
+          console.warn(`${owner}: saldo of allowance niet te lezen; blijft kandidaat`);
+          found.push(owner);
+          return;
+        }
+        rows.push({
+          owner,
+          active: (params as readonly [boolean, ...unknown[]])[0],
+          eurcBalance: eurcBalance as bigint,
+          eurcAllowance: eurcAllowance as bigint,
+          cbbtcBalance: cbbtcBalance as bigint,
+          cbbtcAllowance: cbbtcAllowance as bigint,
+        });
+      });
+      found.push(...filterCandidates(rows, price, minRun));
+    }
+  }
+  return found;
+};
+
+/** Welke van deze owners zijn nu due? `isDue` per owner in één multicall. Een mislukte call telt als niet due. */
+const dueAmong = async (owners: readonly Address[], blockOverrides?: BlockOverrides): Promise<Address[]> => {
+  const results = await multicallResults(
+    owners.map((owner) => ({ address: rebalancer, functionName: "isDue", args: [owner] })),
+    blockOverrides,
+  );
+  return owners.filter((_, i) => (results[i] as readonly [boolean, bigint] | undefined)?.[0] === true);
+};
+
 readsNextBlock = await probeOverrides();
 if (!readsNextBlock) {
   console.warn(
@@ -409,15 +524,20 @@ const count = (owner: Address, result: { outcome: Outcome; block: bigint | null 
   if (result.outcome === "retry") retryQueue.push({ owner, block: result.block });
 };
 
-for (let offset = 0n; offset < checked; offset += pageSize) {
+// Audit lead 9: filter het register eerst off-chain op actief, saldo en allowance (gebundeld met Multicall3), zodat
+// lege spam-registraties de run niet ophouden. Alleen de kandidaten krijgen een isDue.
+const candidates = await findCandidates();
+console.log(`${checked} owners geregistreerd, ${candidates.length} kandidaten na het filter op saldo en allowance`);
+
+for (const batch of chunks(candidates, Number(pageSize))) {
   let readBlock: bigint | null = null;
   for (let reads = 1; ; reads += 1) {
-    // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze pagina.
+    // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze portie.
     const after = readBlock !== null && (lastRunBlock === null || readBlock > lastRunBlock) ? readBlock : lastRunBlock;
     if (!(await waitForBlockAfter(after))) break;
     const latest = await publicClient.getBlock();
     readBlock = latest.number;
-    const fresh = newOwners(await read<readonly Address[]>("dueOwners", [offset, pageSize], overridesFor(latest)), handled);
+    const fresh = newOwners(await dueAmong(batch, overridesFor(latest)), handled);
 
     for (const owner of fresh) {
       handled.add(owner.toLowerCase());

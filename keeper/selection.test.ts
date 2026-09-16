@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import type { Address } from "viem";
 import {
+  CBBTC_UNIT,
   EURC_UNIT,
+  type OwnerFunds,
   GWEI,
   OVERRIDE_PROBE_CODE,
   blockerTip,
+  chunks,
   clearFailure,
   effectiveTip,
   failureAction,
+  filterCandidates,
+  isCandidate,
   firstSendBlock,
   formatEurc,
   formatGwei,
@@ -15,6 +20,8 @@ import {
   isCoolingDown,
   isTemporaryFailure,
   maxFeePerGas,
+  maxRunValues,
+  minRunBaseUnits,
   newOwners,
   nextAttemptBlock,
   nextBlockOverrides,
@@ -294,5 +301,76 @@ describe("cool-down", () => {
     expect(parseCooldownState("{}")).toEqual({});
     expect(() => parseCooldownState("[]")).toThrow("geen JSON-object");
     expect(() => parseCooldownState('{"0xabc":{"until":"soon"}}')).toThrow("ongeldige regel");
+  });
+});
+
+describe("register spam filter (lead 9)", () => {
+  const FLOOR = 20n * EURC_UNIT;
+  // 100.000 EURC per cbBTC (EURC-basiseenheden per cbBTC, zoals quote()).
+  const PRICE = 100_000n * EURC_UNIT;
+  const empty: OwnerFunds = {
+    owner: OWNER,
+    active: true,
+    eurcBalance: 0n,
+    eurcAllowance: 0n,
+    cbbtcBalance: 0n,
+    cbbtcAllowance: 0n,
+  };
+  const max = 2n ** 256n - 1n;
+
+  test("an empty or inactive registration is dropped", () => {
+    expect(isCandidate(empty, PRICE, FLOOR)).toBe(false);
+    expect(isCandidate({ ...empty, active: false, eurcBalance: 1_000n * EURC_UNIT, eurcAllowance: max }, PRICE, FLOOR)).toBe(false);
+  });
+
+  test("a balance without allowance, or an allowance without balance, is dropped", () => {
+    expect(isCandidate({ ...empty, eurcBalance: 1_000n * EURC_UNIT }, PRICE, FLOOR)).toBe(false);
+    expect(isCandidate({ ...empty, eurcAllowance: max, cbbtcAllowance: max }, PRICE, FLOOR)).toBe(false);
+  });
+
+  test("buy side: min(EURC balance, allowance) must reach the minimum run", () => {
+    expect(isCandidate({ ...empty, eurcBalance: FLOOR, eurcAllowance: max }, PRICE, FLOOR)).toBe(true);
+    expect(isCandidate({ ...empty, eurcBalance: FLOOR - 1n, eurcAllowance: max }, PRICE, FLOOR)).toBe(false);
+    expect(isCandidate({ ...empty, eurcBalance: 1_000n * EURC_UNIT, eurcAllowance: FLOOR - 1n }, PRICE, FLOOR)).toBe(false);
+    // 39,99 EURC is genoeg voor een run van 20 EURC: het contract kan die owner uitvoeren, dus hij blijft.
+    expect(isCandidate({ ...empty, eurcBalance: 39_990_000n, eurcAllowance: max }, PRICE, FLOOR)).toBe(true);
+  });
+
+  test("sell side: min(cbBTC balance, allowance) valued at quote() must reach the minimum run, rounded down", () => {
+    // 20 EURC bij 100.000 EURC per cbBTC = 20.000 sat.
+    expect(isCandidate({ ...empty, cbbtcBalance: 20_000n, cbbtcAllowance: max }, PRICE, FLOOR)).toBe(true);
+    expect(isCandidate({ ...empty, cbbtcBalance: 19_999n, cbbtcAllowance: max }, PRICE, FLOOR)).toBe(false);
+    expect(isCandidate({ ...empty, cbbtcBalance: CBBTC_UNIT, cbbtcAllowance: 19_999n }, PRICE, FLOOR)).toBe(false);
+    expect(maxRunValues({ ...empty, cbbtcBalance: 12_345n, cbbtcAllowance: max }, 123_456_789n).sell).toBe(15_240n);
+  });
+
+  test("either direction is enough", () => {
+    expect(isCandidate({ ...empty, eurcBalance: FLOOR, eurcAllowance: 0n, cbbtcBalance: 20_000n, cbbtcAllowance: max }, PRICE, FLOOR)).toBe(true);
+  });
+
+  test("filterCandidates keeps the order and only the owners that can run", () => {
+    const A = "0x1111111111111111111111111111111111111111" as Address;
+    const B = "0x2222222222222222222222222222222222222222" as Address;
+    const C = "0x3333333333333333333333333333333333333333" as Address;
+    const rows = [
+      { ...empty, owner: A, eurcBalance: 40n * EURC_UNIT, eurcAllowance: max },
+      { ...empty, owner: B },
+      { ...empty, owner: C, cbbtcBalance: CBBTC_UNIT, cbbtcAllowance: max },
+    ];
+    expect(filterCandidates(rows, PRICE, FLOOR)).toEqual([A, C]);
+    // 10.000 lege spam-registraties laten geen enkele kandidaat over.
+    expect(filterCandidates(Array.from({ length: 10_000 }, () => empty), PRICE, FLOOR)).toEqual([]);
+  });
+
+  test("the minimum is the larger of MIN_TRADE_FLOOR and MIN_RUN_EURC", () => {
+    expect(minRunBaseUnits(FLOOR, 20)).toBe(FLOOR);
+    expect(minRunBaseUnits(FLOOR, 5)).toBe(FLOOR);
+    expect(minRunBaseUnits(FLOOR, 50)).toBe(50n * EURC_UNIT);
+    expect(minRunBaseUnits(FLOOR, 20.5)).toBe(20_500_000n);
+  });
+
+  test("chunks splits without losing or reordering owners", () => {
+    expect(chunks([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+    expect(chunks([], 20)).toEqual([]);
   });
 });
