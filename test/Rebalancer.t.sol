@@ -1563,6 +1563,59 @@ contract RebalancerTest is RebalancerTestBase {
         }
     }
 
+    /// @dev Testgat math 1 (M-01): bij een willekeurig, niet-rond koersgetal en volle allowance is een owner due
+    ///      precies als de begrensde correctie de minTrade haalt, met die correctie als delta; is hij due, dan
+    ///      slaagt `execute` ook (geen NothingToDo door afronding in de omrekening naar sats).
+    function testFuzz_isDue_matchesCorrectionAtAnyPrice(
+        uint256 price,
+        uint256 cash,
+        uint256 btc,
+        uint16 targetSteps,
+        uint16 band,
+        uint16 cap,
+        uint64 minTrade
+    ) public {
+        price = bound(price, 20_000e6, 200_000e6);
+        cash = bound(cash, 0, 1e12);
+        btc = bound(btc, 0, 1e10);
+        Rebalancer.Params memory p = _defaultParams();
+        p.targetBps = uint16(bound(targetSteps, 5, 95)) * 100;
+        p.bandBps = uint16(bound(band, 1, 9999));
+        p.maxCorrectionBps = uint16(bound(cap, 10, 10_000));
+        p.minTradeEurc = uint64(bound(minTrade, 20e6, 1e9));
+        _setPrice(price);
+        router.setPrice(price);
+        _setUser(alice, cash, btc, p);
+
+        uint256 position = Math.mulDiv(btc, price, 1e8);
+        uint256 total = cash + position;
+        uint256 correction;
+        bool isBuy;
+        if (total > 0) {
+            uint256 fractionWad = Math.mulDiv(position, 1e18, total);
+            uint256 targetWad = uint256(p.targetBps) * 1e18 / BPS;
+            isBuy = fractionWad < targetWad;
+            uint256 driftWad = isBuy ? targetWad - fractionWad : fractionWad - targetWad;
+            if (driftWad > uint256(p.bandBps) * 1e18 / BPS) {
+                uint256 capEurc = Math.max(Math.mulDiv(total, p.maxCorrectionBps, BPS), p.minTradeEurc);
+                correction = Math.min(Math.mulDiv(driftWad, total, 1e18), capEurc);
+            }
+        }
+        bool expectDue = correction >= p.minTradeEurc;
+
+        (bool due, int256 delta) = r.isDue(alice);
+        assertEq(due, expectDue, "due wijkt af van correctie >= minTrade");
+        if (!expectDue) {
+            assertEq(delta, 0);
+            vm.expectRevert(Rebalancer.NothingToDo.selector);
+            r.execute(alice, keeper);
+            return;
+        }
+        assertEq(delta, isBuy ? int256(correction) : -int256(correction));
+        r.execute(alice, keeper);
+        assertEq(r.lastExecutedAt(alice), uint64(START));
+    }
+
     function testFuzz_setParamsValidation(
         uint16 target,
         uint16 band,

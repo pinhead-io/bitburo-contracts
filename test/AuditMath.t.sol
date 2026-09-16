@@ -111,6 +111,7 @@ contract AuditMathTest is RebalancerTestBase {
             feeBase = received;
             amountInEurcValue = Math.mulDiv(btcIn, price, 1e8);
             assertEq(eurc.balanceOf(alice) - aliceEurcBefore, received - feePaid, "owner kreeg niet received - fee");
+            assertGt(router.lastAmountOutMinimum(), 0, "amountOutMinimum 0");
             assertGe(feePaid + 1, Math.mulDiv(r.KEEPER_REWARD_EURC(), BPS - routerSlip, BPS), "verkoop-fee te laag");
             // Ceil op wantBtc: de verkochte waarde ligt hooguit 1 sat boven de correctie.
             assertLe(amountInEurcValue, absDelta + price / 1e8, "meer dan 1 sat boven de correctie verkocht");
