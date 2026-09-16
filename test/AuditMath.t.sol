@@ -52,7 +52,7 @@ contract AuditMathTest is RebalancerTestBase {
         Rebalancer.Params memory p = Rebalancer.Params({
             active: true,
             targetBps: uint16(bound(targetSteps, 5, 95)) * 100,
-            bandBps: uint16(bound(band, 1, 9999)),
+            bandBps: uint16(bound(band, 125, 9999)), // MIN_BAND_BPS
             maxCorrectionBps: uint16(bound(cap, 10, 10_000)),
             minTradeEurc: uint64(bound(minTrade, 20e6, 1e9)),
             interval: 1 hours,
@@ -162,7 +162,7 @@ contract AuditMathTest is RebalancerTestBase {
         Rebalancer.Params memory p = Rebalancer.Params({
             active: true,
             targetBps: uint16(bound(targetSteps, 5, 95)) * 100,
-            bandBps: uint16(bound(band, 1, 500)),
+            bandBps: uint16(bound(band, 125, 500)), // MIN_BAND_BPS
             maxCorrectionBps: uint16(bound(cap, 5000, 10_000)), // >= 50% per run: hoofdcorrectie in <= 2 runs, rest is staart
             minTradeEurc: 20e6,
             interval: 1 hours,
@@ -188,12 +188,19 @@ contract AuditMathTest is RebalancerTestBase {
 
     // ─── PoC's ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// @dev Overshoot bij verkoop: na een volledige sell ligt de fractie iets BOVEN target (zelfde richting), en
-    ///      met band 1 bps volgt een tweede, kleinere sell zodra die staart boven de minTrade-vloer uitkomt.
-    ///      Geen ping-pong, wel een staart.
+    /// @dev Overshoot bij verkoop (I-01): na een volledige sell ligt de fractie iets BOVEN target (zelfde richting).
+    ///      Met band 1 bps volgde vroeger een tweede, kleinere sell (een staart met fee). Sinds MIN_BAND_BPS (125 =
+    ///      FEE_BPS + MAX_SLIPPAGE_BPS) weigert setParams zo'n band, en valt de restafwijking door fee en slippage
+    ///      (≤ 1,25% van het runbedrag, hier ≤ 0,25 pt) binnen de kleinste toegestane band: de correctie is in één run
+    ///      klaar. Omgeschreven van bewijs-van-staart naar bewijs-van-fix.
     function test_poc_sellOvershootTailRuns() public {
         Rebalancer.Params memory p = _defaultParams();
         p.bandBps = 1;
+        vm.prank(alice);
+        vm.expectRevert(Rebalancer.InvalidParams.selector);
+        r.setParams(p);
+
+        p.bandBps = r.MIN_BAND_BPS();
         p.maxCorrectionBps = 10_000;
         p.interval = 1 hours;
         router.setSlippageBps(100);
@@ -201,18 +208,12 @@ contract AuditMathTest is RebalancerTestBase {
         r.execute(alice, address(0)); // verkoop 4.000 EURC
         (uint256 frac,) = _fraction(alice, PRICE);
         assertGt(frac, 0.8e18, "overshoot in dezelfde richting");
+        assertLt(frac, 0.8e18 + 0.0125e18, "overshoot buiten de kleinste band");
         vm.warp(vm.getBlockTimestamp() + 1 hours);
         _setPrice(PRICE);
         (bool due, int256 delta) = r.isDue(alice);
-        assertTrue(due);
-        assertLt(delta, 0, "tweede run is ook een verkoop");
-        assertGe(uint256(-delta), 20e6, "staart boven de vloer");
-        assertLt(uint256(-delta), 60e6, "staart is klein (fee 0,25% + slippage 1% over 4.000)");
-        r.execute(alice, address(0));
-        vm.warp(vm.getBlockTimestamp() + 1 hours);
-        _setPrice(PRICE);
-        (due,) = r.isDue(alice);
-        assertFalse(due, "na de staart is de reeks klaar");
+        assertFalse(due, "staart-run ondanks MIN_BAND_BPS");
+        assertEq(delta, 0);
     }
 
     /// @dev Cadans: allowance < correctie -> deel-run, lastExecutedAt schuift toch een volledig interval op.

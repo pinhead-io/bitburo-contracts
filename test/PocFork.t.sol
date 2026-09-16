@@ -66,7 +66,7 @@ contract PocFork is Test {
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 1,
+                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
                 maxCorrectionBps: 1000,
                 minTradeEurc: 1,
                 interval: 1 hours,
@@ -81,7 +81,7 @@ contract PocFork is Test {
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 1,
+                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
                 maxCorrectionBps: 1,
                 minTradeEurc: 20e6,
                 interval: 1 hours,
@@ -96,7 +96,7 @@ contract PocFork is Test {
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 1,
+                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
                 maxCorrectionBps: 1000,
                 minTradeEurc: 20e6,
                 interval: 1 hours,

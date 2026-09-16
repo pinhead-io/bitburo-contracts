@@ -132,6 +132,12 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @notice Ondergrens voor `maxCorrectionBps` (0,1% per run): sluit configuraties uit die elk interval een
     ///         verwaarloosbare correctie doen en daarmee eeuwig due blijven.
     uint16 public constant MIN_CORRECTION_BPS = 10;
+    /// @notice Ondergrens voor `bandBps` (1,25%): FEE_BPS + MAX_SLIPPAGE_BPS, het meeste wat een run kost. Een run
+    ///         gebeurt dus pas bij een afwijking die groter is dan dat verlies. Zo kan een permissionless aanroeper een
+    ///         wallet niet herhaaldelijk laten handelen op kleine koersbewegingen zonder dat de verhouding echt
+    ///         verbetert, en is een volledige correctie in één run klaar: de restafwijking door fee en slippage
+    ///         (≤ 1,25% van het runbedrag) valt binnen de band (rekenaudit 2026-09-15, I-01).
+    uint16 public constant MIN_BAND_BPS = 125;
     uint16 public constant MIN_TARGET_BPS = 500;
     uint16 public constant MAX_TARGET_BPS = 9500;
     uint32 public constant MIN_INTERVAL = 1 hours;
@@ -154,7 +160,7 @@ contract Rebalancer is ReentrancyGuardTransient {
     struct Params {
         bool active;
         uint16 targetBps; // cbBTC-aandeel, 500–9500, veelvoud van 100
-        uint16 bandBps; // > 0
+        uint16 bandBps; // MIN_BAND_BPS–9999
         uint16 maxCorrectionBps; // MIN_CORRECTION_BPS–10000, aandeel van de totale waarde per run
         uint64 minTradeEurc; // EURC-basiseenheden, >= MIN_TRADE_FLOOR
         uint32 interval; // minimale tijd tussen runs, >= MIN_INTERVAL
@@ -308,17 +314,18 @@ contract Rebalancer is ReentrancyGuardTransient {
     // ─── Gebruiker ──────────────────────────────────────────────────────────────────────────────────────────
 
     /// @notice Zet of wijzigt de eigen instellingen. Alleen msg.sender kan zijn eigen instellingen wijzigen.
-    /// @dev Economische ondergrenzen: `minTradeEurc >= MIN_TRADE_FLOOR` en `maxCorrectionBps >= MIN_CORRECTION_BPS`.
+    /// @dev Economische ondergrenzen: `minTradeEurc >= MIN_TRADE_FLOOR`, `maxCorrectionBps >= MIN_CORRECTION_BPS` en
+    ///      `bandBps >= MIN_BAND_BPS`.
     ///      Na `retire` is alleen `active = false` nog toegestaan (mandaat intrekken); een actief mandaat zetten
     ///      revert dan met `ContractRetired`. Breekt een lopende ronde af: de volgende run is weer een nieuwe
     ///      ronde, `interval` na de laatste run.
     function setParams(Params calldata p) external {
         if (retired && p.active) revert ContractRetired();
         if (
-            p.targetBps < MIN_TARGET_BPS || p.targetBps > MAX_TARGET_BPS || p.targetBps % 100 != 0 || p.bandBps == 0
-                || p.bandBps >= BPS || p.maxCorrectionBps < MIN_CORRECTION_BPS || p.maxCorrectionBps > BPS
-                || p.minTradeEurc < MIN_TRADE_FLOOR || p.interval < MIN_INTERVAL || p.maxSlippageBps < MIN_SLIPPAGE_BPS
-                || p.maxSlippageBps > MAX_SLIPPAGE_BPS
+            p.targetBps < MIN_TARGET_BPS || p.targetBps > MAX_TARGET_BPS || p.targetBps % 100 != 0
+                || p.bandBps < MIN_BAND_BPS || p.bandBps >= BPS || p.maxCorrectionBps < MIN_CORRECTION_BPS
+                || p.maxCorrectionBps > BPS || p.minTradeEurc < MIN_TRADE_FLOOR || p.interval < MIN_INTERVAL
+                || p.maxSlippageBps < MIN_SLIPPAGE_BPS || p.maxSlippageBps > MAX_SLIPPAGE_BPS
         ) {
             revert InvalidParams();
         }

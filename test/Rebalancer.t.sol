@@ -161,7 +161,8 @@ contract RebalancerTest is RebalancerTestBase {
         r.setParams(p);
         p.targetBps = 9500;
         r.setParams(p);
-        p.bandBps = 1;
+        // Ondergrens is sinds MIN_BAND_BPS 125 (was 1): een band onder het maximale verlies per run mag niet meer.
+        p.bandBps = 125;
         r.setParams(p);
         p.bandBps = 9999;
         r.setParams(p);
@@ -202,8 +203,23 @@ contract RebalancerTest is RebalancerTestBase {
         Rebalancer.Params memory p = _defaultParams();
         p.bandBps = 0;
         _expectInvalid(p);
+        p.bandBps = 1;
+        _expectInvalid(p);
         p.bandBps = 10_000;
         _expectInvalid(p);
+    }
+
+    /// @notice MIN_BAND_BPS = FEE_BPS + MAX_SLIPPAGE_BPS: 124 revert, 125 mag.
+    function test_setParams_minBandBps() public {
+        assertEq(r.MIN_BAND_BPS(), r.FEE_BPS() + r.MAX_SLIPPAGE_BPS());
+        Rebalancer.Params memory p = _defaultParams();
+        p.bandBps = 124;
+        _expectInvalid(p);
+        p.bandBps = 125;
+        vm.prank(alice);
+        r.setParams(p);
+        (,, uint16 band,,,,) = r.params(alice);
+        assertEq(band, 125);
     }
 
     function test_setParams_rejectsMaxCorrection() public {
@@ -823,9 +839,10 @@ contract RebalancerTest is RebalancerTestBase {
     ///      stijgt het cbBTC-aandeel en verkoopt de volgende run cbBTC voor de gedepegde EURC. Ontwerpkeuze
     ///      (EURC als numeraire); hier vastgelegd zodat het niet ongemerkt verandert.
     function test_isDue_eurcDepegTurnsHoldIntoSell() public {
-        // 2.000 EURC + 0,1 cbBTC: exact 80/20 bij EURC/USD = 1, band 1%.
+        // 2.000 EURC + 0,1 cbBTC: exact 80/20 bij EURC/USD = 1, band 1,25% (MIN_BAND_BPS; was 1%, dat mag niet meer).
+        // De depeg duwt het aandeel naar ~81,6%, dus ook buiten deze band.
         Rebalancer.Params memory p = _defaultParams();
-        p.bandBps = 100;
+        p.bandBps = 125;
         _setUser(alice, 2000e6, 10_000_000, p);
         (bool due,) = r.isDue(alice);
         assertFalse(due);
@@ -1681,7 +1698,7 @@ contract RebalancerTest is RebalancerTestBase {
         Rebalancer.Params memory p = Rebalancer.Params({
             active: true,
             targetBps: uint16(bound(targetSteps, 5, 95)) * 100,
-            bandBps: uint16(bound(band, 1, 9999)),
+            bandBps: uint16(bound(band, 125, 9999)), // MIN_BAND_BPS
             maxCorrectionBps: uint16(bound(cap, 10, 10_000)),
             minTradeEurc: uint64(bound(minTrade, 20e6, 1e9)),
             interval: 1 days,
@@ -1768,7 +1785,7 @@ contract RebalancerTest is RebalancerTestBase {
         btc = bound(btc, 0, 1e10);
         Rebalancer.Params memory p = _defaultParams();
         p.targetBps = uint16(bound(targetSteps, 5, 95)) * 100;
-        p.bandBps = uint16(bound(band, 1, 9999));
+        p.bandBps = uint16(bound(band, 125, 9999)); // MIN_BAND_BPS
         p.maxCorrectionBps = uint16(bound(cap, 10, 10_000));
         p.minTradeEurc = uint64(bound(minTrade, 20e6, 1e9));
         _setPrice(price);
@@ -1830,7 +1847,7 @@ contract RebalancerTest is RebalancerTestBase {
             interval: interval,
             maxSlippageBps: slip
         });
-        bool valid = target >= 500 && target <= 9500 && target % 100 == 0 && band >= 1 && band <= 9999 && cap >= 10
+        bool valid = target >= 500 && target <= 9500 && target % 100 == 0 && band >= 125 && band <= 9999 && cap >= 10
             && cap <= 10_000 && minTrade >= 20e6 && interval >= 1 hours && slip >= 60 && slip <= 100;
         if (!valid) vm.expectRevert(Rebalancer.InvalidParams.selector);
         vm.prank(alice);
@@ -1943,7 +1960,7 @@ contract RebalancerHandler is Test {
         Rebalancer.Params memory p = Rebalancer.Params({
             active: active,
             targetBps: uint16(bound(target, 5, 95)) * 100,
-            bandBps: uint16(bound(band, 1, 9999)),
+            bandBps: uint16(bound(band, 125, 9999)), // MIN_BAND_BPS; lagere banden weigert setParams nu
             maxCorrectionBps: uint16(bound(cap, 10, 10_000)),
             minTradeEurc: uint64(bound(minTrade, 20e6, 100e6)),
             interval: 1 hours,
