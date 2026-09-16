@@ -1142,6 +1142,38 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.dueOwners(0, 10).length, 0);
     }
 
+    /// @dev Testgat execute 2 en mandaat 1: een wekker die pagina voor pagina door `dueOwners` loopt (zoals
+    ///      keeper.ts, hier met pagina's van 5) bereikt elke due owner, ook nummer 6 en verder. Kleine wallets
+    ///      met toegestane params (10 EURC, onder de vloer) staan ertussen, zijn nooit due en verdringen niemand.
+    function test_dueOwners_pagingReachesEveryDueOwner() public {
+        uint256 count = 12;
+        uint256 pageSize = 5;
+        address[] memory users = new address[](count);
+        for (uint256 i = 0; i < count; i++) {
+            users[i] = makeAddr(string(abi.encodePacked("paged", i)));
+            bool isSmallWallet = i % 2 == 0;
+            _setUser(users[i], isSmallWallet ? 10e6 : 1000e6, 0, _defaultParams());
+        }
+        assertEq(r.dueOwners(0, count).length, count / 2);
+
+        uint256 executed;
+        for (uint256 offset = 0; offset < r.ownerCount(); offset += pageSize) {
+            address[] memory page = r.dueOwners(offset, pageSize);
+            for (uint256 j = 0; j < page.length; j++) {
+                r.execute(page[j], keeper);
+                executed++;
+            }
+        }
+
+        assertEq(executed, count / 2, "niet elke due owner bereikt");
+        for (uint256 i = 0; i < count; i++) {
+            bool isSmallWallet = i % 2 == 0;
+            assertEq(r.lastExecutedAt(users[i]), isSmallWallet ? 0 : uint64(START));
+        }
+        assertEq(eurc.balanceOf(users[count - 1]), 900e6, "de laatste owner is ook uitgevoerd");
+        assertEq(r.dueOwners(0, count).length, 0, "na de ronde is niemand meer due");
+    }
+
     // quote ─────────────────────────────────────────────────────────────────────────────────────────────
 
     function test_quote_usesBothFeeds() public {
