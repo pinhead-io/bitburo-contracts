@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.37;
 
 /// @notice Minimale Chainlink AggregatorV3Interface (docs.chain.link/data-feeds/api-reference).
 interface IAggregatorV3 {

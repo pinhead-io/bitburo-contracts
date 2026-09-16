@@ -70,7 +70,7 @@ Daarna in de app: het adres als oud adres registreren (`legacy_addresses` uit au
 
 | Map | Wat |
 |---|---|
-| `src/Rebalancer.sol` | Het contract. Solidity 0.8.28, OpenZeppelin 5.6.1, via-IR. |
+| `src/Rebalancer.sol` | Het contract. Solidity 0.8.37, OpenZeppelin 5.6.1, via-IR. |
 | `audit/` | Interne auditrapporten en PoC's per datum. |
 | `src/interfaces/` | Minimale interfaces: Chainlink AggregatorV3 en Uniswap SwapRouter02. |
 | `test/` | Unit-, fuzz- en invarianttests met mocks; fork-tests tegen Base mainnet. |
