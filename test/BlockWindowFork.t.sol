@@ -625,6 +625,34 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
         vm.revertToState(snap);
     }
 
+    /// @notice Review I-2: gas van `dueOwners` voor een pagina van 50 owners die allemaal due zijn (25 koop, 25
+    ///         verkoop), op de echte pools, met koude storage (zoals een losse eth_call). Controleert ook dat de
+    ///         pagina precies de owners bevat waarvoor `isDue` true geeft.
+    function test_fork_dueOwnersGasPerPage() public {
+        address[] memory owners = new address[](50);
+        for (uint256 i; i < 50; i++) {
+            owners[i] = makeAddr(string.concat("page", vm.toString(i)));
+            _fund(owners[i], i % 2 == 0, 1000e6 + i * 1e6);
+        }
+        _freshFeeds(0);
+        address[9] memory touched = [
+            address(r), P1, P2, address(EURC), address(CBBTC), FEED_CBBTC_USD, FEED_EURC_USD, SEQUENCER, address(USDC)
+        ];
+        for (uint256 i; i < touched.length; i++) {
+            vm.cool(touched[i]);
+        }
+        uint256 g = gasleft();
+        address[] memory due = r.dueOwners(0, 50);
+        uint256 used = g - gasleft();
+        console.log("gas dueOwners, pagina van 50 due owners:", used);
+        assertEq(due.length, 50, "niet alle 50 owners due");
+        for (uint256 i; i < 50; i++) {
+            (bool isDueNow,) = r.isDue(owners[i]);
+            assertTrue(isDueNow, "isDue wijkt af van dueOwners");
+            assertEq(due[i], owners[i], "volgorde of inhoud van de pagina");
+        }
+    }
+
     /// @notice Meet de beste extra winst van een LP-aanvaller (aandeel 50%, 80%, 95% van de actieve liquiditeit, gemint
     ///         in een eerder blok) bij de huidige protocolfee, met pushes binnen de begintick, voor correcties van 500,
     ///         10.000 en 20.000 EURC. Eis (door Arjan geaccepteerd): < 0,5 bp van de run. De uitkomst schuift per blok

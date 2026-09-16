@@ -512,6 +512,64 @@ contract BlockWindowTest is RebalancerTestBase {
         }
     }
 
+    // ─── Review I-2: dueOwners deelt de runomvang over de pagina ─────────────────────────────────────────────
+
+    /// @notice `dueOwners` rekent de runomvang per richting één keer per pagina (review I-2). Voor elke stand van de
+    ///         liquiditeit, de tickgrens en een mix van owners (koop en verkoop, binnen de band, inactief, zonder
+    ///         allowance, met en zonder lopende ronde, groot en klein) geeft elke pagina precies de owners waarvoor
+    ///         `isDue` true geeft, in registervolgorde.
+    function testFuzz_dueOwners_matchesIsDuePerOwner(uint256 seed, uint128 liq, int128 net, uint8 offset) public {
+        _p1AtTick(int24(uint24(bound(offset, 0, 9))));
+        liq = uint128(bound(liq, 1e9, 1e14));
+        poolEurcUsdc.setLiquidity(liq);
+        net = int128(bound(net, -2e14, 2e14));
+        poolEurcUsdc.setLiquidityNet(0, net);
+        poolEurcUsdc.setLiquidityNet(10, -net / 2);
+
+        uint256 n = 10;
+        address[] memory users = new address[](n);
+        for (uint256 i; i < n; i++) {
+            uint256 x = uint256(keccak256(abi.encode(seed, i)));
+            users[i] = makeAddr(string.concat("iso", vm.toString(i)));
+            Rebalancer.Params memory p = _params(uint16(bound(x >> 8, 10, 10_000)), uint64(bound(x >> 24, 20e6, 500e6)));
+            p.targetBps = uint16(bound(x >> 40, 5, 95) * 100);
+            p.bandBps = uint16(bound(x >> 48, 125, 2000));
+            p.active = (x >> 64) % 8 != 0;
+            _setUser(users[i], bound(x >> 72, 0, 200_000e6), bound(x >> 128, 0, 3e8), p);
+            if ((x >> 192) % 7 == 0) {
+                vm.prank(users[i]);
+                eurc.approve(address(r), (x >> 200) % 2 == 0 ? 0 : 30e6);
+            }
+            // Een deel voert nu al een run uit: dat opent soms een ronde (deel na CHUNK_INTERVAL) of zet de klok.
+            if ((x >> 208) % 3 == 0) {
+                try r.execute(users[i], keeper) {} catch {}
+                _nextBlock();
+            }
+        }
+        _warp(r.CHUNK_INTERVAL());
+
+        address[] memory expected = new address[](n);
+        uint256 m;
+        for (uint256 i; i < n; i++) {
+            (bool isDueNow,) = r.isDue(users[i]);
+            if (isDueNow) expected[m++] = users[i];
+        }
+        address[] memory due = r.dueOwners(0, n);
+        assertEq(due.length, m, "aantal due owners wijkt af van isDue");
+        for (uint256 i; i < m; i++) {
+            assertEq(due[i], expected[i], "dueOwners wijkt af van isDue");
+        }
+        // Pagina's van 3 samen geven dezelfde lijst.
+        uint256 k;
+        for (uint256 off; off < n; off += 3) {
+            address[] memory page = r.dueOwners(off, 3);
+            for (uint256 j; j < page.length; j++) {
+                assertEq(page[j], expected[k++], "pagina wijkt af van isDue");
+            }
+        }
+        assertEq(k, m, "pagina's missen owners");
+    }
+
     // ─── Rondes in delen ────────────────────────────────────────────────────────────────────────────────────
 
     function test_chunk_nextOnlyAfterChunkInterval() public {

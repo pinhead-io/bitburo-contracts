@@ -424,7 +424,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (touched != address(0)) {
             return (false, 0);
         }
-        return _dueAt(owner, p, price, chunk, w1, w2);
+        RunCaps memory caps;
+        return _dueAt(owner, p, price, chunk, w1, w2, caps);
     }
 
     /// @notice Pagina uit de owner-lijst, gefilterd op wie nu due is (zelfde regels als `isDue`). Revert nooit.
@@ -433,6 +434,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///      cool-down per owner bij. Na `retire` altijd een lege lijst. Alle owners in de lijst delen hetzelfde
     ///      blokvenster: na één run in dit blok is er voor de rest meestal geen ruimte meer (een run die de tick
     ///      verandert, raakt de pool aan). Heeft een pool in dit blok al een observatie, dan is de lijst leeg.
+    ///      Koers, blokvensters en de runomvang per richting worden één keer per pagina gelezen (review I-2); een
+    ///      pagina van 50 due owners kost gemeten ~1,24 mln gas.
     function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory due) {
         uint256 total = _owners.length;
         if (retired || offset >= total) {
@@ -450,6 +453,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         uint256 end = limit > total - offset ? total : offset + limit;
         address[] memory candidates = new address[](end - offset);
         uint256 n;
+        // Eén cache voor de hele pagina: de runomvang per richting hangt niet van de owner af (review I-2).
+        RunCaps memory caps;
         for (uint256 i = offset; i < end; i++) {
             address owner = _owners[i];
             Params memory p = params[owner];
@@ -460,7 +465,7 @@ contract Rebalancer is ReentrancyGuardTransient {
             if (!timeDue) {
                 continue;
             }
-            (bool isDueNow,) = _dueAt(owner, p, price, chunk, w1, w2);
+            (bool isDueNow,) = _dueAt(owner, p, price, chunk, w1, w2, caps);
             if (isDueNow) {
                 candidates[n++] = owner;
             }
@@ -471,12 +476,16 @@ contract Rebalancer is ReentrancyGuardTransient {
         }
     }
 
-    function _dueAt(address owner, Params memory p, uint256 price, bool chunk, Window memory w1, Window memory w2)
-        internal
-        view
-        returns (bool due, int256 eurcDelta)
-    {
-        Plan memory pl = _plan(owner, p, price, chunk, w1, w2);
+    function _dueAt(
+        address owner,
+        Params memory p,
+        uint256 price,
+        bool chunk,
+        Window memory w1,
+        Window memory w2,
+        RunCaps memory caps
+    ) internal view returns (bool due, int256 eurcDelta) {
+        Plan memory pl = _plan(owner, p, price, chunk, w1, w2, caps);
         if (pl.amountIn == 0) {
             return (false, 0);
         }
@@ -517,7 +526,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         (address touched, Window memory w1, Window memory w2) = _windows();
         if (touched != address(0)) revert PoolTouchedThisBlock(touched);
         uint256 price = _quoteChecked();
-        Plan memory pl = _plan(owner, p, price, chunk, w1, w2);
+        RunCaps memory caps;
+        Plan memory pl = _plan(owner, p, price, chunk, w1, w2, caps);
         if (pl.blockedBy != address(0)) revert BlockMoveExceeded(pl.blockedBy);
         if (pl.amountIn == 0) revert NothingToDo();
 
@@ -692,6 +702,39 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (sqrtPriceX96 < w.lower || sqrtPriceX96 > w.upper) revert BlockMoveExceeded(address(pool));
     }
 
+    /// @dev Uitkomst van `_maxRunEurc` per richting, onthouden binnen één aanroep. Leeg = nog niet berekend.
+    struct RunCaps {
+        bool buyKnown;
+        bool sellKnown;
+        uint256 buyEurc;
+        uint256 sellEurc;
+        address buyBinding;
+        address sellBinding;
+    }
+
+    /// @dev `_maxRunEurc` met `caps` als cache (review I-2). De uitkomst hangt alleen af van de richting, `price`, de
+    ///      vensters en de pool- en tickstaat van dit blok, en niets daarvan hangt van de owner af of verandert binnen
+    ///      een view-aanroep. `dueOwners` deelt één cache over de pagina en leest zo per richting hooguit één keer de
+    ///      ticks; `isDue` en `execute` geven een lege cache mee en rekenen precies als zonder cache.
+    function _maxRunCached(bool isBuy, uint256 price, Window memory w1, Window memory w2, RunCaps memory caps)
+        internal
+        view
+        returns (uint256 eurc, address binding)
+    {
+        if (isBuy) {
+            if (!caps.buyKnown) {
+                (caps.buyEurc, caps.buyBinding) = _maxRunEurc(true, price, w1, w2);
+                caps.buyKnown = true;
+            }
+            return (caps.buyEurc, caps.buyBinding);
+        }
+        if (!caps.sellKnown) {
+            (caps.sellEurc, caps.sellBinding) = _maxRunEurc(false, price, w1, w2);
+            caps.sellKnown = true;
+        }
+        return (caps.sellEurc, caps.sellBinding);
+    }
+
     /// @return eurc    Grootste run in EURC waarvan de geschatte eindkoers in beide pools binnen SIZING_BPS van de
     ///                 resterende ruimte tot de vensterrand blijft. 0 als een pool nu al buiten zijn venster ligt of
     ///                 voorbij de tickgrens in het venster geen liquiditeit heeft.
@@ -814,11 +857,15 @@ contract Rebalancer is ReentrancyGuardTransient {
      *      6. Was de liquiditeit de grens (run < correctie) en niet saldo of allowance, dan loopt de ronde door met
      *         budget − verhandelde waarde, mits dat restant nog minstens minTradeEurc is.
      */
-    function _plan(address owner, Params memory p, uint256 price, bool chunk, Window memory w1, Window memory w2)
-        internal
-        view
-        returns (Plan memory pl)
-    {
+    function _plan(
+        address owner,
+        Params memory p,
+        uint256 price,
+        bool chunk,
+        Window memory w1,
+        Window memory w2,
+        RunCaps memory caps
+    ) internal view returns (Plan memory pl) {
         uint256 cash = EURC.balanceOf(owner);
         uint256 btcBal = CBBTC.balanceOf(owner);
         uint256 position = Math.mulDiv(btcBal, price, CBBTC_UNIT);
@@ -851,7 +898,7 @@ contract Rebalancer is ReentrancyGuardTransient {
             return pl;
         }
 
-        (uint256 maxRun, address binding) = _maxRunEurc(pl.isBuy, price, w1, w2);
+        (uint256 maxRun, address binding) = _maxRunCached(pl.isBuy, price, w1, w2, caps);
         uint256 run = Math.min(correction, maxRun);
         if (run < MIN_TRADE_FLOOR) {
             pl.blockedBy = binding;
