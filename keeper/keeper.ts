@@ -8,11 +8,16 @@
  * revert niet elke run opnieuw gas kost. De beloning (0,05 EURC per run) gaat naar REWARD_TO, standaard het
  * eigen adres. Het script beslist niets over bedragen of richting: het contract bepaalt of, wat en hoeveel.
  *
- * Blokvenster (audit M-1): een pool mag binnen één blok maar 6 bp van zijn beginkoers afwijken, inclusief de run.
- * - Een revert met BlockMoveExceeded of BlockStartUnknown is tijdelijk: het script probeert die owner opnieuw in
- *   een volgend blok (tot BLOCK_RETRIES keer) en geeft geen cool-down.
- * - Na een geslaagde run wacht het script op een nieuw blok voordat het de volgende owner leest of simuleert; in
- *   hetzelfde blok is het venster meestal vol en zou een eth_call dat onterecht als "niet due" melden.
+ * Blokcheck en blokvenster (audit M-1, review PR #18): een run mag niet als een pool in hetzelfde blok al een
+ * oracle-observatie schreef, en een pool mag binnen één blok maar 6 bp van zijn beginkoers afwijken.
+ * - Een revert met PoolTouchedThisBlock of BlockMoveExceeded is tijdelijk: het script probeert die owner opnieuw in
+ *   een volgend blok (tot BLOCK_RETRIES keer) en geeft geen cool-down. Dat geldt ook voor een transactie die on-chain
+ *   revertte terwijl een nieuwe simulatie op dat blok slaagt.
+ * - Na een geslaagde run wacht het script op een nieuw blok voordat het de volgende owner of pagina leest of
+ *   simuleert; in hetzelfde blok is de pool meestal aangeraakt en zou een eth_call dat onterecht als "niet due" melden.
+ * - dueOwners is een momentopname. Het script leest elke pagina daarom minstens twee keer, in opeenvolgende blokken,
+ *   en behandelt owners die er dan pas in staan, tot een lezing niemand nieuw oplevert (hooguit BLOCK_RETRIES + 1
+ *   lezingen).
  * Grote correcties gaan in delen die 10 minuten na elkaar mogen. Draai dit script daarom elke 10 minuten.
  *
  * Gebruik:
@@ -33,10 +38,12 @@ import {
   isBlockWindowRevert,
   isCoolingDown,
   mustWaitForNextBlock,
+  newOwners,
   parseCooldownState,
   pruneExpired,
   recordFailure,
   runSizeSkipReason,
+  shouldReadPageAgain,
 } from "./selection";
 
 const abi = parseAbi([
@@ -46,7 +53,7 @@ const abi = parseAbi([
   "function execute(address owner, address rewardTo)",
   // Custom errors, zodat viem de revert-reden kan decoderen.
   "error BlockMoveExceeded(address pool)",
-  "error BlockStartUnknown(address pool)",
+  "error PoolTouchedThisBlock(address pool)",
   "error ContractRetired()",
   "error Inactive()",
   "error InvalidFeedAnswer(address feed)",
@@ -171,6 +178,7 @@ const handleOwner = async (owner: Address): Promise<Outcome> => {
     // false zegt: dat kan een vol blokvenster zijn, en alleen de simulatie geeft de reden.
     let request: Awaited<ReturnType<typeof simulateExecute>>["request"] | undefined;
     let failure: unknown;
+    let resimulationPassed = false;
     try {
       ({ request } = await simulateExecute(owner));
     } catch (error) {
@@ -202,6 +210,8 @@ const handleOwner = async (owner: Address): Promise<Outcome> => {
         failure = new Error(`transactie ${hash} is gerevert`);
         try {
           await simulateExecute(owner, receipt.blockNumber);
+          // Slaagt nu wel: de revert kwam door een tijdelijke stand eerder in dat blok, niet door de owner.
+          resimulationPassed = true;
         } catch (error) {
           if (errorNameOf(error) !== undefined) failure = error;
         }
@@ -210,7 +220,7 @@ const handleOwner = async (owner: Address): Promise<Outcome> => {
       }
     }
 
-    const action = failureAction(errorNameOf(failure), attempt, blockRetries);
+    const action = failureAction({ errorName: errorNameOf(failure), resimulationPassed }, attempt, blockRetries);
     if (action === "fail") {
       failed(owner, failure);
       return "skipped";
@@ -227,18 +237,29 @@ const handleOwner = async (owner: Address): Promise<Outcome> => {
 const checked = await read<bigint>("ownerCount");
 let executed = 0;
 let skipped = 0;
+/** Owners die deze run al behandeld zijn (uitgevoerd, overgeslagen of mislukt); die worden niet opnieuw geprobeerd. */
+const handled = new Set<string>();
 for (let offset = 0n; offset < checked; offset += pageSize) {
-  const page = await read<readonly Address[]>("dueOwners", [offset, pageSize]);
+  let readBlock: bigint | null = null;
+  for (let reads = 1; ; reads += 1) {
+    // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze pagina.
+    const after = readBlock !== null && (lastRunBlock === null || readBlock > lastRunBlock) ? readBlock : lastRunBlock;
+    if (!(await waitForBlockAfter(after))) break;
+    readBlock = await publicClient.getBlockNumber({ cacheTime: 0 });
+    const fresh = newOwners(await read<readonly Address[]>("dueOwners", [offset, pageSize]), handled);
 
-  for (const owner of page) {
-    if (isCoolingDown(cooldowns, owner, nowSeconds)) {
-      console.log(`${owner}: overgeslagen, cool-down tot ${new Date((cooldownUntil(cooldowns, owner) ?? 0) * 1000).toISOString()}`);
-      skipped += 1;
-      continue;
+    for (const owner of fresh) {
+      handled.add(owner.toLowerCase());
+      if (isCoolingDown(cooldowns, owner, nowSeconds)) {
+        console.log(`${owner}: overgeslagen, cool-down tot ${new Date((cooldownUntil(cooldowns, owner) ?? 0) * 1000).toISOString()}`);
+        skipped += 1;
+        continue;
+      }
+      const outcome = await handleOwner(owner);
+      if (outcome === "executed") executed += 1;
+      if (outcome === "skipped") skipped += 1;
     }
-    const outcome = await handleOwner(owner);
-    if (outcome === "executed") executed += 1;
-    if (outcome === "skipped") skipped += 1;
+    if (!shouldReadPageAgain(fresh.length, reads, blockRetries + 1)) break;
   }
 }
 

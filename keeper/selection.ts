@@ -15,37 +15,70 @@ export const runSizeSkipReason = (eurcDelta: bigint, minRunEurc: number): string
 };
 
 /**
- * Reverts van het blokvenster (audit M-1). Die zijn tijdelijk: een pool is in dit blok al te ver van zijn
- * beginkoers bewogen, door iemand anders of door een eerdere run. In een volgend blok lukt het meestal wel, dus
- * ze tellen niet als mislukking voor de cool-down.
+ * Reverts van de blokcheck en het blokvenster (audit M-1, review PR #18). Die zijn tijdelijk, dus ze tellen niet als
+ * mislukking voor de cool-down; in een volgend blok lukt het meestal wel:
+ * - PoolTouchedThisBlock(address pool), selector 0x817a53db: een pool schreef in dit blok al een oracle-observatie
+ *   (een swap die de tick veranderde, of een mint of burn in de range), door iemand anders of door een eerdere run.
+ *   Een `eth_call` op het laatste blok ziet dat ook als er in dát blok iets in de pool gebeurde.
+ * - BlockMoveExceeded(address pool), selector 0x66356d6d: te weinig ruimte of liquiditeit in het venster, of de run
+ *   haalde de vensterrand.
  */
-export const BLOCK_WINDOW_ERRORS: readonly string[] = ["BlockMoveExceeded", "BlockStartUnknown"];
+export const BLOCK_WINDOW_ERRORS: readonly string[] = ["PoolTouchedThisBlock", "BlockMoveExceeded"];
 
 export const isBlockWindowRevert = (errorName: string | undefined): boolean =>
   errorName !== undefined && BLOCK_WINDOW_ERRORS.includes(errorName);
 
 /**
+ * Wat een mislukking is: de naam van de contract-error (als die te decoderen was), en of het een transactie was die
+ * on-chain revertte terwijl een nieuwe simulatie op het blok van die transactie slaagt. Dat laatste wijst op een
+ * tijdelijke stand vóór de transactie in hetzelfde blok (bijvoorbeeld een swap die het venster vulde), niet op een
+ * owner die structureel revert.
+ */
+export type Failure = {
+  errorName: string | undefined;
+  resimulationPassed?: boolean;
+};
+
+export const isTemporaryFailure = (failure: Failure): boolean =>
+  isBlockWindowRevert(failure.errorName) || failure.resimulationPassed === true;
+
+/**
  * Wat te doen na een mislukte simulatie of transactie voor een owner, bij poging `attempt` (0 = eerste):
- * - "retry": blokvenster vol, probeer opnieuw in een volgend blok;
- * - "skip": blokvenster na `maxRetries` nieuwe pogingen nog steeds vol; niets boeken, de volgende keeper-run
- *   probeert het weer;
+ * - "retry": tijdelijk (blokcheck, blokvenster of een on-chain revert die opnieuw gesimuleerd wel slaagt), probeer
+ *   opnieuw in een volgend blok;
+ * - "skip": na `maxRetries` nieuwe pogingen nog steeds tijdelijk; niets boeken, de volgende keeper-run probeert het
+ *   weer;
  * - "fail": een echte mislukking, die telt voor de cool-down.
  */
 export const failureAction = (
-  errorName: string | undefined,
+  failure: Failure | string | undefined,
   attempt: number,
   maxRetries: number,
 ): "retry" | "skip" | "fail" => {
-  if (!isBlockWindowRevert(errorName)) {
+  const f: Failure = typeof failure === "object" ? failure : { errorName: failure };
+  if (!isTemporaryFailure(f)) {
     return "fail";
   }
   return attempt < maxRetries ? "retry" : "skip";
 };
 
 /**
- * Twee runs in hetzelfde blok delen het blokvenster; na een run is er in dat blok meestal geen ruimte meer. Een
- * `eth_call` op dat blok zou de volgende owner daarom onterecht als niet due of als BlockMoveExceeded zien. Lees
- * en simuleer de volgende owner dus pas in een blok ná de laatste geslaagde run.
+ * Review I-1: `dueOwners` is een momentopname. Een owner die op dat moment niet due leek omdat een pool in dat blok
+ * al aangeraakt was (door iemand anders, of door een eigen run), valt anders tot de volgende cron buiten de boot. De
+ * keeper leest een pagina daarom minstens twee keer, elke keer in een later blok, en behandelt alleen owners die hij in
+ * deze run nog niet had. Na de tweede lezing gaat hij alleen door zolang een lezing nog iemand nieuw oplevert, en
+ * nooit verder dan `maxReads` lezingen.
+ */
+export const newOwners = (page: readonly Address[], handled: ReadonlySet<string>): Address[] =>
+  page.filter((owner) => !handled.has(owner.toLowerCase()));
+
+export const shouldReadPageAgain = (newInLastRead: number, reads: number, maxReads: number): boolean =>
+  reads < maxReads && (reads < 2 || newInLastRead > 0);
+
+/**
+ * Een run die de tick van een pool verandert, raakt die pool voor de rest van het blok aan; een `eth_call` op dat blok
+ * zou de volgende owner daarom onterecht als niet due of als PoolTouchedThisBlock zien. Lees en simuleer de volgende
+ * owner (en de volgende pagina) dus pas in een blok ná de laatste geslaagde run.
  */
 export const mustWaitForNextBlock = (latestBlock: bigint, lastRunBlock: bigint | null): boolean =>
   lastRunBlock !== null && latestBlock <= lastRunBlock;
@@ -60,7 +93,7 @@ export const formatEurc = (baseUnits: bigint): string => {
  * Cool-down per owner na een mislukte execute. Het contract onthoudt mislukkingen niet (lastExecutedAt
  * wordt alleen bij succes gezet), dus een owner die structureel revert blijft due; zonder geheugen
  * zou elke run opnieuw gas kosten. De wachttijd verdubbelt per opeenvolgende mislukking tot `max`.
- * Reverts van het blokvenster tellen niet mee (zie `failureAction`).
+ * Tijdelijke mislukkingen tellen niet mee (zie `failureAction`).
  */
 export type CooldownEntry = {
   /** Unix-seconden tot wanneer de owner wordt overgeslagen. */

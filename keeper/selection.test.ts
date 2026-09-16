@@ -7,11 +7,14 @@ import {
   formatEurc,
   isBlockWindowRevert,
   isCoolingDown,
+  isTemporaryFailure,
   mustWaitForNextBlock,
+  newOwners,
   parseCooldownState,
   pruneExpired,
   recordFailure,
   runSizeSkipReason,
+  shouldReadPageAgain,
 } from "./selection";
 
 const OWNER = "0xAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
@@ -36,24 +39,62 @@ describe("runSizeSkipReason", () => {
 });
 
 describe("block window reverts", () => {
-  test("only the block window errors count as temporary", () => {
+  test("only the block check and block window errors count as temporary", () => {
+    expect(isBlockWindowRevert("PoolTouchedThisBlock")).toBe(true);
     expect(isBlockWindowRevert("BlockMoveExceeded")).toBe(true);
-    expect(isBlockWindowRevert("BlockStartUnknown")).toBe(true);
+    // Bestaat niet meer in het contract sinds de blokcheck.
+    expect(isBlockWindowRevert("BlockStartUnknown")).toBe(false);
     expect(isBlockWindowRevert("SpotDeviatesFromOracle")).toBe(false);
     expect(isBlockWindowRevert("NotDue")).toBe(false);
     expect(isBlockWindowRevert(undefined)).toBe(false);
   });
 
-  test("a block window revert is retried in a next block, then skipped without a cool-down", () => {
+  test("a block check or block window revert is retried in a next block, then skipped without a cool-down", () => {
+    expect(failureAction("PoolTouchedThisBlock", 0, 3)).toBe("retry");
+    expect(failureAction({ errorName: "PoolTouchedThisBlock" }, 2, 3)).toBe("retry");
+    expect(failureAction("PoolTouchedThisBlock", 3, 3)).toBe("skip");
     expect(failureAction("BlockMoveExceeded", 0, 3)).toBe("retry");
-    expect(failureAction("BlockMoveExceeded", 2, 3)).toBe("retry");
     expect(failureAction("BlockMoveExceeded", 3, 3)).toBe("skip");
-    expect(failureAction("BlockStartUnknown", 0, 0)).toBe("skip");
+    expect(failureAction("BlockMoveExceeded", 0, 0)).toBe("skip");
   });
 
   test("every other revert is a real failure for the cool-down", () => {
     expect(failureAction("SpotDeviatesFromOracle", 0, 3)).toBe("fail");
     expect(failureAction(undefined, 0, 3)).toBe("fail");
+    expect(failureAction({ errorName: undefined, resimulationPassed: false }, 0, 3)).toBe("fail");
+  });
+
+  test("an on-chain revert whose re-simulation passes is temporary (review I-1)", () => {
+    expect(isTemporaryFailure({ errorName: undefined, resimulationPassed: true })).toBe(true);
+    expect(failureAction({ errorName: undefined, resimulationPassed: true }, 0, 3)).toBe("retry");
+    expect(failureAction({ errorName: undefined, resimulationPassed: true }, 3, 3)).toBe("skip");
+    // Geeft de hersimulatie een echte fout, dan telt die.
+    expect(isTemporaryFailure({ errorName: "SpotDeviatesFromOracle", resimulationPassed: false })).toBe(false);
+  });
+});
+
+describe("re-reading a dueOwners page (review I-1)", () => {
+  const A = "0x1111111111111111111111111111111111111111" as Address;
+  const B = "0x2222222222222222222222222222222222222222" as Address;
+
+  test("newOwners drops owners already handled this run, case-insensitively", () => {
+    const handled = new Set([A.toLowerCase()]);
+    expect(newOwners([A, B], handled)).toEqual([B]);
+    expect(newOwners([B.toUpperCase().replace("0X", "0x") as Address], new Set([B.toLowerCase()]))).toEqual([]);
+    expect(newOwners([], handled)).toEqual([]);
+  });
+
+  test("a page is read at least twice, then only while a read still finds someone new", () => {
+    // Eerste lezing leeg (bijvoorbeeld een pool aangeraakt in dat blok): toch een tweede lezing.
+    expect(shouldReadPageAgain(0, 1, 4)).toBe(true);
+    expect(shouldReadPageAgain(2, 1, 4)).toBe(true);
+    expect(shouldReadPageAgain(0, 2, 4)).toBe(false);
+    expect(shouldReadPageAgain(1, 2, 4)).toBe(true);
+    expect(shouldReadPageAgain(1, 4, 4)).toBe(false);
+  });
+
+  test("with BLOCK_RETRIES = 0 a page is read once", () => {
+    expect(shouldReadPageAgain(5, 1, 1)).toBe(false);
   });
 });
 
