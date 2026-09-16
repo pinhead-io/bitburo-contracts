@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.37;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import {Test, Vm, console} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -765,8 +765,9 @@ contract RebalancerTest is RebalancerTestBase {
         r.execute(bob, keeper);
         assertEq(cbbtc.balanceOf(bob), 1_250_000);
 
-        // Impact die binnen de grens blijft (0,4% -> 0,5%) mag wel.
-        router.setPoolShift(poolEurcUsdc, 1e6, 1.005e6);
+        // Impact die binnen beide grenzen blijft mag wel: 0,40% -> 0,44% is binnen 0,5% van de oracle en binnen
+        // MAX_BLOCK_MOVE_BPS van de koers aan het begin van het blok. (0,4% -> 0,5% zou nu op het blokvenster stranden.)
+        router.setPoolShift(poolEurcUsdc, 1e6, 1.0044e6);
         r.execute(alice, keeper);
         assertEq(eurc.balanceOf(alice), 900e6);
     }
@@ -1855,7 +1856,18 @@ contract RebalancerHandler is Test {
     uint256 public revertsSpot;
     uint256 public revertsSlippage;
     uint256 public revertsRetired;
+    uint256 public revertsBlockMove;
     uint256 public revertsOther;
+    /// @dev Ronde-ghosts (audit M-1): budget en richting van de lopende ronde per owner, en wat er in die ronde al
+    ///      verhandeld is. Een run is een nieuwe ronde als `interval` sinds de vorige run verstreken is, anders een deel.
+    mapping(address actor => uint256) public ghostRoundBudget;
+    mapping(address actor => uint256) public ghostRoundSpent;
+    mapping(address actor => uint256) public ghostRoundRuns;
+    mapping(address actor => bool) public ghostRoundIsBuy;
+    bool public roundBudgetExceeded;
+    bool public roundDirectionFlipped;
+    bool public chunkWithoutRound;
+    uint256 public chunksSucceeded;
     /// @dev Retire-ghosts: is er na `retire` nog een `Executed`-event gezien (in welke handler-actie dan ook)?
     uint256 public retires;
     bool public executedAfterRetire;
@@ -1946,8 +1958,32 @@ contract RebalancerHandler is Test {
     }
 
     function warp(uint32 dt) external afterCall {
+        vm.roll(block.number + 1);
         vm.warp(block.timestamp + bound(dt, 0, 2 days));
         _refreshFeeds();
+    }
+
+    /// @dev Kleine stappen: een volgend blok (2 s) of precies CHUNK_INTERVAL, zodat delen van rondes geraakt worden.
+    function warpShort(bool chunkInterval) external afterCall {
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + (chunkInterval ? 10 minutes : 2));
+        _refreshFeeds();
+    }
+
+    /// @dev Eindige liquiditeit in een van beide pools, zodat runs in delen gaan (of 0 = weer onbegrensd).
+    function setLiquidity(bool eurcPool, uint128 liquidity) external afterCall {
+        uint128 value = liquidity % 4 == 0 ? type(uint128).max : uint128(bound(liquidity, 1e11, 1e14));
+        if (eurcPool) poolEurcUsdc.setLiquidity(value);
+        else poolUsdcCbbtc.setLiquidity(uint128(Math.min(uint256(value) * 1e3, type(uint128).max)));
+    }
+
+    /// @dev Een swap van iemand anders in dit blok (tot ±10 bp), zodat het blokvenster vooraf geraakt wordt.
+    function pushInBlock(bool eurcPool, uint16 bps, bool up) external afterCall {
+        bps = uint16(bound(bps, 0, 10));
+        MockUniswapV3Pool pool = eurcPool ? poolEurcUsdc : poolUsdcCbbtc;
+        uint256 s = pool.sqrtPriceX96();
+        uint256 target = up ? s * (20_000 + bps) / 20_000 : s * (20_000 - bps) / 20_000;
+        pool.swapToSqrtPriceX96(uint160(target));
     }
 
     function setPrice(uint256 price) external afterCall {
@@ -1987,8 +2023,37 @@ contract RebalancerHandler is Test {
         address owner = _actor(seed);
         address rewardTo = rewardSeed % 3 == 0 ? address(0) : (rewardSeed % 3 == 1 ? _actor(rewardSeed) : treasury);
         executes++;
+        (,,,,, uint32 interval,) = r.params(owner);
+        bool fresh = block.timestamp >= uint256(r.lastExecutedAt(owner)) + interval;
+        (bool roundIsBuy, uint128 roundLeft) = r.rounds(owner);
+        (, int256 answer,,,) = feedBtc.latestRoundData();
+        uint256 price = uint256(answer) * 1e6 / 1e8;
+        uint256 eurcBefore = eurc.balanceOf(owner);
+        uint256 btcBefore = cbbtc.balanceOf(owner);
+        uint256 totalBefore = eurcBefore + Math.mulDiv(btcBefore, price, 1e8);
         try r.execute(owner, rewardTo) {
             executesSucceeded++;
+            bool isBuy = eurc.balanceOf(owner) < eurcBefore;
+            uint256 spent = isBuy
+                ? eurcBefore - eurc.balanceOf(owner)
+                : Math.mulDiv(btcBefore - cbbtc.balanceOf(owner), price, 1e8, Math.Rounding.Ceil);
+            if (fresh) {
+                (,,, uint16 cap, uint64 minTrade,,) = r.params(owner);
+                ghostRoundBudget[owner] = Math.max(Math.mulDiv(totalBefore, cap, 10_000), minTrade);
+                ghostRoundSpent[owner] = spent;
+                ghostRoundRuns[owner] = 1;
+                ghostRoundIsBuy[owner] = isBuy;
+            } else {
+                chunksSucceeded++;
+                if (roundLeft == 0) chunkWithoutRound = true;
+                if (isBuy != ghostRoundIsBuy[owner] || isBuy != roundIsBuy) roundDirectionFlipped = true;
+                ghostRoundSpent[owner] += spent;
+                ghostRoundRuns[owner]++;
+            }
+            // Verkopen ronden hooguit 1 sat naar boven af per run (M-5).
+            if (ghostRoundSpent[owner] > ghostRoundBudget[owner] + ghostRoundRuns[owner] * (price / 1e8 + 1)) {
+                roundBudgetExceeded = true;
+            }
         } catch (bytes memory reason) {
             bytes4 sel = reason.length >= 4 ? bytes4(reason) : bytes4(0);
             if (sel == Rebalancer.NothingToDo.selector) revertsNothingToDo++;
@@ -1996,6 +2061,7 @@ contract RebalancerHandler is Test {
             else if (sel == Rebalancer.NotDue.selector) revertsNotDue++;
             else if (sel == Rebalancer.SpotDeviatesFromOracle.selector) revertsSpot++;
             else if (sel == Rebalancer.ContractRetired.selector) revertsRetired++;
+            else if (sel == Rebalancer.BlockMoveExceeded.selector) revertsBlockMove++;
             else if (sel == bytes4(keccak256("Error(string)"))) revertsSlippage++;
             else revertsOther++;
         }
@@ -2016,7 +2082,7 @@ contract RebalancerHandler is Test {
 contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
     RebalancerHandler internal handler;
 
-    function setUp() public override {
+    function setUp() public virtual override {
         super.setUp();
         handler =
             new RebalancerHandler(r, eurc, cbbtc, feedBtc, feedEurc, router, poolEurcUsdc, poolUsdcCbbtc, treasury);
@@ -2044,7 +2110,8 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
     }
 
     /// @dev Zonder router-slippage en met de spot binnen ±1% mag een execute alleen falen op NothingToDo, Inactive,
-    ///      NotDue, de spot-check of ContractRetired; "Too little received" of iets anders zou liveness-uitval zijn.
+    ///      NotDue, de spot-check, het blokvenster of ContractRetired; "Too little received" of iets anders zou
+    ///      liveness-uitval zijn.
     function invariant_executeFailsOnlyForKnownReasons() public view {
         assertEq(handler.revertsSlippage(), 0, "router-slippage zonder oorzaak");
         assertEq(handler.revertsOther(), 0, "onbekende revert-reden");
@@ -2052,7 +2119,29 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
             handler.executes(),
             handler.executesSucceeded() + handler.revertsNothingToDo() + handler.revertsInactive()
                 + handler.revertsNotDue() + handler.revertsSpot() + handler.revertsRetired()
+                + handler.revertsBlockMove()
         );
+    }
+
+    /// @dev Laat per run zien welke paden geraakt zijn (met -vv), zodat een groene suite niet op lege paden rust.
+    function afterInvariant() public view virtual {
+        console.log("execute geslaagd:", handler.executesSucceeded(), " waarvan delen:", handler.chunksSucceeded());
+        console.log("revert BlockMoveExceeded:", handler.revertsBlockMove(), " NotDue:", handler.revertsNotDue());
+        console.log("execute totaal:", handler.executes(), " NothingToDo:", handler.revertsNothingToDo());
+        console.log("revert spot:", handler.revertsSpot(), " retired:", handler.revertsRetired());
+        console.log("revert inactive:", handler.revertsInactive());
+    }
+
+    /// @dev Audit M-1: de runs van één ronde (eerste run plus delen) blijven samen binnen het budget van die ronde
+    ///      (maxCorrectionBps van de waarde bij de eerste run, minstens minTradeEurc).
+    function invariant_roundBudgetNeverExceeded() public view {
+        assertFalse(handler.roundBudgetExceeded(), "ronde verhandelde meer dan haar budget");
+    }
+
+    /// @dev Audit M-1: een deel gaat altijd in de richting van de ronde en alleen als er een ronde loopt.
+    function invariant_chunkKeepsRoundDirection() public view {
+        assertFalse(handler.roundDirectionFlipped(), "deel in de andere richting dan de ronde");
+        assertFalse(handler.chunkWithoutRound(), "deel zonder lopende ronde");
     }
 
     /// @dev Na retire vindt geen Executed-event meer plaats, en de vlag gaat nooit meer terug.
@@ -2063,6 +2152,36 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
         if (r.retired()) {
             assertEq(r.dueOwners(0, handler.actorCount()).length, 0, "dueOwners niet leeg na retire");
         }
+    }
+}
+
+/// @dev Dezelfde invariants zonder `retire` in de handler. In diepe runs zet `retire` (1 op 8 per aanroep) het contract
+///      bijna altijd vroeg stil, waardoor rondes en delen nauwelijks geraakt worden. Valt onder
+///      `--match-contract RebalancerInvariantTest`.
+contract RebalancerInvariantTestNoRetire is RebalancerInvariantTest {
+    function setUp() public override {
+        super.setUp();
+        // Startstand: elke actor actief, met saldo en volle allowance, en een EURC/USDC-pool met eindige liquiditeit
+        // (~375 EURC per run), zodat grotere correcties in delen gaan.
+        uint16[3] memory caps = [uint16(10_000), 1000, 300];
+        for (uint256 i = 0; i < handler.actorCount(); i++) {
+            address a = handler.actors(i);
+            handler.deposit(i, 10_000e6 * (i + 1), 1_000_000 * i);
+            vm.startPrank(a);
+            eurc.approve(address(r), type(uint256).max);
+            cbbtc.approve(address(r), type(uint256).max);
+            Rebalancer.Params memory p = _defaultParams();
+            p.maxCorrectionBps = caps[i];
+            p.interval = 1 hours;
+            r.setParams(p);
+            vm.stopPrank();
+        }
+        poolEurcUsdc.setLiquidity(2e12);
+        bytes4[] memory selectors = new bytes4[](3);
+        selectors[0] = RebalancerHandler.retire.selector;
+        selectors[1] = RebalancerHandler.setParams.selector;
+        selectors[2] = RebalancerHandler.approve.selector;
+        excludeSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 }
 

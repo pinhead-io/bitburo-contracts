@@ -99,6 +99,6 @@ contract MockRouter is IV3SwapRouter {
         lastRecipient = p.recipient;
         lastAmountIn = p.amountIn;
         lastAmountOutMinimum = p.amountOutMinimum;
-        if (address(shiftPool) != address(0)) shiftPool.setPrice(shiftToken0Amount, shiftToken1Amount);
+        if (address(shiftPool) != address(0)) shiftPool.swapToPrice(shiftToken0Amount, shiftToken1Amount);
     }
 }

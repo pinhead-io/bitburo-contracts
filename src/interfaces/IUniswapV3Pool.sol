@@ -20,4 +20,16 @@ interface IUniswapV3Pool {
             uint8 feeProtocol,
             bool unlocked
         );
+    /// @dev In-range liquiditeit op dit moment.
+    function liquidity() external view returns (uint128);
+    /// @dev Ringbuffer van oracle-observaties; de pool schrijft er hooguit één per blok (Oracle.write).
+    function observations(uint256 index)
+        external
+        view
+        returns (
+            uint32 blockTimestamp,
+            int56 tickCumulative,
+            uint160 secondsPerLiquidityCumulativeX128,
+            bool initialized
+        );
 }
