@@ -158,12 +158,11 @@ contract PocFork is Test {
         _sellEurc(atk, lo);
         console.log("spot na push:", r.spot(), "afwijking bps:", (r.spot() - oracle) * 10_000 / oracle);
 
-        // 2) De run zelf duwt de spot verder. De verharding controleert `_requireSpotNear` ook ná de
-        //    swap, dus voorschuiving en eigen prijsimpact moeten samen binnen de tolerantie blijven.
-        //    De oorspronkelijke PoC kwam hier wél doorheen en logde de winst van de aanvaller.
+        // 2) De push ligt in hetzelfde blok en ver buiten het blokvenster (MAX_BLOCK_MOVE_BPS, audit M-1), dus de run
+        //    revert al vóór de swap. Daarvoor strandde hij op de spotcheck ná de swap; de oorspronkelijke PoC kwam
+        //    hier wél doorheen en logde de winst van de aanvaller.
         uint256 btcBefore = CBBTC.balanceOf(buyer);
-        //    De gerapporteerde spot is die ná de swap, dus alleen op het fouttype asserteren.
-        vm.expectPartialRevert(Rebalancer.SpotDeviatesFromOracle.selector);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, POOL_EURC_USDC));
         r.execute(buyer, atk);
 
         assertEq(CBBTC.balanceOf(buyer), btcBefore, "buyer heeft toch gekocht op een geduwde koers");
