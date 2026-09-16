@@ -291,6 +291,28 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.owners(0, 0).length, 0);
     }
 
+    /// @dev L-A: `offset + limit` overflowde bij `offset >= 1` en `limit = type(uint256).max` (Panic 0x11).
+    function test_owners_andDueOwners_maxLimitNeverOverflows() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        _setUser(bob, 1000e6, 0, _defaultParams());
+        address carol = makeAddr("carol");
+        _setUser(carol, 1000e6, 0, _defaultParams());
+
+        address[] memory page = r.owners(1, type(uint256).max);
+        assertEq(page.length, 2);
+        assertEq(page[0], bob);
+        assertEq(page[1], carol);
+        assertEq(r.owners(0, type(uint256).max).length, 3);
+        assertEq(r.owners(3, type(uint256).max).length, 0);
+
+        address[] memory due = r.dueOwners(1, type(uint256).max);
+        assertEq(due.length, 2);
+        assertEq(due[0], bob);
+        assertEq(due[1], carol);
+        assertEq(r.dueOwners(2, type(uint256).max - 1).length, 1);
+        assertEq(r.dueOwners(3, type(uint256).max).length, 0);
+    }
+
     function test_owners_emptyRegistry() public view {
         assertEq(r.ownerCount(), 0);
         assertEq(r.owners(0, 10).length, 0);

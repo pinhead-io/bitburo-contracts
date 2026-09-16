@@ -19,7 +19,8 @@ De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBT
 |---|---|
 | `setParams(Params)` | Eigen instellingen zetten of wijzigen. Grenzen: `minTradeEurc` ≥ `MIN_TRADE_FLOOR` (20 EURC), `maxCorrectionBps` 10–10000, `maxSlippageBps` 60–100, `interval` ≥ 1 uur. Na `retire` alleen nog met `active = false` (mandaat intrekken); anders `ContractRetired`. |
 | `isDue(owner) → (bool, int256)` | Zou `execute` nu iets doen, en hoeveel EURC (+ kopen, − verkopen)? Revert nooit. Na `retire` altijd `(false, 0)`. |
-| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn, zelfde regels als `isDue`. Dit is wat de wekkers gebruiken. Na `retire` altijd leeg. |
+| `owners(offset, limit) → address[]` / `ownerCount()` | Pagina uit alle geregistreerde owners (ook inactieve); het aantal. Revert nooit, ook niet bij `limit = type(uint256).max`. |
+| `dueOwners(offset, limit) → address[]` | Eén call per pagina: de owners die nu due zijn, zelfde regels als `isDue`. Dit is wat de wekkers gebruiken. Revert nooit, ook niet bij een grote `limit`. Na `retire` altijd leeg. |
 | `execute(owner, rewardTo)` | Eén rebalance-stap; iedereen mag dit aanroepen. `rewardTo` = contract zelf telt als `address(0)`. Revert met `NoOutput` als de koop 0 cbBTC zou opleveren, en met `ContractRetired` na `retire`. |
 | `sweep(token)` | Stuurt een achtergebleven saldo naar de treasury (per ongeluk gestuurde tokens, of fee die door een mislukte treasury-transfer is blijven staan). Permissionless. Werkt ook na `retire`. |
 | `retire()` | Eenmalige, onomkeerbare uitschakelaar. Alleen `TREASURY`; tweede aanroep revert met `AlreadyRetired`. Zet `retired = true` en emit `Retired()`. Kan niets met fondsen of instellingen. |

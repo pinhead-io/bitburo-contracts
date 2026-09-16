@@ -239,13 +239,15 @@ contract Rebalancer is ReentrancyGuardTransient {
 
     // ─── Lezen ──────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// @notice Pagina uit de lijst van adressen die ooit instellingen hebben gezet (ook inactieve).
+    /// @notice Pagina uit de lijst van adressen die ooit instellingen hebben gezet (ook inactieve). Revert nooit,
+    ///         ook niet bij `limit = type(uint256).max`.
     function owners(uint256 offset, uint256 limit) external view returns (address[] memory page) {
         uint256 total = _owners.length;
         if (offset >= total) {
             return new address[](0);
         }
-        uint256 end = Math.min(offset + limit, total);
+        // Niet `offset + limit`: dat overflowt bij een grote `limit` (audit L-A).
+        uint256 end = limit > total - offset ? total : offset + limit;
         page = new address[](end - offset);
         for (uint256 i = offset; i < end; i++) {
             page[i - offset] = _owners[i];
@@ -284,7 +286,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (!ok) {
             return new address[](0);
         }
-        uint256 end = Math.min(offset + limit, total);
+        // Niet `offset + limit`: dat overflowt bij een grote `limit` (audit L-A).
+        uint256 end = limit > total - offset ? total : offset + limit;
         address[] memory candidates = new address[](end - offset);
         uint256 n;
         for (uint256 i = offset; i < end; i++) {
