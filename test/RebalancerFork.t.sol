@@ -3,6 +3,7 @@ pragma solidity 0.8.37;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {IAggregatorV3} from "../src/interfaces/IAggregatorV3.sol";
@@ -108,6 +109,34 @@ contract RebalancerForkTest is Test {
         address[] memory list = r.dueOwners(0, 10);
         assertEq(list.length, 1);
         assertEq(list[0], buyer);
+    }
+
+    /// @notice Review I-4: de echte tokens hebben de decimalen waar de constructor op controleert (EURC 6, cbBTC 8,
+    ///         USDC 6), de deploy in `setUp` met de adressen van het deployscript slaagt dus, en een token met andere
+    ///         decimalen op die adressen wordt geweigerd.
+    function test_fork_constructorChecksTokenDecimals() public {
+        assertEq(IERC20Metadata(address(EURC)).decimals(), 6, "EURC");
+        assertEq(IERC20Metadata(address(CBBTC)).decimals(), 8, "cbBTC");
+        assertEq(IERC20Metadata(USDC).decimals(), 6, "USDC");
+        assertEq(address(r.EURC()), address(EURC));
+
+        Rebalancer.Deployment memory d = Rebalancer.Deployment({
+            eurc: address(EURC),
+            cbbtc: address(CBBTC),
+            usdc: USDC,
+            router: ROUTER,
+            feedCbbtcUsd: FEED_CBBTC_USD,
+            feedEurcUsd: FEED_EURC_USD,
+            sequencerFeed: SEQUENCER,
+            poolEurcUsdc: POOL_EURC_USDC,
+            poolUsdcCbbtc: POOL_USDC_CBBTC,
+            treasury: treasury
+        });
+        vm.mockCall(address(CBBTC), abi.encodeWithSignature("decimals()"), abi.encode(uint8(18)));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedTokenDecimals.selector, address(CBBTC)));
+        new Rebalancer(d);
+        vm.clearMockedCalls();
+        new Rebalancer(d);
     }
 
     /// @notice Testgat oracle 3: beide feeds zijn on-chain 8 decimalen, dragen de verwachte beschrijving en zijn

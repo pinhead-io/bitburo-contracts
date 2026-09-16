@@ -2,6 +2,7 @@
 pragma solidity 0.8.37;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -166,6 +167,11 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 private constant WAD = 1e18;
     uint256 private constant EURC_UNIT = 1e6;
     uint256 private constant CBBTC_UNIT = 1e8;
+    /// @dev Decimalen waar EURC_UNIT, CBBTC_UNIT, MIN_TRADE_FLOOR en KEEPER_REWARD_EURC op rekenen; USDC als tussenhop
+    ///      met 6. De constructor dwingt ze af (review I-4).
+    uint8 private constant EURC_DECIMALS = 6;
+    uint8 private constant CBBTC_DECIMALS = 8;
+    uint8 private constant USDC_DECIMALS = 6;
     uint256 private constant Q64 = 1 << 64;
     uint256 private constant Q96 = 1 << 96;
     uint256 private constant Q128 = 1 << 128;
@@ -247,6 +253,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///         de range), vóór deze run. Tijdelijk: in een volgend blok opnieuw proberen.
     error PoolTouchedThisBlock(address pool);
     error UnexpectedFeedDecimals(address feed);
+    /// @notice `token` heeft niet de decimalen waar het contract op rekent (EURC 6, cbBTC 8, USDC 6).
+    error UnexpectedTokenDecimals(address token);
     error NoOutput();
     /// @notice Het contract is buiten gebruik gesteld; alleen `setParams` met `active = false` en `sweep` kunnen nog.
     error ContractRetired();
@@ -303,6 +311,18 @@ contract Rebalancer is ReentrancyGuardTransient {
         // `_quote` deelt de twee feeds op elkaar; dat klopt alleen als beide dezelfde decimalen hebben.
         if (FEED_CBBTC_USD.decimals() != FEED_DECIMALS) revert UnexpectedFeedDecimals(d.feedCbbtcUsd);
         if (FEED_EURC_USD.decimals() != FEED_DECIMALS) revert UnexpectedFeedDecimals(d.feedEurcUsd);
+
+        // De eenheden en ondergrenzen hierboven zijn vaste getallen in basiseenheden; een token met andere decimalen
+        // (bijvoorbeeld verwisselde adressen) zou elke run met een factor 100 of meer verkeerd rekenen (review I-4).
+        // USDC zit in het swappad; de omrekening via de pool hangt niet van zijn decimalen af, maar een ander token
+        // op die plek is een deployfout.
+        _requireDecimals(d.eurc, EURC_DECIMALS);
+        _requireDecimals(d.cbbtc, CBBTC_DECIMALS);
+        _requireDecimals(d.usdc, USDC_DECIMALS);
+    }
+
+    function _requireDecimals(address token, uint8 expected) private view {
+        if (IERC20Metadata(token).decimals() != expected) revert UnexpectedTokenDecimals(token);
     }
 
     function _requireContract(address account) private view {

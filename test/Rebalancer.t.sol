@@ -1538,6 +1538,27 @@ contract RebalancerTest is RebalancerTestBase {
         new Rebalancer(d);
     }
 
+    /// @dev Review I-4: EURC 6, cbBTC 8 en USDC 6 decimalen; de eenheden en ondergrenzen zijn daarop vastgelegd.
+    function test_constructor_rejectsTokenWithWrongDecimals() public {
+        address[3] memory tokens = [address(eurc), address(cbbtc), address(usdc)];
+        uint8[3] memory wrong = [uint8(18), 6, 8];
+        for (uint256 i; i < 3; i++) {
+            vm.mockCall(tokens[i], abi.encodeWithSignature("decimals()"), abi.encode(wrong[i]));
+            vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedTokenDecimals.selector, tokens[i]));
+            new Rebalancer(_deployment());
+            vm.clearMockedCalls();
+        }
+        // Met de juiste decimalen gaat het door.
+        new Rebalancer(_deployment());
+    }
+
+    /// @dev Review I-4: een token zonder `decimals()` is geen geldig token voor dit contract; de deploy revert.
+    function test_constructor_rejectsTokenWithoutDecimals() public {
+        vm.mockCallRevert(address(usdc), abi.encodeWithSignature("decimals()"), "");
+        vm.expectRevert();
+        new Rebalancer(_deployment());
+    }
+
     function test_constructor_rejectsPoolWithWrongTokens() public {
         MockUniswapV3Pool wrong = new MockUniswapV3Pool(address(eurc), address(cbbtc));
         Rebalancer.Deployment memory d = _deployment();
