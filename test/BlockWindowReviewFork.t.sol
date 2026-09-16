@@ -56,7 +56,8 @@ contract RebalancerInRangeSizing is Rebalancer {
 ///         in de tick (in een vorig blok gezet). Pushes over de tickgrens moeten geweigerd worden met
 ///         PoolTouchedThisBlock.
 ///
-///         Eisen: bij de huidige protocolfee geen winst; bij protocolfee 0 minder dan 1 bp van de run.
+///         Eisen: zonder LP-aandeel geen winst; met een groot LP-aandeel (eerder blok, of JIT buiten de range) < 0,5 bp
+///         van de run bij de huidige protocolfee; bij protocolfee 0 minder dan 1 bp van de run.
 ///         Snelste herhalen: `FORK_BLOCK=51390800` (dan uit de RPC-cache).
 contract BlockWindowReviewForkTest is BlockWindowForkTest {
     uint8 internal constant PUSH_JIT = 1; // push, dan JIT in de range (zelfde blok)
@@ -608,7 +609,7 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
 
     /// @notice LP uit een eerder blok (99% van EURC/USDC, of 99,9% van beide pools), huidige protocolfee: extra winst
     ///         onder 0,5 bp van de run.
-    function test_scenario_lpPriorBlock_currentProtocolFee_noProfit() public {
+    function test_scenario_lpPriorBlock_currentProtocolFee_belowHalfBp() public {
         Summary memory sum = _newSummary();
         _cfg(LP_PRIOR, false, false, 990, 1);
         _grid(sum, false, false);
