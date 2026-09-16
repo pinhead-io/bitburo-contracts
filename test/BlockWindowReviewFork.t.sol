@@ -57,7 +57,8 @@ contract RebalancerInRangeSizing is Rebalancer {
 ///         PoolTouchedThisBlock.
 ///
 ///         Eisen: zonder LP-aandeel geen winst; met een groot LP-aandeel (eerder blok, of JIT buiten de range) < 0,5 bp
-///         van de run bij de huidige protocolfee; bij protocolfee 0 minder dan 1 bp van de run.
+///         van de run bij de huidige protocolfee; bij protocolfee 0 minder dan 2 bp van de run (review F-4: een push
+///         binnen de tick is zonder observatie niet te zien, dus hooguit ~1 tick per geduwde pool).
 ///         Snelste herhalen: `FORK_BLOCK=51390800` (dan uit de RPC-cache).
 contract BlockWindowReviewForkTest is BlockWindowForkTest {
     uint8 internal constant PUSH_JIT = 1; // push, dan JIT in de range (zelfde blok)
@@ -323,7 +324,7 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
                 if (b.okN == 0) continue;
                 sum.comparisons += b.okN;
                 if (b.bp > sum.maxBpX100) sum.maxBpX100 = b.bp;
-                if (feeOff) assertLt(b.bp, 100, "extra winst 1 bp of meer bij protocolfee 0");
+                if (feeOff) assertLt(b.bp, 200, "extra winst 2 bp of meer bij protocolfee 0");
                 // Een aanvaller met een groot LP-aandeel mag hooguit < 0,5 bp van de run halen (door Arjan
                 // geaccepteerd; de uitkomst schuift per blok met de poolstand). Zonder LP-aandeel: geen winst.
                 else if (kind == LP_PRIOR || kind == OOR_JIT) assertLt(b.bp, 50, "LP: extra winst 0,5 bp of meer");
@@ -624,8 +625,8 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
     }
 
     /// @notice LP uit een eerder blok alleen in EURC/USDC (99%, of 99,9% met LP in beide pools), protocolfee 0 (zoals
-    ///         `test_review_jitPushProfit_protocolFeeOff` uit de review): extra winst onder 1 bp van de run.
-    function test_scenario_lpPriorBlock_protocolFeeOff_belowOneBp_pushEurcPool() public {
+    ///         `test_review_jitPushProfit_protocolFeeOff` uit de review): extra winst onder 2 bp van de run (review F-4).
+    function test_scenario_lpPriorBlock_protocolFeeOff_belowTwoBp_pushEurcPool() public {
         Summary memory sum = _newSummary();
         _cfg(LP_PRIOR, false, false, 990, 1);
         _grid(sum, true, false);
@@ -635,18 +636,18 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         _grid(sum, true, true);
         _summary("LP eerder blok, protocolfee 0, push EURC/USDC", sum);
         assertGt(sum.comparisons, 0, "niets vergeleken");
-        assertLt(sum.maxBpX100, 100);
+        assertLt(sum.maxBpX100, 200);
     }
 
     /// @notice Idem met LP en push in beide pools.
-    function test_scenario_lpPriorBlock_protocolFeeOff_belowOneBp_pushBothPools() public {
+    function test_scenario_lpPriorBlock_protocolFeeOff_belowTwoBp_pushBothPools() public {
         Summary memory sum = _newSummary();
         _cfg(LP_PRIOR, true, true, 999, 1);
         _grid(sum, true, false);
         _grid(sum, true, true);
         _summary("LP eerder blok, protocolfee 0, push beide pools", sum);
         assertGt(sum.comparisons, 0, "niets vergeleken");
-        assertLt(sum.maxBpX100, 100);
+        assertLt(sum.maxBpX100, 200);
     }
 
     /// @notice Duwen zonder LP, in één of beide pools: geen winst.
@@ -677,14 +678,14 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         assertLt(sum.maxBpX100, 50);
     }
 
-    /// @notice Idem bij protocolfee 0: < 1 bp.
+    /// @notice Idem bij protocolfee 0: < 2 bp.
     function test_scenario_jitOutOfRange_protocolFeeOff() public {
         Summary memory sum = _newSummary();
         _cfg(OOR_JIT, true, true, 999, 1);
         _grid(sum, true, true);
         _summary("JIT buiten de range, protocolfee 0", sum);
         assertGt(sum.comparisons, 0, "niets vergeleken");
-        assertLt(sum.maxBpX100, 100);
+        assertLt(sum.maxBpX100, 200);
     }
 
     /// @notice Twee owners in één blok na één push in beide pools, zonder LP: geen winst.
@@ -698,7 +699,7 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
     }
 
     /// @notice Twee owners in één blok met LP uit een eerder blok (99,9% van beide pools), push in EURC/USDC: < 0,5 bp
-    ///         bij de huidige protocolfee, < 1 bp bij protocolfee 0.
+    ///         bij de huidige protocolfee, < 2 bp bij protocolfee 0.
     function test_scenario_twoOwnersOneBlock_lpPriorBlock() public {
         Summary memory cur = _newSummary();
         _cfg(LP_PRIOR, true, false, 999, 2);
@@ -711,13 +712,185 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         assertGt(off.comparisons, 0, "niets vergeleken");
     }
 
-    /// @notice Twee owners, LP en push in beide pools, protocolfee 0: < 1 bp.
+    /// @notice Twee owners, LP en push in beide pools, protocolfee 0: < 2 bp.
     function test_scenario_twoOwnersOneBlock_lpPriorBlock_pushBothPools_protocolFeeOff() public {
         Summary memory sum = _newSummary();
         _cfg(LP_PRIOR, true, true, 999, 2);
         _grid(sum, true, true);
         _summary("twee owners, LP en push beide pools, protocolfee 0", sum);
         assertGt(sum.comparisons, 0, "niets vergeleken");
+    }
+
+    // ─── Review F-4: runs rond de capaciteit van het venster ─────────────────────────────────────────────────
+
+    /// @dev Grootste run (EURC) die het venster nu toelaat na een push tot de ongunstige tickrand in de pools waar
+    ///      geduwd wordt: `isDue` van een owner met een correctie die ruim boven elke capaciteit ligt. Geeft de
+    ///      capaciteit zonder push als er geen ruimte voor een push is.
+    function _capacity(bool isBuy, uint256 snap) internal returns (uint256 capPushed, uint256 capPlain) {
+        vm.revertToState(snap);
+        _freshFeeds(0);
+        _fund(victim, isBuy, 5_000_000e6);
+        (, int256 plain) = r.isDue(victim);
+        capPlain = uint256(plain < 0 ? -plain : plain);
+        for (uint256 i; i < _nPush(); i++) {
+            uint160 limit = _pushLimit(pools[i], isBuy, 1, 0);
+            if (limit != 0) atk.swapTo(pools[i], isBuy, limit);
+        }
+        (, int256 pushed) = r.isDue(victim);
+        capPushed = uint256(pushed < 0 ? -pushed : pushed);
+        vm.revertToState(snap);
+    }
+
+    /// @dev Raster rond de capaciteit: LP uit een eerder blok (aandeel `phi` promille) en push in beide pools, koers in
+    ///      het vorige blok op de voor de aanvaller gunstigste plek in de tick, correcties van 50% tot 102% van de
+    ///      capaciteit na de push plus de capaciteit zonder push, pushes tot de tickrand en 0,125 / 0,25 / 0,5 bp vanaf
+    ///      de koers. Geeft de hoogste extra winst in bp x100 van de run.
+    function _capacityGrid(bool feeOff, uint256 phi) internal returns (int256 worst) {
+        worst = type(int256).min;
+        uint256 snap0 = vm.snapshotState();
+        uint256 compared;
+        for (uint256 d; d < 2; d++) {
+            bool isBuy = d == 0;
+            vm.revertToState(snap0);
+            _cfg(LP_PRIOR, true, true, phi, 1);
+            if (feeOff) _setProtocolFeeOff();
+            _edgeStart(isBuy);
+            _mintPrior();
+            uint256 snap = vm.snapshotState();
+            (uint256 capPushed, uint256 capPlain) = _capacity(isBuy, snap);
+            uint256[9] memory corrs = [
+                capPushed * 500 / 1000,
+                capPushed * 800 / 1000,
+                capPushed * 900 / 1000,
+                capPushed * 950 / 1000,
+                capPushed * 980 / 1000,
+                capPushed * 995 / 1000,
+                capPushed,
+                capPushed * 1020 / 1000,
+                capPlain
+            ];
+            uint8[4] memory modes = [uint8(1), 0, 0, 0];
+            uint256[4] memory ks = [uint256(0), 25, 50, 100];
+            for (uint256 c; c < corrs.length; c++) {
+                if (corrs[c] < 20e6) continue;
+                vm.revertToState(snap);
+                Res memory base = _one(isBuy, corrs[c], false, 0, 0);
+                for (uint256 j; j < modes.length; j++) {
+                    vm.revertToState(snap);
+                    Res memory a = _one(isBuy, corrs[c], true, modes[j], ks[j]);
+                    if (a.crossed) {
+                        assertEq(a.okCount, 0, "push over de tickgrens kwam door");
+                        continue;
+                    }
+                    if (a.okCount == 0 || base.okCount == 0 || a.run == 0) continue;
+                    compared++;
+                    int256 extra = a.pnl - base.pnl;
+                    // Maakt de push het venster kleiner, dan is de run met push kleiner dan zonder. Het verschil in PnL
+                    // bevat dan ook wat de LP op het extra volume van de grotere run verdient of verliest, en dat heeft
+                    // met de push niets te maken. Vergelijk daarom met dezelfde opzet zonder push bij dezelfde run.
+                    if (base.run > a.run + a.run / 10_000) {
+                        _logUnequal(feeOff, isBuy, base.run, a.run, extra);
+                        vm.revertToState(snap);
+                        Res memory same = _one(isBuy, a.run, false, 0, 0);
+                        assertEq(same.okCount, 1, "vergelijkingsrun zonder push faalde");
+                        assertApproxEqRel(same.run, a.run, 0.0001e18, "vergelijkingsrun niet even groot");
+                        extra = a.pnl - same.pnl;
+                    }
+                    int256 bp = extra * 1_000_000 / int256(a.run);
+                    if (bp > worst) worst = bp;
+                    _logCapacity(feeOff, isBuy, corrs[c], capPushed, j, a.run, extra, bp);
+                }
+            }
+        }
+        vm.revertToState(snap0);
+        assertGt(compared, 0, "niets vergeleken: de test bewijst niets");
+    }
+
+    function _logCapacity(
+        bool feeOff,
+        bool isBuy,
+        uint256 corr,
+        uint256 cap,
+        uint256 push,
+        uint256 run,
+        int256 extra,
+        int256 bp
+    ) internal view {
+        console.log(
+            string.concat(
+                string.concat(
+                    "CAP,feeOff=",
+                    feeOff ? "1" : "0",
+                    ",phiPm=",
+                    vm.toString(phiPm),
+                    isBuy ? ",koop" : ",verkoop",
+                    ",corr=",
+                    vm.toString(corr),
+                    ",capNaPush=",
+                    vm.toString(cap)
+                ),
+                string.concat(
+                    ",push=",
+                    vm.toString(push),
+                    ",run=",
+                    vm.toString(run),
+                    ",extra=",
+                    vm.toString(extra),
+                    ",bpx100=",
+                    vm.toString(bp)
+                )
+            )
+        );
+    }
+
+    function _logUnequal(bool feeOff, bool isBuy, uint256 baseRun, uint256 run, int256 extra) internal view {
+        console.log(
+            string.concat(
+                "CAP_ONGELIJK,feeOff=",
+                feeOff ? "1" : "0",
+                ",phiPm=",
+                vm.toString(phiPm),
+                isBuy ? ",koop" : ",verkoop",
+                ",runZonderPush=",
+                vm.toString(baseRun),
+                ",runMetPush=",
+                vm.toString(run),
+                ",extraOngelijk=",
+                vm.toString(extra),
+                ",bpx100Ongelijk=",
+                vm.toString(extra * 1_000_000 / int256(run))
+            )
+        );
+    }
+
+    /// @notice Review F-4, protocolfee 0: een LP met 99% of 99,9% van beide pools en runs rond de capaciteit van het
+    ///         venster. Een push binnen de tick is zonder observatie niet te zien, dus hooguit ~1 tick per geduwde pool
+    ///         verschuift de koers van het slachtoffer; eis < 2 bp van de run (gemeten tot +1,93 bp in de review).
+    function test_scenario_lpNearCapacity_protocolFeeOff_belowTwoBp() public {
+        int256 w990 = _capacityGrid(true, 990);
+        int256 w999 = _capacityGrid(true, 999);
+        console.log("F-4 hoogste extra winst, protocolfee 0 (bp x100 van de run), aandeel 99% en 99,9%:");
+        console.logInt(w990);
+        console.logInt(w999);
+        assertLt(w990, 200, "protocolfee 0, aandeel 99%: 2 bp of meer van de run");
+        assertLt(w999, 200, "protocolfee 0, aandeel 99,9%: 2 bp of meer van de run");
+    }
+
+    /// @notice Review F-4, huidige protocolfee (`feeProtocol` 68 = 1/4 op beide pools, gelezen op de fork): dezelfde
+    ///         rasters rond de capaciteit, eis < 0,5 bp van de run.
+    function test_scenario_lpNearCapacity_currentProtocolFee_belowHalfBp() public {
+        (,,,,, uint8 fp1,) = IUniswapV3Pool(P1).slot0();
+        (,,,,, uint8 fp2,) = IUniswapV3Pool(P2).slot0();
+        console.log("feeProtocol EURC/USDC en USDC/cbBTC:", fp1, fp2);
+        assertGt(fp1, 0, "opzet: protocolfee staat al op 0");
+        assertGt(fp2, 0, "opzet: protocolfee staat al op 0");
+        int256 w990 = _capacityGrid(false, 990);
+        int256 w999 = _capacityGrid(false, 999);
+        console.log("F-4 hoogste extra winst, huidige protocolfee (bp x100 van de run), aandeel 99% en 99,9%:");
+        console.logInt(w990);
+        console.logInt(w999);
+        assertLt(w990, 50, "huidige protocolfee, aandeel 99%: 0,5 bp of meer van de run");
+        assertLt(w999, 50, "huidige protocolfee, aandeel 99,9%: 0,5 bp of meer van de run");
     }
 
     /// @notice Twee owners in één blok met JIT in de range: beide geweigerd.
