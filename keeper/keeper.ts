@@ -8,9 +8,16 @@
  * revert niet elke run opnieuw gas kost. De beloning (0,05 EURC per run) gaat naar REWARD_TO, standaard het
  * eigen adres. Het script beslist niets over bedragen of richting: het contract bepaalt of, wat en hoeveel.
  *
+ * Blokvenster (audit M-1): een pool mag binnen één blok maar 6 bp van zijn beginkoers afwijken, inclusief de run.
+ * - Een revert met BlockMoveExceeded of BlockStartUnknown is tijdelijk: het script probeert die owner opnieuw in
+ *   een volgend blok (tot BLOCK_RETRIES keer) en geeft geen cool-down.
+ * - Na een geslaagde run wacht het script op een nieuw blok voordat het de volgende owner leest of simuleert; in
+ *   hetzelfde blok is het venster meestal vol en zou een eth_call dat onterecht als "niet due" melden.
+ * Grote correcties gaan in delen die 10 minuten na elkaar mogen. Draai dit script daarom elke 10 minuten.
+ *
  * Gebruik:
  *   RPC_URL=https://mainnet.base.org REBALANCER=0x… KEEPER_PRIVATE_KEY=0x… bun run keeper.ts
- * Optioneel: REWARD_TO=0x…  PAGE_SIZE=50  DRY_RUN=1  MIN_RUN_EURC=20
+ * Optioneel: REWARD_TO=0x…  PAGE_SIZE=50  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
  *            COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600  COOLDOWN_MAX_SECONDS=86400
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -21,8 +28,11 @@ import {
   type CooldownState,
   clearFailure,
   cooldownUntil,
+  failureAction,
   formatEurc,
+  isBlockWindowRevert,
   isCoolingDown,
+  mustWaitForNextBlock,
   parseCooldownState,
   pruneExpired,
   recordFailure,
@@ -34,6 +44,18 @@ const abi = parseAbi([
   "function dueOwners(uint256 offset, uint256 limit) view returns (address[])",
   "function isDue(address owner) view returns (bool due, int256 eurcDelta)",
   "function execute(address owner, address rewardTo)",
+  // Custom errors, zodat viem de revert-reden kan decoderen.
+  "error BlockMoveExceeded(address pool)",
+  "error BlockStartUnknown(address pool)",
+  "error ContractRetired()",
+  "error Inactive()",
+  "error InvalidFeedAnswer(address feed)",
+  "error NoOutput()",
+  "error NotDue()",
+  "error NothingToDo()",
+  "error SequencerDown()",
+  "error SpotDeviatesFromOracle(uint256 spot, uint256 oracle)",
+  "error StaleFeed(address feed)",
 ]);
 
 const env = (name: string, fallback?: string): string => {
@@ -47,6 +69,8 @@ const rebalancer = env("REBALANCER") as Address;
 const pageSize = BigInt(env("PAGE_SIZE", "50"));
 const dryRun = process.env.DRY_RUN === "1";
 const minRunEurc = Number(env("MIN_RUN_EURC", "20"));
+const blockRetries = Number(env("BLOCK_RETRIES", "3"));
+const blockWaitSeconds = Number(env("BLOCK_WAIT_SECONDS", "30"));
 const cooldownFile = env("COOLDOWN_FILE", "./keeper-cooldowns.json");
 const cooldownPolicy = {
   baseSeconds: Number(env("COOLDOWN_SECONDS", "3600")),
@@ -54,6 +78,7 @@ const cooldownPolicy = {
 };
 if (!isAddress(rebalancer)) throw new Error("REBALANCER is geen geldig adres");
 if (!Number.isFinite(minRunEurc) || minRunEurc < 0) throw new Error("MIN_RUN_EURC moet een getal >= 0 zijn");
+if (!Number.isInteger(blockRetries) || blockRetries < 0) throw new Error("BLOCK_RETRIES moet een geheel getal >= 0 zijn");
 
 const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
 const account = dryRun ? undefined : privateKeyToAccount(env("KEEPER_PRIVATE_KEY") as Hex);
@@ -64,16 +89,43 @@ const read = <T>(functionName: "ownerCount" | "dueOwners" | "isDue", args: reado
   // biome-ignore lint/suspicious/noExplicitAny: viem's ABI-generics zijn te strikt voor een gedeelde helper
   publicClient.readContract({ address: rebalancer, abi, functionName, args } as any) as Promise<T>;
 
+const simulateExecute = (owner: Address, blockNumber?: bigint) =>
+  publicClient.simulateContract({
+    address: rebalancer,
+    abi,
+    functionName: "execute",
+    args: [owner, rewardTo],
+    account,
+    ...(blockNumber === undefined ? {} : { blockNumber }),
+  });
+
+const revertOf = (error: unknown): ContractFunctionRevertedError | undefined => {
+  if (!(error instanceof BaseError)) return undefined;
+  const reverted = error.walk((e) => e instanceof ContractFunctionRevertedError);
+  return reverted instanceof ContractFunctionRevertedError ? reverted : undefined;
+};
+
+/** Naam van de contract-error (bijvoorbeeld "BlockMoveExceeded"), als viem die kon decoderen. */
+const errorNameOf = (error: unknown): string | undefined => revertOf(error)?.data?.errorName;
+
 /** Eerste regel van een viem-fout, met de contract-error als die er is (bijvoorbeeld NotDue()). */
 const describeError = (error: unknown): string => {
-  if (error instanceof BaseError) {
-    const reverted = error.walk((e) => e instanceof ContractFunctionRevertedError);
-    if (reverted instanceof ContractFunctionRevertedError && reverted.data?.errorName) {
-      return `${reverted.data.errorName}(${(reverted.data.args ?? []).join(", ")})`;
-    }
-    return error.shortMessage;
+  const reverted = revertOf(error);
+  if (reverted?.data?.errorName) {
+    return `${reverted.data.errorName}(${(reverted.data.args ?? []).join(", ")})`;
   }
+  if (error instanceof BaseError) return error.shortMessage;
   return (error as Error).message.split("\n")[0];
+};
+
+/** Wacht tot er een blok ná `block` is (Base: ~2 s per blok), hooguit BLOCK_WAIT_SECONDS. */
+const waitForBlockAfter = async (block: bigint | null): Promise<boolean> => {
+  const deadline = Date.now() + blockWaitSeconds * 1000;
+  for (;;) {
+    if (!mustWaitForNextBlock(await publicClient.getBlockNumber({ cacheTime: 0 }), block)) return true;
+    if (Date.now() >= deadline) return false;
+    await Bun.sleep(1000);
+  }
 };
 
 let cooldowns: CooldownState = existsSync(cooldownFile) ? parseCooldownState(readFileSync(cooldownFile, "utf8")) : {};
@@ -88,6 +140,90 @@ const failed = (owner: Address, error: unknown) => {
   console.error(`${owner}: ${message}; cool-down tot ${new Date(entry.until * 1000).toISOString()} (mislukking ${entry.failures})`);
 };
 
+/** Blok van de laatste geslaagde run in deze keeper-run; de volgende owner pas in een later blok. */
+let lastRunBlock: bigint | null = null;
+
+type Outcome = "executed" | "skipped" | "dry-run";
+
+/** Eén owner: lezen, simuleren en uitvoeren, met nieuwe pogingen in een volgend blok bij een vol blokvenster. */
+const handleOwner = async (owner: Address): Promise<Outcome> => {
+  let retryAfterBlock: bigint | null = null;
+  for (let attempt = 0; ; attempt += 1) {
+    const waitAfter = retryAfterBlock ?? lastRunBlock;
+    if (!(await waitForBlockAfter(waitAfter))) {
+      console.log(`${owner}: overgeslagen, geen nieuw blok binnen ${blockWaitSeconds} s`);
+      return "skipped";
+    }
+    const block = await publicClient.getBlockNumber({ cacheTime: 0 });
+    const [due, eurcDelta] = await read<readonly [boolean, bigint]>("isDue", [owner]);
+    const direction = eurcDelta > 0n ? "koop" : "verkoop";
+    const eurc = formatEurc(eurcDelta < 0n ? -eurcDelta : eurcDelta);
+    if (due) {
+      const sizeReason = runSizeSkipReason(eurcDelta, minRunEurc);
+      if (sizeReason !== null) {
+        console.log(`${owner}: overgeslagen, ${sizeReason}`);
+        return "skipped";
+      }
+    }
+
+    // Eerst simuleren: een owner die revert (dust dat op de route naar 0 afrondt, blacklist, te krappe
+    // slippage) blijft in dueOwners staan en zou anders elke run ~160k gas kosten zonder beloning. Ook als isDue
+    // false zegt: dat kan een vol blokvenster zijn, en alleen de simulatie geeft de reden.
+    let request: Awaited<ReturnType<typeof simulateExecute>>["request"] | undefined;
+    let failure: unknown;
+    try {
+      ({ request } = await simulateExecute(owner));
+    } catch (error) {
+      failure = error;
+    }
+
+    if (!due && !isBlockWindowRevert(errorNameOf(failure))) {
+      console.log(`${owner}: niet meer due${failure === undefined ? "" : ` (${describeError(failure)})`}`);
+      return "skipped";
+    }
+
+    if (failure === undefined && request !== undefined) {
+      if (dryRun || !walletClient) {
+        console.log(`[dry-run] ${owner}: ${direction} ≈ ${eurc} EURC (simulatie ok)`);
+        return "dry-run";
+      }
+      try {
+        const hash = await walletClient.writeContract(request);
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+        console.log(`${owner}: ${direction} ≈ ${eurc} EURC → ${receipt.status} ${hash}`);
+        lastRunBlock = receipt.blockNumber;
+        if (receipt.status === "success") {
+          cooldowns = clearFailure(cooldowns, owner);
+          saveCooldowns();
+          return "executed";
+        }
+        // Gerevert na een geslaagde simulatie: de staat veranderde in de tussentijd. Simuleer op het blok van de
+        // transactie opnieuw voor de reden (bijvoorbeeld een swap van iemand anders die het venster vulde).
+        failure = new Error(`transactie ${hash} is gerevert`);
+        try {
+          await simulateExecute(owner, receipt.blockNumber);
+        } catch (error) {
+          if (errorNameOf(error) !== undefined) failure = error;
+        }
+      } catch (error) {
+        failure = error;
+      }
+    }
+
+    const action = failureAction(errorNameOf(failure), attempt, blockRetries);
+    if (action === "fail") {
+      failed(owner, failure);
+      return "skipped";
+    }
+    if (action === "skip") {
+      console.log(`${owner}: ${describeError(failure)} na ${blockRetries} nieuwe pogingen; geen cool-down`);
+      return "skipped";
+    }
+    console.log(`${owner}: ${describeError(failure)}; opnieuw in een volgend blok (poging ${attempt + 2})`);
+    retryAfterBlock = lastRunBlock !== null && lastRunBlock > block ? lastRunBlock : block;
+  }
+};
+
 const checked = await read<bigint>("ownerCount");
 let executed = 0;
 let skipped = 0;
@@ -100,56 +236,9 @@ for (let offset = 0n; offset < checked; offset += pageSize) {
       skipped += 1;
       continue;
     }
-    const [due, eurcDelta] = await read<readonly [boolean, bigint]>("isDue", [owner]);
-    if (!due) {
-      console.log(`${owner}: niet meer due`);
-      skipped += 1;
-      continue;
-    }
-    const direction = eurcDelta > 0n ? "koop" : "verkoop";
-    const eurc = formatEurc(eurcDelta < 0n ? -eurcDelta : eurcDelta);
-    const sizeReason = runSizeSkipReason(eurcDelta, minRunEurc);
-    if (sizeReason !== null) {
-      console.log(`${owner}: overgeslagen, ${sizeReason}`);
-      skipped += 1;
-      continue;
-    }
-
-    // Eerst simuleren: een owner die revert (dust dat op de route naar 0 afrondt, blacklist, te krappe
-    // slippage) blijft in dueOwners staan en zou anders elke run ~160k gas kosten zonder beloning.
-    let request: Parameters<NonNullable<typeof walletClient>["writeContract"]>[0];
-    try {
-      ({ request } = await publicClient.simulateContract({
-        address: rebalancer,
-        abi,
-        functionName: "execute",
-        args: [owner, rewardTo],
-        account,
-      }));
-    } catch (error) {
-      failed(owner, error);
-      skipped += 1;
-      continue;
-    }
-
-    if (dryRun || !walletClient) {
-      console.log(`[dry-run] ${owner}: ${direction} ≈ ${eurc} EURC (simulatie ok)`);
-      continue;
-    }
-    try {
-      const hash = await walletClient.writeContract(request);
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-      console.log(`${owner}: ${direction} ≈ ${eurc} EURC → ${receipt.status} ${hash}`);
-      if (receipt.status === "success") {
-        executed += 1;
-        cooldowns = clearFailure(cooldowns, owner);
-        saveCooldowns();
-      } else {
-        failed(owner, new Error(`transactie ${hash} is gerevert`));
-      }
-    } catch (error) {
-      failed(owner, error);
-    }
+    const outcome = await handleOwner(owner);
+    if (outcome === "executed") executed += 1;
+    if (outcome === "skipped") skipped += 1;
   }
 }
 

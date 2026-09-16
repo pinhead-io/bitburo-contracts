@@ -3,8 +3,11 @@ import type { Address } from "viem";
 import {
   EURC_UNIT,
   clearFailure,
+  failureAction,
   formatEurc,
+  isBlockWindowRevert,
   isCoolingDown,
+  mustWaitForNextBlock,
   parseCooldownState,
   pruneExpired,
   recordFailure,
@@ -29,6 +32,37 @@ describe("runSizeSkipReason", () => {
 
   test("a minimum of 0 keeps everything", () => {
     expect(runSizeSkipReason(1n, 0)).toBeNull();
+  });
+});
+
+describe("block window reverts", () => {
+  test("only the block window errors count as temporary", () => {
+    expect(isBlockWindowRevert("BlockMoveExceeded")).toBe(true);
+    expect(isBlockWindowRevert("BlockStartUnknown")).toBe(true);
+    expect(isBlockWindowRevert("SpotDeviatesFromOracle")).toBe(false);
+    expect(isBlockWindowRevert("NotDue")).toBe(false);
+    expect(isBlockWindowRevert(undefined)).toBe(false);
+  });
+
+  test("a block window revert is retried in a next block, then skipped without a cool-down", () => {
+    expect(failureAction("BlockMoveExceeded", 0, 3)).toBe("retry");
+    expect(failureAction("BlockMoveExceeded", 2, 3)).toBe("retry");
+    expect(failureAction("BlockMoveExceeded", 3, 3)).toBe("skip");
+    expect(failureAction("BlockStartUnknown", 0, 0)).toBe("skip");
+  });
+
+  test("every other revert is a real failure for the cool-down", () => {
+    expect(failureAction("SpotDeviatesFromOracle", 0, 3)).toBe("fail");
+    expect(failureAction(undefined, 0, 3)).toBe("fail");
+  });
+});
+
+describe("mustWaitForNextBlock", () => {
+  test("waits while the latest block is the block of the last successful run", () => {
+    expect(mustWaitForNextBlock(100n, null)).toBe(false);
+    expect(mustWaitForNextBlock(100n, 100n)).toBe(true);
+    expect(mustWaitForNextBlock(99n, 100n)).toBe(true);
+    expect(mustWaitForNextBlock(101n, 100n)).toBe(false);
   });
 });
 

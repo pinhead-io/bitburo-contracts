@@ -14,6 +14,42 @@ export const runSizeSkipReason = (eurcDelta: bigint, minRunEurc: number): string
   return null;
 };
 
+/**
+ * Reverts van het blokvenster (audit M-1). Die zijn tijdelijk: een pool is in dit blok al te ver van zijn
+ * beginkoers bewogen, door iemand anders of door een eerdere run. In een volgend blok lukt het meestal wel, dus
+ * ze tellen niet als mislukking voor de cool-down.
+ */
+export const BLOCK_WINDOW_ERRORS: readonly string[] = ["BlockMoveExceeded", "BlockStartUnknown"];
+
+export const isBlockWindowRevert = (errorName: string | undefined): boolean =>
+  errorName !== undefined && BLOCK_WINDOW_ERRORS.includes(errorName);
+
+/**
+ * Wat te doen na een mislukte simulatie of transactie voor een owner, bij poging `attempt` (0 = eerste):
+ * - "retry": blokvenster vol, probeer opnieuw in een volgend blok;
+ * - "skip": blokvenster na `maxRetries` nieuwe pogingen nog steeds vol; niets boeken, de volgende keeper-run
+ *   probeert het weer;
+ * - "fail": een echte mislukking, die telt voor de cool-down.
+ */
+export const failureAction = (
+  errorName: string | undefined,
+  attempt: number,
+  maxRetries: number,
+): "retry" | "skip" | "fail" => {
+  if (!isBlockWindowRevert(errorName)) {
+    return "fail";
+  }
+  return attempt < maxRetries ? "retry" : "skip";
+};
+
+/**
+ * Twee runs in hetzelfde blok delen het blokvenster; na een run is er in dat blok meestal geen ruimte meer. Een
+ * `eth_call` op dat blok zou de volgende owner daarom onterecht als niet due of als BlockMoveExceeded zien. Lees
+ * en simuleer de volgende owner dus pas in een blok ná de laatste geslaagde run.
+ */
+export const mustWaitForNextBlock = (latestBlock: bigint, lastRunBlock: bigint | null): boolean =>
+  lastRunBlock !== null && latestBlock <= lastRunBlock;
+
 export const formatEurc = (baseUnits: bigint): string => {
   const whole = baseUnits / EURC_UNIT;
   const fraction = (baseUnits % EURC_UNIT).toString().padStart(6, "0").replace(/0+$/, "");
@@ -24,6 +60,7 @@ export const formatEurc = (baseUnits: bigint): string => {
  * Cool-down per owner na een mislukte execute. Het contract onthoudt mislukkingen niet (lastExecutedAt
  * wordt alleen bij succes gezet), dus een owner die structureel revert blijft due; zonder geheugen
  * zou elke run opnieuw gas kosten. De wachttijd verdubbelt per opeenvolgende mislukking tot `max`.
+ * Reverts van het blokvenster tellen niet mee (zie `failureAction`).
  */
 export type CooldownEntry = {
   /** Unix-seconden tot wanneer de owner wordt overgeslagen. */
