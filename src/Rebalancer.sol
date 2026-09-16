@@ -50,7 +50,8 @@ import {TickMath} from "./libraries/TickMath.sol";
  *         verandert; daarna is de pool in dit blok aangeraakt.
  *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers op SIZING_BPS van
  *         de resterende ruimte tot de vensterrand blijft, gerekend met de kleinste liquiditeit tot die rand (ook
- *         voorbij een tickgrens in het venster, review L-1). Liquiditeit buiten de range maakt een run nooit groter.
+ *         voorbij een tickgrens in het venster, review L-1). Liquiditeit buiten de range maakt een run nooit groter dan
+ *         de in-range liquiditeit toelaat (wel kan ze een klif opheffen die de run eerst kleiner maakte).
  *         Past de correctie daar niet in, dan gaat hij in delen (zie `rounds`).
  *      3. Spot tegen Chainlink. Vóór én na elke swap moet de spot van beide pools binnen
  *         MAX_SPOT_DEVIATION_BPS van de Chainlink-koers liggen, en `amountOutMinimum` volgt uit Chainlink en
