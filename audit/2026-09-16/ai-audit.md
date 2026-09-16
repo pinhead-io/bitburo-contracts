@@ -4,25 +4,25 @@ Zelf-audit vóór de externe audit. Dit rapport bouwt voort op `audit/2026-09-15
 
 ## Samenvatting
 
-- **Één open probleem met verlies voor gebruikers: M-1 (Medium).** Wie `execute` aanroept, kan zijn eigen run nog steeds winstgevend sandwichen. De post-swap-check verkleint de winst, maar sluit hem niet. Bevestigd met fork-tests.
+- **In deze ronde één open probleem met verlies voor gebruikers gevonden in `src/`: M-1 (Medium).** Wie `execute` aanroept, kan zijn eigen run nog steeds winstgevend sandwichen. De post-swap-check verkleint de winst, maar sluit hem niet. Bevestigd met fork-tests.
 - **Drie kleine punten (Low), zonder verlies:** L-A, L-B, L-C.
 - **Compiler van 0.8.28 naar 0.8.37**, zes bekende compilerbugs weg. Het contract werd waarschijnlijk door geen ervan geraakt.
 - **Tien leads** om met de hand te controleren, plus wat is gecontroleerd en in orde bevonden.
-- **Nog niet gedaan:** nagaan welke punten uit het rapport van 2026-09-15 inmiddels zijn opgelost (zie [Volgende stappen](#volgende-stappen)).
+- **Nog niet gedaan:** nagaan welke punten uit het rapport van 2026-09-15 inmiddels zijn opgelost. Sommige daarvan zitten buiten het contract (bijvoorbeeld H-1 in de Privy-policy) en kunnen ook verlies voor gebruikers veroorzaken. Zie [Volgende stappen](#volgende-stappen).
 
 ## Scope en context
 
 - **Code:** `src/Rebalancer.sol` op branch `chore/solc-0.8.37`, commit `48cc7f9` (solc 0.8.37, `via_ir = true`, `evm_version = cancun`, OpenZeppelin 5.6.1). Regelnummers in dit rapport verwijzen naar die commit.
 - **Wat het contract doet:** gebruikers geven het een allowance op EURC en cbBTC en stellen met `setParams` een doelverdeling in. Iedereen mag `execute(owner, rewardTo)` aanroepen zodra een owner due is. Het contract prijst de wallet met Chainlink (cbBTC/USD en EURC/USD), controleert dat de Uniswap v3-pools EURC/USDC en USDC/cbBTC (0,05%-tier) binnen 0,5% van die prijs liggen, en swapt via SwapRouter02. Het houdt 0,25% fee in EURC; daarvan krijgt de aanroeper maximaal 0,05 EURC en de rest gaat naar de treasury.
 - **Live contract:** `0xE577D68948883FDF8e2694e38dF656D2D9CA2104`, uitgerold vanaf commit `f8a6d49` (solc 0.8.28, nog zonder `retire()` en met het CRE-oppervlak; zie `README.md`). Nagekeken met `git show f8a6d49:src/Rebalancer.sol`: **M-1, L-A, L-B en L-C zitten ook in het live contract.** Een fix vraagt dus een nieuwe deploy.
-- **Keepers:** er zijn twee externe wekkers die `dueOwners`/`isDue` lezen en `execute` aanroepen: `keeper/keeper.ts` in deze repo en `app/Console/Commands/RunKeeperCommand.php` in de app-repo `pinheadio/bitburo`. Chainlink CRE bestaat niet meer (verwijderd in v1.1.0).
+- **Keepers:** er zijn twee externe wekkers die `dueOwners`/`isDue` lezen en `execute` aanroepen: `keeper/keeper.ts` in deze repo en `app/Console/Commands/RunKeeperCommand.php` in de app-repo `pinheadio/bitburo` (lokaal `~/Code/bitburo`). Paden die met `app/` of `config/` beginnen, zijn relatief aan die app-repo. Chainlink CRE bestaat niet meer (verwijderd in v1.1.0).
 
 ## Gebruikte tools
 
 | Tool | Versie | Resultaat | Output |
 |---|---|---|---|
 | Slither | 0.11.6 | 30 meldingen, allemaal by design of false positive | `slither.txt`, `triage.md` |
-| Aderyn | 0.6.8 | 0 High, 2 Low (stijl) | `aderyn.md`, `triage.md` |
+| Aderyn | 0.6.8 | 0 High, 2 Low (L-1 stijl, L-2 by design) | `aderyn.md`, `triage.md` |
 | pashov/skills `solidity-auditor` | commit `c577eb7` | 11 van 12 perspectieven afgerond (model Opus); flow-gap viel twee keer uit door een API-fout | dit rapport |
 | QuillShield `oracle-flashloan-analysis` | commit `8bdd3c0` | Chainlink-validatie volledig in orde, sandwich-check faalt | dit rapport |
 | Echidna | 2.3.3 | Niet bruikbaar met deze testhandler | `echidna/*.yaml`, zie [Fuzzing](#fuzzing) |
@@ -89,7 +89,7 @@ Alleen `MAX_SPOT_DEVIATION_BPS` verlagen werkt niet: de feeds mogen samen tot ~0
 **Waar:** `src/Rebalancer.sol:248` (`owners`) en `:287` (`dueOwners`): `Math.min(offset + limit, total)`.
 **Gevonden door:** periphery, boundary, execution-trace, first-principles.
 
-Met `offset ≥ 1` en `limit = type(uint256).max` overflowt `offset + limit` en revert de call met Panic 0x11. De NatSpec van `dueOwners` belooft "Revert nooit". De huidige keepers gebruiken een vaste paginagrootte (`keeper/keeper.ts:94-95`, `RunKeeperCommand.php:149`) en worden niet geraakt; een toekomstige integratie die "alles" vraagt wel.
+Met `offset ≥ 1` en `limit = type(uint256).max` overflowt `offset + limit` en revert de call met Panic 0x11. De NatSpec van `dueOwners` belooft "Revert nooit". De huidige keepers gebruiken een begrensde paginagrootte (`keeper/keeper.ts:47`, env `PAGE_SIZE`, standaard 50; `app/Console/Commands/RunKeeperCommand.php:149`) en worden niet geraakt; een toekomstige integratie die "alles" vraagt wel.
 **Fix:** `uint256 end = limit > total - offset ? total : offset + limit;` (na de bestaande `offset >= total`-check).
 
 ### L-B (Low) — Fee-ondergrens geldt niet voor verkopen
@@ -105,7 +105,7 @@ De NatSpec belooft dat de fee van de kleinste run (20 EURC × 25 bps = 0,05 EURC
 **Waar:** `_dueAt` (`src/Rebalancer.sol:312`) geeft `correctionEurc` terug; `execute` handelt `amountIn` (`:502`, `:508`), dat wél begrensd is door saldo en allowance.
 **Gevonden door:** numerical-gap, trust-gap.
 
-Voorbeeld: wallet 10.000 EURC, correctie 1.000 EURC, allowance 20 EURC → `isDue` meldt 1.000 EURC, `execute` handelt 20 EURC. Beide keepers filteren op dit getal: `runSizeSkipReason` in `keeper/keeper.ts:111` en `RunKeeperCommand.php:232` (grens `config/bitburo.php:203`, `BITBURO_REBALANCER_MIN_RUN_EURC`, standaard 20). Zolang die grens gelijk is aan `MIN_TRADE_FLOOR` heeft dit geen effect. Wordt hij verhoogd, dan laten beide keepers runs door die ze juist wilden overslaan.
+Voorbeeld: wallet 10.000 EURC, correctie 1.000 EURC, allowance 20 EURC → `isDue` meldt 1.000 EURC, `execute` handelt 20 EURC. Beide keepers filteren op dit getal: `runSizeSkipReason` in `keeper/keeper.ts:111` (env `MIN_RUN_EURC`, standaard 20) en een inline `isLessThan($floor)` in `app/Console/Commands/RunKeeperCommand.php:232` (grens `config/bitburo.php:203`, `BITBURO_REBALANCER_MIN_RUN_EURC`, standaard 20). Zolang die grens gelijk is aan `MIN_TRADE_FLOOR` heeft dit geen effect. Wordt hij verhoogd, dan laten beide keepers runs door die ze juist wilden overslaan.
 **Fix:** `eurcDelta` afleiden van `amountIn` (bij verkoop: `amountIn × price / 1e8`).
 
 ---
@@ -119,8 +119,8 @@ Voorbeeld: wallet 10.000 EURC, correctie 1.000 EURC, allowance 20 EURC → `isDu
 5. **Oracle mogelijk deels gebaseerd op DEX-prijzen** (oracle-checklist). De Chainlink-directory labelt beide feeds als `dex_state_price`. Als daar de Base EURC/USDC-pool in zit, controleert de oracle deels zichzelf. Navragen bij Chainlink.
 6. **Geen absolute min/max op feed-antwoorden** (oracle-checklist). Alleen relevant als een feed eerst ernstig faalt.
 7. **Voorkruipen van `setParams`/`approve(0)`** (invariant). Een run op de oude parameters vlak vóór een wijziging van de gebruiker. Base ordent transacties first-come-first-served via een private sequencer, dus gericht voorkruipen is onbewezen.
-8. **Goedkope tijdelijke DoS via spot-push** (economic-security). Is L-3 uit het vorige rapport; volgens deze ronde goedkoper (~8 EURC poolfees) dan daar geschat.
-9. **Registratiespam tegen keeper-slots** (boundary, trust-gap). `_owners` groeit per nieuw adres en krimpt nooit; elke pagina van `dueOwners` doet per actieve owner tot drie token-calls. `RunKeeperCommand` rouleert zijn startoffset (`RunKeeperCommand.php:144`), en `keeper.ts` scant alle owners. Structurele uithongering (H-2) lijkt daarmee afgedekt, maar de kosten bij veel spam-adressen zijn niet gemeten.
+8. **Tijdelijke DoS via spot-push** (economic-security). Dit is L-3 uit het vorige rapport. Nieuw is de kostenraming: de aanvaller heeft ~8.000 EURC kapitaal nodig om de EURC/USDC-pool 0,5% te duwen, maar verliest daarbij alleen ~8 EURC aan poolfees (plus eventueel arbitrageverlies) omdat hij het kapitaal terugkrijgt.
+9. **Registratiespam tegen keeper-slots** (boundary, trust-gap). `_owners` groeit per nieuw adres en krimpt nooit; elke pagina van `dueOwners` doet per actieve owner tot drie token-calls. `RunKeeperCommand` rouleert zijn startoffset (`RunKeeperCommand.php:144`), en `keeper.ts` scant alle owners. H-2 ging in het vorige rapport over uithongering van de CRE-wekker; die bestaat niet meer, maar hetzelfde risico geldt voor deze twee keepers. Met de offset-rotatie lijkt structurele uithongering afgedekt; de kosten bij veel spam-adressen zijn niet gemeten.
 10. **`_spotOut` deelt door 0 bij `sqrtPriceX96 < 2^48`** (periphery). `:419-420`. Niet bereikbaar met de huidige pools; wel een valkuil bij hergebruik voor andere tokenparen.
 
 ## Opgemerkt, geen impact
@@ -144,9 +144,10 @@ Voorbeeld: wallet 10.000 EURC, correctie 1.000 EURC, allowance 20 EURC → `isDu
 
 ## Fuzzing
 
-**Echidna 2.3.3 (foundry-modus)** op `RebalancerInvariantTest` in `test/Rebalancer.t.sol`: drie pogingen, geen bruikbaar resultaat. Configs in `audit/2026-09-16/echidna/`.
+**Echidna 2.3.3 (foundry-modus)** op `RebalancerInvariantTest` in `test/Rebalancer.t.sol`: vier runs, geen bruikbaar resultaat. Configs in `audit/2026-09-16/echidna/`.
+- **Proefrun** met `allContracts` en de standaardlimiet van 50.000 calls: alle invariants groen, maar te kort.
 - **`allcontracts.yaml`:** 2 miljoen calls, 106 van 590 contractregels geraakt. Twee invariants braken (`invariant_contractNeverHoldsBalance`, `invariant_ownerBalancesOnlyMoveThroughExecute`), maar alleen doordat Echidna `MockERC20.mint` rechtstreeks aanriep, buiten de ghost-boekhouding van `RebalancerHandler` om. Fout in de testopzet, geen bug.
-- **`whitelist.yaml`** (alleen handler- en invariant-functies): het filter werkt niet samen met de handler; 3 contractregels geraakt. Uitkomst ongeldig.
+- **Whitelist, twee runs:** de eerste whitelist bevatte alleen de handler-functies en sloot daardoor ook de invariants uit (`tests: 0/0`). De tweede, `whitelist.yaml`, bevat ook de invariants: alle 5 groen, maar maar 3 contractregels geraakt, dus de handler werd niet echt aangeroepen. Uitkomst ongeldig.
 
 Voor Echidna of Medusa is een eigen property-harness nodig. pashov `fizz` kan er een genereren.
 
@@ -165,8 +166,8 @@ Alle commando's vanuit de root van `bitburo-contracts`.
 FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge test --match-contract RebalancerInvariantTest
 
 # Statische analyse
-PATH="$HOME/.foundry/bin:$PATH" slither src/Rebalancer.sol --compile-force-framework foundry --filter-paths 'lib/|test/|script/'
-aderyn . -i src -o aderyn.md
+PATH="$HOME/.foundry/bin:$PATH" slither src/Rebalancer.sol --compile-force-framework foundry --filter-paths 'lib/|test/|script/' > audit/2026-09-16/slither.txt 2>&1
+aderyn . -i src -o audit/2026-09-16/aderyn.md
 
 # M-1: verkoop-sweep (staat al in test/)
 ~/.foundry/bin/forge test --match-contract OracleSandwichTest --match-test test_poc_sweepSell -vv
@@ -180,18 +181,34 @@ rm test/OracleLagSandwich.t.sol
 PATH="$HOME/.foundry/bin:$PATH" echidna . --contract RebalancerInvariantTest --config audit/2026-09-16/echidna/allcontracts.yaml
 ```
 
-Output van `OracleLagSandwich.t.sol`: per test `oracle`/`spot` (EURC-basiseenheden per cbBTC), `run` (EURC, 6 decimalen), `best push` (EURC, 6 decimalen), `victim loss sats`, en op de laatste regel de winst van de aanvaller in EURC-basiseenheden.
+Output van `OracleLagSandwich.t.sol`, per test:
+- `oracle`/`spot`: EURC-basiseenheden (6 decimalen) per cbBTC;
+- `run(EURC 6dec)` en `baseline ok`: rungrootte en of de run zonder aanval slaagt;
+- `best push`: push in EURC-basiseenheden;
+- `victim loss sats`: minder ontvangen cbBTC dan zonder aanval;
+- laatste regel: winst van de aanvaller in EURC-basiseenheden.
+
+Let op: `_grid(walletEurc, …)` krijgt de EURC-omvang van de wallet mee, niet de run. Met `targetBps` 8000 en `maxCorrectionBps` 10000 (`_fundVictim` in `test/OracleSandwich.t.sol`) is de run 80% daarvan: `_grid(3_125e6, …)` geeft een run van 2.500 EURC. De testnamen noemen de rungrootte.
+
+Externe bronnen voor waarden in dit rapport (op 2026-09-16 geraadpleegd, niet in de repo opgeslagen):
+- **Compilerbugs:** `https://github.com/argotorg/solidity/blob/develop/docs/bugs.json` en `docs/bugs_by_version.json`.
+- **Chainlink-feeds op Base** (heartbeat, deviation, `dex_state_price`): `https://docs.chain.link/data-feeds/price-feeds/addresses?network=base`.
+- **`observationCardinality` van de EURC/USDC-pool:** `cast call 0x7279…66fB "slot0()(uint160,int24,uint16,uint16,uint16,uint8,bool)" --rpc-url $BASE_RPC_URL`, veld 4 (volledig adres in `script/Deploy.s.sol`).
 
 AI-reviews herhalen:
-- **pashov:** installeer `github.com/pashov/skills` en vraag "run solidity-auditor on src/Rebalancer.sol". De uitkomst verschilt per run; de makers raden 2–3 runs aan.
-- **QuillShield:** volg `plugins/oracle-flashloan-analysis/SKILL.md` uit `github.com/quillai-network/quillshield_skills`, inclusief de `references/`-map; hun `install.sh` kopieert die niet mee. Negeer daarbij de verplichte `answeredInRound`-check.
+- **pashov:** installeer `github.com/pashov/skills` (gebruikt: commit `c577eb7` in die repo) en vraag "run solidity-auditor on src/Rebalancer.sol". De uitkomst verschilt per run; de makers raden 2–3 runs aan.
+- **QuillShield:** volg `plugins/oracle-flashloan-analysis/SKILL.md` uit `github.com/quillai-network/quillshield_skills` (gebruikt: commit `8bdd3c0`), inclusief de `references/`-map; hun `install.sh` kopieert die niet mee. Negeer daarbij de verplichte `answeredInRound`-check.
 
 ## Volgende stappen
 
-1. **Status van het rapport van 2026-09-15 bijwerken.** Per punt (H-1, H-2, M-1 t/m M-9, L-1 t/m L-9) nagaan of het in `src/`, de keepers of de app is opgelost. Deze ronde bevestigde alleen dat M-1 open is en dat H-2 in `RunKeeperCommand` lijkt afgedekt door offset-rotatie.
+1. **Status van het rapport van 2026-09-15 bijwerken.** Per punt (H-1, H-2, M-1 t/m M-9, L-1 t/m L-9) nagaan of het is opgelost. Deze ronde bevestigde alleen dat M-1 open is. Waar je moet kijken:
+   - **Contract (`src/`):** een snelle blik suggereert dat M-2, M-5, M-6, L-1, L-2, L-4 en L-9 zijn opgelost, en dat M-3, L-5 en L-6 (CRE) zijn vervallen met het verwijderen van CRE in v1.1.0. Niet geverifieerd.
+   - **Privy-policy's (H-1, L-7):** in de app-repo `app/Console/Commands/SetupSwapPolicyCommand.php`, `SetupBillingPolicyCommand.php` en `SetupKeeperQuorumCommand.php`.
+   - **Keepers (H-2, M-4):** `keeper/keeper.ts`, `keeper/selection.ts` en `app/Console/Commands/RunKeeperCommand.php`.
+   - **App/frontend (M-7, M-8, M-9, L-8):** de app-repo; zie de detailrapporten in `audit/2026-09-15/details/`.
 2. **M-1 ontwerpen en fixen** (TWAP-check), met een fork-test die aantoont dat de winst van de aanvaller bij elke push ≤ 0 is. Neem `OracleLagSandwich.t.sol` als basis.
 3. **L-A, L-B, L-C fixen** in dezelfde contractversie, elk met een test.
 4. **Lead 1 (poolcheck in de constructor)** meenemen in dezelfde versie.
 5. **Leads 2–10** nalopen en per lead besluiten: fixen, documenteren of verwerpen.
-6. **Nieuwe deploy.** Het live contract `0xE577…2104` heeft dezelfde problemen; volg het decommissie-draaiboek in `README.md`.
+6. **Nieuwe deploy.** Het live contract `0xE577…2104` heeft dezelfde problemen. Het heeft geen `retire()`, dus het `retire`-draaiboek in `README.md` werkt daar niet (`README.md:14`, `:51`). Buiten gebruik stellen kan alleen doordat elke gebruiker zelf `setParams` met `active = false` en `approve(0)` op EURC en cbBTC stuurt. Lees vóór een nieuwe deploy het draaiboek in issue #7 (`README.md:109`).
 7. **Externe audit** op die nieuwe versie, met dit rapport en dat van 2026-09-15 als input.
