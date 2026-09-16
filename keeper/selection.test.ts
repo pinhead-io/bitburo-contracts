@@ -25,6 +25,7 @@ import {
   formatLock,
   isBlockWindowRevert,
   isCoolingDown,
+  isStuck,
   isTemporaryFailure,
   lockIsStale,
   lockWatchdogSeconds,
@@ -48,6 +49,7 @@ import {
   parseScanState,
   pruneExpired,
   recordFailure,
+  replacementFees,
   retryDeadline,
   runSizeSkipReason,
   scanSegments,
@@ -665,5 +667,35 @@ describe("lock (final review I-5)", () => {
   test("the run stops itself before its lock expires", () => {
     expect(lockWatchdogSeconds(900)).toBe(885);
     expect(lockWatchdogSeconds(10)).toBe(0);
+  });
+});
+
+describe("stuck transaction (final review I-6)", () => {
+  const max = parseGwei("3");
+
+  test("a transaction is stuck after TX_WAIT_BLOCKS blocks without a receipt", () => {
+    expect(isStuck(1_000n, 1_014n, 15)).toBe(false);
+    expect(isStuck(1_000n, 1_015n, 15)).toBe(true);
+  });
+
+  test("a replacement raises tip and maxFeePerGas by more than the 10% a node requires", () => {
+    const previous = { maxPriorityFeePerGas: parseGwei("0.05"), maxFeePerGas: parseGwei("0.06") };
+    const next = replacementFees(previous, parseGwei("0.005"), max);
+    expect(next).not.toBeNull();
+    if (next === null) return;
+    expect(next.maxPriorityFeePerGas * 10n).toBeGreaterThanOrEqual(previous.maxPriorityFeePerGas * 11n);
+    expect(next.maxFeePerGas * 10n).toBeGreaterThanOrEqual(previous.maxFeePerGas * 11n);
+    expect(next.maxPriorityFeePerGas).toBe(56_250_001n);
+  });
+
+  test("a risen base fee lifts maxFeePerGas to at least twice the base fee plus the tip", () => {
+    // Base fee van 0,005 naar 0,5 gwei: de oude maxFee van 0,06 gwei is ruim te laag.
+    const next = replacementFees({ maxPriorityFeePerGas: parseGwei("0.05"), maxFeePerGas: parseGwei("0.06") }, parseGwei("0.5"), max);
+    expect(next?.maxFeePerGas).toBe(parseGwei("1") + 56_250_001n);
+  });
+
+  test("no replacement above the tip cap: the run stops clearly", () => {
+    expect(replacementFees({ maxPriorityFeePerGas: max, maxFeePerGas: max * 2n }, parseGwei("0.005"), max)).toBeNull();
+    expect(replacementFees({ maxPriorityFeePerGas: parseGwei("2.7"), maxFeePerGas: max * 2n }, 0n, max)).toBeNull();
   });
 });

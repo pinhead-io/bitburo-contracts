@@ -65,7 +65,7 @@
  * Optioneel: REWARD_TO=0x…  PAGE_SIZE=20  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
  *            RETRY_SECONDS=540  SEND_RETRY_BLOCKS=30  PRIORITY_FEE_GWEI=0.05  MAX_PRIORITY_FEE_GWEI=3
  *            GAS_LIMIT=1000000  FEE_STATE_FILE=./keeper-fee.json  FEE_HOLD_SECONDS=3600  LOCK_FILE=./keeper.lock
- *            LOCK_MAX_SECONDS=900
+ *            LOCK_MAX_SECONDS=900  TX_WAIT_BLOCKS=15  TX_REPLACEMENTS=3
  *            GAS_ESTIMATE=500000  TIP_REWARD_SHARE_BPS=10000  TIP_BUDGET_ETH=0.0015
  *            FEED_ETH_USD=0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70
  *            SEARCH_SECONDS=180  SCAN_STATE_FILE=./keeper-scan.json  OWNERS_FILE=./owners.txt
@@ -84,7 +84,6 @@ import {
   type Address,
   type Hex,
   type TransactionReceipt,
-  WaitForTransactionReceiptTimeoutError,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
@@ -111,6 +110,7 @@ import {
   formatLock,
   isBlockWindowRevert,
   isCoolingDown,
+  isStuck,
   lockIsStale,
   lockWatchdogSeconds,
   maxFeePerGas,
@@ -131,6 +131,7 @@ import {
   parseScanState,
   pruneExpired,
   recordFailure,
+  replacementFees,
   retryDeadline,
   runSizeSkipReason,
   scanSegments,
@@ -201,6 +202,8 @@ const scanStateFile = env("SCAN_STATE_FILE", "./keeper-scan.json");
 const ownersFile = process.env.OWNERS_FILE;
 const sendRetryBlocks = Number(env("SEND_RETRY_BLOCKS", "30"));
 const gasLimit = BigInt(env("GAS_LIMIT", "1000000"));
+const txWaitBlocks = Number(env("TX_WAIT_BLOCKS", "15"));
+const txReplacements = Number(env("TX_REPLACEMENTS", "3"));
 const configuredFeePolicy = {
   base: parseGwei(env("PRIORITY_FEE_GWEI", "0.05")),
   max: parseGwei(env("MAX_PRIORITY_FEE_GWEI", "3")),
@@ -228,6 +231,8 @@ if (!Number.isFinite(searchSeconds) || searchSeconds < 0 || searchSeconds > retr
 /** Eindreview F-2: adressen die elke run eerst worden bediend. Een ongeldig bestand stopt de run vóór er iets gebeurt. */
 const priorityOwners: Address[] = ownersFile === undefined || ownersFile === "" ? [] : parseOwnersFile(readFileSync(ownersFile, "utf8"));
 if (!Number.isInteger(sendRetryBlocks) || sendRetryBlocks < 1) throw new Error("SEND_RETRY_BLOCKS moet een geheel getal >= 1 zijn");
+if (!Number.isInteger(txWaitBlocks) || txWaitBlocks < 1) throw new Error("TX_WAIT_BLOCKS moet een geheel getal >= 1 zijn");
+if (!Number.isInteger(txReplacements) || txReplacements < 0) throw new Error("TX_REPLACEMENTS moet een geheel getal >= 0 zijn");
 if (configuredFeePolicy.base > configuredFeePolicy.max) throw new Error("PRIORITY_FEE_GWEI mag niet boven MAX_PRIORITY_FEE_GWEI liggen");
 if (gasEstimate <= 0n) throw new Error("GAS_ESTIMATE moet een geheel getal > 0 zijn");
 if (tipRewardShareBps < 0n) throw new Error("TIP_REWARD_SHARE_BPS moet >= 0 zijn");
@@ -549,6 +554,33 @@ const resimulateAtBlockStart = async (owner: Address, receipt: TransactionReceip
   }
 };
 
+/**
+ * Eindreview I-6: wacht tot een van `hashes` (dezelfde nonce: de transactie en haar vervangers) gemined is. undefined
+ * als dat na TX_WAIT_BLOCKS blokken sinds `sentAtBlock` niet zo is. Een fout bij het lezen van een receipt telt als
+ * "nog niet gemined". Maakt de chain BLOCK_WAIT_SECONDS lang geen blok, dan ook undefined.
+ */
+const waitMined = async (hashes: readonly Hex[], sentAtBlock: bigint): Promise<TransactionReceipt | undefined> => {
+  let last = sentAtBlock;
+  let lastChange = Date.now();
+  for (;;) {
+    for (const hash of hashes) {
+      try {
+        return await publicClient.getTransactionReceipt({ hash });
+      } catch {
+        // nog niet gemined, of een fout van de node: volgende poging
+      }
+    }
+    const latest = await publicClient.getBlockNumber({ cacheTime: 0 }).catch(() => last);
+    if (isStuck(sentAtBlock, latest, txWaitBlocks)) return undefined;
+    if (latest !== last) {
+      last = latest;
+      lastChange = Date.now();
+    }
+    if (Date.now() - lastChange >= blockWaitSeconds * 1000) return undefined;
+    await Bun.sleep(1000);
+  }
+};
+
 type Outcome = "executed" | "skipped" | "dry-run" | "retry";
 
 /**
@@ -606,32 +638,51 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
       // nonce probeert viem eerst eth_fillTransaction. GAS_LIMIT 1.000.000 is de grens die
       // test_fork_buyAndSellGasCost bewaakt.
       const nonce = await publicClient.getTransactionCount({ address: walletClient.account.address, blockTag: "pending" });
-      const hash = await walletClient.writeContract({
-        address: rebalancer,
-        abi,
-        functionName: "execute",
-        args: [owner, rewardTo],
-        gas: gasLimit,
-        maxPriorityFeePerGas: priorityFee,
-        maxFeePerGas: maxFeePerGas(latest.baseFeePerGas ?? 0n, priorityFee),
-        nonce,
-        // `chainId` staat niet in het type van writeContract, maar gaat via sendTransaction mee naar
-        // prepareTransactionRequest; zonder probeert viem eerst eth_fillTransaction (viem 2.56.3).
-        ...({ chainId: base.id } as unknown as Record<string, never>),
-      });
-      let receipt: TransactionReceipt;
-      try {
-        receipt = await publicClient.waitForTransactionReceipt({ hash });
-      } catch (error) {
-        if (error instanceof WaitForTransactionReceiptTimeoutError) {
-          // De transactie kan nog landen; een volgende send zou achter dezelfde nonce blijven hangen. Geen cool-down,
-          // de run stopt.
+      const send = (fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) =>
+        walletClient.writeContract({
+          address: rebalancer,
+          abi,
+          functionName: "execute",
+          args: [owner, rewardTo],
+          gas: gasLimit,
+          ...fees,
+          nonce,
+          // `chainId` staat niet in het type van writeContract, maar gaat via sendTransaction mee naar
+          // prepareTransactionRequest; zonder probeert viem eerst eth_fillTransaction (viem 2.56.3).
+          ...({ chainId: base.id } as unknown as Record<string, never>),
+        });
+      let fees = { maxPriorityFeePerGas: priorityFee, maxFeePerGas: maxFeePerGas(latest.baseFeePerGas ?? 0n, priorityFee) };
+      const hashes: Hex[] = [await send(fees)];
+      let sentAtBlock = latest.number;
+      let receipt: TransactionReceipt | undefined;
+      // Eindreview I-6: niet gemined binnen TX_WAIT_BLOCKS blokken (bijvoorbeeld een base fee die boven maxFeePerGas
+      // steeg): vervangen met dezelfde nonce en hogere fees, hooguit TX_REPLACEMENTS keer. Lukt dat niet, dan stopt de
+      // run duidelijk; een volgende send zou achter dezelfde nonce blijven hangen. Geen cool-down.
+      for (let replacements = 0; ; replacements += 1) {
+        receipt = await waitMined(hashes, sentAtBlock);
+        if (receipt !== undefined) break;
+        const block = await publicClient.getBlock();
+        const next = replacements < txReplacements ? replacementFees(fees, block.baseFeePerGas ?? 0n, feePolicy.max) : null;
+        if (next === null) {
           saveCooldowns();
-          throw new Error(`transactie ${hash} voor ${owner} niet binnen de wachttijd opgenomen; run gestopt`);
+          throw new Error(
+            `transactie ${hashes.join(", ")} (nonce ${nonce}) voor ${owner} niet binnen ${txWaitBlocks} blokken gemined en niet meer te vervangen; run gestopt`,
+          );
         }
-        throw error;
+        console.warn(
+          `${owner}: transactie ${hashes.at(-1)} niet gemined na ${txWaitBlocks} blokken; vervangen (nonce ${nonce}, tip ${formatGwei(next.maxPriorityFeePerGas)} gwei, maxFee ${formatGwei(next.maxFeePerGas)} gwei)`,
+        );
+        fees = next;
+        try {
+          hashes.push(await send(fees));
+        } catch (error) {
+          // Bijvoorbeeld "nonce too low": de vorige is intussen gemined. De volgende ronde vindt die receipt.
+          console.warn(`${owner}: vervangen mislukt (${describeError(error)})`);
+        }
+        sentAtBlock = block.number;
       }
-      console.log(`${owner}: ${direction} ≈ ${eurc} EURC → ${receipt.status} ${hash} (tip ${formatGwei(priorityFee)} gwei)`);
+      const hash = receipt.transactionHash;
+      console.log(`${owner}: ${direction} ≈ ${eurc} EURC → ${receipt.status} ${hash} (tip ${formatGwei(fees.maxPriorityFeePerGas)} gwei)`);
       lastRunBlock = receipt.blockNumber;
       sentThisRun = true;
       if (receipt.status === "success") {

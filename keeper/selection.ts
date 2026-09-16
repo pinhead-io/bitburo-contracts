@@ -683,3 +683,28 @@ export const lockIsStale = (
 
 /** Na hoeveel seconden een run zichzelf stopt: 15 s vóór het lock verloopt, zodat twee runs nooit tegelijk lopen. */
 export const lockWatchdogSeconds = (maxAgeSeconds: number): number => Math.max(maxAgeSeconds - 15, 0);
+
+// ─── Eindreview I-6: een transactie die blijft hangen ──────────────────────────────────────────────────────────
+
+export type TxFees = { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+
+/**
+ * Eindreview I-6: fees voor een vervangende transactie met dezelfde nonce, of null als dat niet binnen het beleid kan
+ * (dan stopt de run duidelijk). Een node accepteert een vervanger pas als tip én maxFeePerGas minstens 10% hoger zijn
+ * (geth `txpool.pricebump`, standaard 10; op-geth gebruikt dezelfde txpool); het script neemt 12,5% (+1 wei) als marge.
+ * `maxFeePerGas` is ook minstens 2 × de huidige base fee + tip, want een transactie blijft meestal hangen doordat de
+ * base fee boven de oude `maxFeePerGas` steeg. Boven het tipplafond (`maxTip`) wordt niet vervangen.
+ */
+export const replacementFees = (previous: TxFees, baseFeePerGas: bigint, maxTip: bigint): TxFees | null => {
+  const bump = (v: bigint) => (v * 9n + 7n) / 8n + 1n;
+  const tip = bump(previous.maxPriorityFeePerGas);
+  if (tip > maxTip) return null;
+  const floor = baseFeePerGas * 2n + tip;
+  const fee = bump(previous.maxFeePerGas);
+  return { maxPriorityFeePerGas: tip, maxFeePerGas: fee > floor ? fee : floor };
+};
+
+/** Moet de transactie vervangen worden? Ja als hij `waitBlocks` blokken na het verzendblok nog niet gemined is. */
+export const isStuck = (sentAtBlock: bigint, latestBlock: bigint, waitBlocks: number): boolean =>
+  latestBlock >= sentAtBlock + BigInt(waitBlocks);
+
