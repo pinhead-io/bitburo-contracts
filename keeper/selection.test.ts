@@ -2,17 +2,29 @@ import { describe, expect, test } from "bun:test";
 import type { Address } from "viem";
 import {
   EURC_UNIT,
+  GWEI,
+  OVERRIDE_PROBE_CODE,
+  blockerTip,
   clearFailure,
+  effectiveTip,
   failureAction,
+  firstSendBlock,
   formatEurc,
+  formatGwei,
   isBlockWindowRevert,
   isCoolingDown,
   isTemporaryFailure,
-  mustWaitForNextBlock,
+  maxFeePerGas,
   newOwners,
+  nextAttemptBlock,
+  nextBlockOverrides,
+  nextPriorityFee,
+  overridesApplied,
   parseCooldownState,
+  parseGwei,
   pruneExpired,
   recordFailure,
+  retryDeadline,
   runSizeSkipReason,
   shouldReadPageAgain,
 } from "./selection";
@@ -49,25 +61,38 @@ describe("block window reverts", () => {
     expect(isBlockWindowRevert(undefined)).toBe(false);
   });
 
-  test("a block check or block window revert is retried in a next block, then skipped without a cool-down", () => {
-    expect(failureAction("PoolTouchedThisBlock", 0, 3)).toBe("retry");
-    expect(failureAction({ errorName: "PoolTouchedThisBlock" }, 2, 3)).toBe("retry");
-    expect(failureAction("PoolTouchedThisBlock", 3, 3)).toBe("skip");
-    expect(failureAction("BlockMoveExceeded", 0, 3)).toBe("retry");
-    expect(failureAction("BlockMoveExceeded", 3, 3)).toBe("skip");
-    expect(failureAction("BlockMoveExceeded", 0, 0)).toBe("skip");
+  test("a temporary revert is retried while the retry budget runs, then skipped without a cool-down (L-3)", () => {
+    const deadline = retryDeadline(1_000, 540);
+    expect(deadline).toBe(1_540);
+    expect(failureAction("PoolTouchedThisBlock", 1_000, deadline)).toBe("retry");
+    expect(failureAction({ errorName: "PoolTouchedThisBlock" }, 1_539, deadline)).toBe("retry");
+    expect(failureAction("PoolTouchedThisBlock", 1_540, deadline)).toBe("skip");
+    expect(failureAction("BlockMoveExceeded", 1_000, deadline)).toBe("retry");
+    expect(failureAction("BlockMoveExceeded", 2_000, deadline)).toBe("skip");
+    // Budget 0: nooit een nieuwe poging.
+    expect(failureAction("BlockMoveExceeded", 1_000, retryDeadline(1_000, 0))).toBe("skip");
   });
 
-  test("every other revert is a real failure for the cool-down", () => {
-    expect(failureAction("SpotDeviatesFromOracle", 0, 3)).toBe("fail");
-    expect(failureAction(undefined, 0, 3)).toBe("fail");
-    expect(failureAction({ errorName: undefined, resimulationPassed: false }, 0, 3)).toBe("fail");
+  test("the budget is time, not a number of attempts: many blocked blocks keep retrying", () => {
+    const deadline = retryDeadline(0, 540);
+    // Elke 2 s een blok: 269 geblokkeerde blokken achter elkaar blijven "retry".
+    for (let t = 0; t < 540; t += 2) {
+      expect(failureAction("PoolTouchedThisBlock", t, deadline)).toBe("retry");
+    }
+  });
+
+  test("every other revert is a real failure for the cool-down, also within the budget", () => {
+    expect(failureAction("SpotDeviatesFromOracle", 0, 540)).toBe("fail");
+    expect(failureAction("NotDue", 0, 540)).toBe("fail");
+    expect(failureAction(undefined, 0, 540)).toBe("fail");
+    expect(failureAction({ errorName: undefined, resimulationPassed: false }, 0, 540)).toBe("fail");
+    expect(failureAction("SpotDeviatesFromOracle", 1_000, 540)).toBe("fail");
   });
 
   test("an on-chain revert whose re-simulation passes is temporary (review I-1)", () => {
     expect(isTemporaryFailure({ errorName: undefined, resimulationPassed: true })).toBe(true);
-    expect(failureAction({ errorName: undefined, resimulationPassed: true }, 0, 3)).toBe("retry");
-    expect(failureAction({ errorName: undefined, resimulationPassed: true }, 3, 3)).toBe("skip");
+    expect(failureAction({ errorName: undefined, resimulationPassed: true }, 0, 540)).toBe("retry");
+    expect(failureAction({ errorName: undefined, resimulationPassed: true }, 540, 540)).toBe("skip");
     // Geeft de hersimulatie een echte fout, dan telt die.
     expect(isTemporaryFailure({ errorName: "SpotDeviatesFromOracle", resimulationPassed: false })).toBe(false);
   });
@@ -96,14 +121,124 @@ describe("re-reading a dueOwners page (review I-1)", () => {
   test("with BLOCK_RETRIES = 0 a page is read once", () => {
     expect(shouldReadPageAgain(5, 1, 1)).toBe(false);
   });
+
+  test("reading the next block (L-3) needs one read per page", () => {
+    expect(shouldReadPageAgain(0, 1, 4, true)).toBe(false);
+    expect(shouldReadPageAgain(3, 1, 4, true)).toBe(false);
+    expect(shouldReadPageAgain(0, 1, 4, false)).toBe(true);
+  });
 });
 
-describe("mustWaitForNextBlock", () => {
-  test("waits while the latest block is the block of the last successful run", () => {
-    expect(mustWaitForNextBlock(100n, null)).toBe(false);
-    expect(mustWaitForNextBlock(100n, 100n)).toBe(true);
-    expect(mustWaitForNextBlock(99n, 100n)).toBe(true);
-    expect(mustWaitForNextBlock(101n, 100n)).toBe(false);
+describe("next-block overrides (L-3)", () => {
+  test("number + 1 and timestamp + 2 s on top of the latest block", () => {
+    expect(nextBlockOverrides({ number: 51_401_377n, timestamp: 1_789_593_600n })).toEqual({
+      number: 51_401_378n,
+      time: 1_789_593_602n,
+    });
+  });
+
+  test("the probe is creation code that returns timestamp and number", () => {
+    // 42 TIMESTAMP, 6000 PUSH1 0, 52 MSTORE, 43 NUMBER, 6020 PUSH1 0x20, 52 MSTORE, 6040 PUSH1 0x40, 6000 PUSH1 0, f3 RETURN
+    expect(OVERRIDE_PROBE_CODE).toBe("0x426000524360205260406000f3");
+  });
+
+  test("overrides count as applied only when exactly the overridden values come back", () => {
+    const overrides = { number: 0x3104000n, time: 0x6aab1000n };
+    const word = (v: bigint) => v.toString(16).padStart(64, "0");
+    expect(overridesApplied(`0x${word(0x6aab1000n)}${word(0x3104000n)}`, overrides)).toBe(true);
+    // Node negeert de override: de echte waarden.
+    expect(overridesApplied(`0x${word(0x6aab0227n)}${word(0x3103fffn)}`, overrides)).toBe(false);
+    // Alleen de tijd toegepast.
+    expect(overridesApplied(`0x${word(0x6aab1000n)}${word(0x3103fffn)}`, overrides)).toBe(false);
+    expect(overridesApplied("0x", overrides)).toBe(false);
+    expect(overridesApplied(undefined, overrides)).toBe(false);
+    expect(overridesApplied(`0x${word(0x6aab1000n)}`, overrides)).toBe(false);
+  });
+});
+
+describe("priority fee (L-3)", () => {
+  const policy = { base: parseGwei("0.05"), max: parseGwei("3") };
+
+  test("parseGwei and formatGwei are exact", () => {
+    expect(parseGwei("0.05")).toBe(50_000_000n);
+    expect(parseGwei("3")).toBe(3n * GWEI);
+    expect(parseGwei("0.000000001")).toBe(1n);
+    expect(() => parseGwei("0.0000000001")).toThrow("geen geldig aantal gwei");
+    expect(() => parseGwei("-1")).toThrow("geen geldig aantal gwei");
+    expect(formatGwei(50_000_000n)).toBe("0.05");
+    expect(formatGwei(3n * GWEI)).toBe("3");
+  });
+
+  test("without a known blocker tip the fee doubles and reaches the 3 gwei cap in 6 blockades", () => {
+    const steps: string[] = [];
+    let fee = policy.base;
+    for (let i = 0; i < 8; i++) {
+      fee = nextPriorityFee(fee, undefined, policy);
+      steps.push(formatGwei(fee));
+    }
+    expect(steps).toEqual(["0.1", "0.2", "0.4", "0.8", "1.6", "3", "3", "3"]);
+  });
+
+  test("a known blocker tip is outbid by at least 10% when that is more than doubling", () => {
+    // Aanraker op 1 gwei, keeper op 0,05: direct 1,1 gwei (+1 wei), niet 0,1.
+    expect(nextPriorityFee(policy.base, GWEI, policy)).toBe(1_100_000_001n);
+    // Aanraker lager dan het dubbele van de eigen tip: verdubbelen.
+    expect(nextPriorityFee(parseGwei("0.4"), parseGwei("0.2"), policy)).toBe(parseGwei("0.8"));
+    // Tip 0 van de aanraker (goedkoopste blokkade): toch verdubbelen.
+    expect(nextPriorityFee(policy.base, 0n, policy)).toBe(parseGwei("0.1"));
+    // Nooit boven het plafond, ook niet tegen een aanraker op 10 gwei.
+    expect(nextPriorityFee(policy.base, 10n * GWEI, policy)).toBe(policy.max);
+  });
+
+  test("never below the base fee policy", () => {
+    expect(nextPriorityFee(0n, undefined, policy)).toBe(policy.base);
+  });
+
+  test("maxFeePerGas is twice the base fee plus the tip", () => {
+    // Base fee 0,005 gwei (minimum op Base) en tip 0,05 gwei.
+    expect(maxFeePerGas(5_000_000n, 50_000_000n)).toBe(60_000_000n);
+  });
+
+  test("effective tip of an included transaction", () => {
+    const baseFee = 5_000_000n;
+    expect(effectiveTip({ maxPriorityFeePerGas: 1_000_000n, maxFeePerGas: 100_000_000n }, baseFee)).toBe(1_000_000n);
+    // maxFeePerGas begrenst de tip.
+    expect(effectiveTip({ maxPriorityFeePerGas: 1n * GWEI, maxFeePerGas: 6_000_000n }, baseFee)).toBe(1_000_000n);
+    // Legacy: gasPrice - base fee.
+    expect(effectiveTip({ gasPrice: 7_000_000n }, baseFee)).toBe(2_000_000n);
+    expect(effectiveTip({ gasPrice: 5_000_000n }, baseFee)).toBe(0n);
+  });
+
+  test("blockerTip only counts pool transactions before our own in the block", () => {
+    const txs = [
+      { transactionIndex: 0, tip: 5n },
+      { transactionIndex: 3, tip: 9n },
+      { transactionIndex: 7, tip: 100n },
+    ];
+    expect(blockerTip(txs, 4)).toBe(9n);
+    expect(blockerTip(txs, 0)).toBeUndefined();
+    expect(blockerTip([], 10)).toBeUndefined();
+  });
+
+  test("after a blockade the next send waits SEND_RETRY_BLOCKS blocks", () => {
+    expect(firstSendBlock(null, 30)).toBeNull();
+    expect(firstSendBlock(1_000n, 30)).toBe(1_030n);
+  });
+});
+
+describe("nextAttemptBlock", () => {
+  test("waits for a block after the last own transaction and after the previous attempt", () => {
+    expect(nextAttemptBlock(null, null, null)).toEqual({ target: null, throttled: false });
+    expect(nextAttemptBlock(null, 100n, null)).toEqual({ target: 101n, throttled: false });
+    expect(nextAttemptBlock(105n, 100n, null)).toEqual({ target: 106n, throttled: false });
+    expect(nextAttemptBlock(99n, 100n, null)).toEqual({ target: 101n, throttled: false });
+  });
+
+  test("after a blockade not before SEND_RETRY_BLOCKS later (L-3)", () => {
+    expect(nextAttemptBlock(105n, 100n, 130n)).toEqual({ target: 130n, throttled: true });
+    expect(nextAttemptBlock(null, null, 130n)).toEqual({ target: 130n, throttled: true });
+    // Throttle al voorbij: gewoon het volgende blok.
+    expect(nextAttemptBlock(140n, 100n, 130n)).toEqual({ target: 141n, throttled: false });
   });
 });
 

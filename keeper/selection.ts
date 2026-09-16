@@ -43,24 +43,32 @@ export const isTemporaryFailure = (failure: Failure): boolean =>
   isBlockWindowRevert(failure.errorName) || failure.resimulationPassed === true;
 
 /**
- * Wat te doen na een mislukte simulatie of transactie voor een owner, bij poging `attempt` (0 = eerste):
+ * Wat te doen na een mislukte simulatie of transactie voor een owner (audit L-3):
  * - "retry": tijdelijk (blokcheck, blokvenster of een on-chain revert die opnieuw gesimuleerd wel slaagt), probeer
- *   opnieuw in een volgend blok;
- * - "skip": na `maxRetries` nieuwe pogingen nog steeds tijdelijk; niets boeken, de volgende keeper-run probeert het
- *   weer;
+ *   opnieuw in een volgend blok, zolang het retry-budget van deze keeper-run loopt (`nowSeconds < retryDeadline`);
+ * - "skip": het budget is op en het is nog steeds tijdelijk; niets boeken, de volgende keeper-run probeert het weer;
  * - "fail": een echte mislukking, die telt voor de cool-down.
+ *
+ * Het budget is een tijd en geen aantal pogingen: een aanvaller die een pool elk blok aanraakt, moet dat dan het hele
+ * budget volhouden, niet alleen een paar voorspelbare blokken.
  */
 export const failureAction = (
   failure: Failure | string | undefined,
-  attempt: number,
-  maxRetries: number,
+  nowSeconds: number,
+  retryDeadline: number,
 ): "retry" | "skip" | "fail" => {
   const f: Failure = typeof failure === "object" ? failure : { errorName: failure };
   if (!isTemporaryFailure(f)) {
     return "fail";
   }
-  return attempt < maxRetries ? "retry" : "skip";
+  return nowSeconds < retryDeadline ? "retry" : "skip";
 };
+
+/**
+ * Eind van het retry-budget van een keeper-run: `RETRY_SECONDS` na de start. Standaard 540 s, het advies om elke
+ * 10 minuten te draaien min een minuut marge, zodat de run klaar is voordat de volgende begint.
+ */
+export const retryDeadline = (startSeconds: number, retrySeconds: number): number => startSeconds + retrySeconds;
 
 /**
  * Review I-1: `dueOwners` is een momentopname. Een owner die op dat moment niet due leek omdat een pool in dat blok
@@ -68,20 +76,168 @@ export const failureAction = (
  * keeper leest een pagina daarom minstens twee keer, elke keer in een later blok, en behandelt alleen owners die hij in
  * deze run nog niet had. Na de tweede lezing gaat hij alleen door zolang een lezing nog iemand nieuw oplevert, en
  * nooit verder dan `maxReads` lezingen.
+ *
+ * Leest de keeper met de overrides van het volgende blok (`nextBlockOverrides`), dan ziet hij geen aanraking uit het
+ * laatste blok en is één lezing genoeg; de dubbele lezing geldt alleen bij de terugval op het laatste blok.
  */
 export const newOwners = (page: readonly Address[], handled: ReadonlySet<string>): Address[] =>
   page.filter((owner) => !handled.has(owner.toLowerCase()));
 
-export const shouldReadPageAgain = (newInLastRead: number, reads: number, maxReads: number): boolean =>
-  reads < maxReads && (reads < 2 || newInLastRead > 0);
+export const shouldReadPageAgain = (
+  newInLastRead: number,
+  reads: number,
+  maxReads: number,
+  readsNextBlock = false,
+): boolean => !readsNextBlock && reads < maxReads && (reads < 2 || newInLastRead > 0);
+
+// ─── Audit L-3: lezen alsof het het volgende blok is ─────────────────────────────────────────────────────────────
+
+/** Tijd tussen twee blokken op Base. */
+export const BASE_BLOCK_SECONDS = 2n;
+
+export type BlockOverrides = { number: bigint; time: bigint };
 
 /**
- * Een run die de tick van een pool verandert, raakt die pool voor de rest van het blok aan; een `eth_call` op dat blok
- * zou de volgende owner daarom onterecht als niet due of als PoolTouchedThisBlock zien. Lees en simuleer de volgende
- * owner (en de volgende pagina) dus pas in een blok ná de laatste geslaagde run.
+ * Overrides waarmee een `eth_call` op de state van het laatste blok draait alsof het het volgende blok is. Het
+ * contract vergelijkt de laatste observatie van een pool met `block.timestamp`; in het volgende blok is een aanraking
+ * uit het laatste blok dus geen aanraking meer. Zonder dit ziet de keeper een aanraking in het laatste blok als "niet
+ * due" en verstuurt hij niets, en hoeft een aanvaller niet eens vóór de keeper in het blok te staan (L-3).
  */
-export const mustWaitForNextBlock = (latestBlock: bigint, lastRunBlock: bigint | null): boolean =>
-  lastRunBlock !== null && latestBlock <= lastRunBlock;
+export const nextBlockOverrides = (latest: { number: bigint; timestamp: bigint }): BlockOverrides => ({
+  number: latest.number + 1n,
+  time: latest.timestamp + BASE_BLOCK_SECONDS,
+});
+
+/**
+ * Creation code die `block.timestamp` en `block.number` teruggeeft (TIMESTAMP PUSH1 0 MSTORE NUMBER PUSH1 0x20 MSTORE
+ * PUSH1 0x40 PUSH1 0 RETURN). Als `eth_call` zonder `to` laat de keeper de node dit uitvoeren met de overrides, om te
+ * controleren dat de node ze toepast. Zelfde probe als de app-keeper.
+ */
+export const OVERRIDE_PROBE_CODE = "0x426000524360205260406000f3" as const;
+
+/**
+ * Past de node de overrides toe? Alleen als precies de overschreven timestamp en het overschreven bloknummer
+ * terugkomen: een node die een onbekende override negeert, geeft geen fout maar de echte waarden.
+ */
+export const overridesApplied = (returnData: string | undefined, overrides: BlockOverrides): boolean => {
+  if (returnData === undefined || !/^0x[0-9a-fA-F]{128}$/.test(returnData)) {
+    return false;
+  }
+  const time = BigInt(`0x${returnData.slice(2, 66)}`);
+  const number = BigInt(`0x${returnData.slice(66, 130)}`);
+  return time === overrides.time && number === overrides.number;
+};
+
+// ─── Audit L-3: priority fee ────────────────────────────────────────────────────────────────────────────────────
+
+export const GWEI = 1_000_000_000n;
+
+/** wei → gwei als tekst, zonder nullen achteraan ("0.05"). */
+export const formatGwei = (wei: bigint): string => {
+  const fraction = (wei % GWEI).toString().padStart(9, "0").replace(/0+$/, "");
+  return fraction === "" ? `${wei / GWEI}` : `${wei / GWEI}.${fraction}`;
+};
+
+/** "0.05" gwei → wei, zonder afrondingsfouten van een float. */
+export const parseGwei = (value: string): bigint => {
+  const match = /^(\d+)(?:\.(\d{1,9}))?$/.exec(value.trim());
+  if (match === null) {
+    throw new Error(`geen geldig aantal gwei: ${value}`);
+  }
+  return BigInt(match[1]) * GWEI + BigInt((match[2] ?? "").padEnd(9, "0"));
+};
+
+export type FeePolicy = {
+  /** Priority fee zonder blokkade (PRIORITY_FEE_GWEI, standaard 0,05 gwei). */
+  base: bigint;
+  /** Plafond (MAX_PRIORITY_FEE_GWEI, standaard 3 gwei). */
+  max: bigint;
+};
+
+/**
+ * Priority fee na een blokkade: een eigen transactie die on-chain revertte door een tijdelijke oorzaak, dus omdat een
+ * andere transactie eerder in hetzelfde blok een pool aanraakte of het venster vulde.
+ *
+ * Base ordent binnen een Flashblock op priority fee; wie vóór de aanraker staat, draait. De stap:
+ * - minstens een verdubbeling. Van 0,05 naar het plafond van 3 gwei zijn dat 6 stappen (0,1 – 0,2 – 0,4 – 0,8 – 1,6 –
+ *   3). Met hooguit één verzending per `SEND_RETRY_BLOCKS` (standaard 30 blokken ≈ 1 minuut) zit de keeper binnen
+ *   ~6 minuten, dus binnen één run van 10 minuten, op het plafond; bij een stap van +25% zijn dat 19 pogingen en
+ *   verliest hij twee runs. Tegelijk betaalt hij hooguit het dubbele van de tip die nodig was.
+ * - is de tip van de aanraker bekend (`blockerTip`), dan direct 10% daarboven als dat meer is: één poging in plaats
+ *   van een reeks verdubbelingen, en een marge tegen een aanvaller die zijn tip steeds een beetje verhoogt.
+ * - nooit boven `max`. Bij 3 gwei kost blokkeren de aanvaller ~1.050 EURC per uur (92.630 gas per blok × 1.800 blokken,
+ *   gemeten gas; L-3-metingen), tegen ~15 EURC per uur voor de keeper (één gerevertte poging van ~40k gas per minuut).
+ */
+export const nextPriorityFee = (current: bigint, blockerTip: bigint | undefined, policy: FeePolicy): bigint => {
+  let next = current * 2n;
+  if (blockerTip !== undefined) {
+    const outbid = (blockerTip * 11n + 9n) / 10n + 1n;
+    if (outbid > next) next = outbid;
+  }
+  if (next < policy.base) next = policy.base;
+  return next > policy.max ? policy.max : next;
+};
+
+/**
+ * `maxFeePerGas` bij een gekozen priority fee: twee keer de base fee van het laatste blok plus de tip. De transactie
+ * betaalt de werkelijke base fee plus de tip; het dubbele is ruimte voor een stijgende base fee tot de opname.
+ * Beide fees worden expliciet meegegeven, anders schat viem ze allebei zelf en verdwijnt de gekozen tip.
+ */
+export const maxFeePerGas = (baseFeePerGas: bigint, priorityFee: bigint): bigint => baseFeePerGas * 2n + priorityFee;
+
+/** Werkelijke tip van een opgenomen transactie: min(maxPriorityFeePerGas, maxFeePerGas − base fee), of gasPrice − base fee. */
+export const effectiveTip = (
+  tx: { maxPriorityFeePerGas?: bigint; maxFeePerGas?: bigint; gasPrice?: bigint },
+  baseFeePerGas: bigint,
+): bigint => {
+  if (tx.maxPriorityFeePerGas !== undefined && tx.maxFeePerGas !== undefined) {
+    const headroom = tx.maxFeePerGas - baseFeePerGas;
+    return tx.maxPriorityFeePerGas < headroom ? tx.maxPriorityFeePerGas : headroom;
+  }
+  const price = tx.gasPrice ?? baseFeePerGas;
+  return price > baseFeePerGas ? price - baseFeePerGas : 0n;
+};
+
+/**
+ * Hoogste tip van de transacties die vóór de eigen transactie in het blok een pool aanraakten (een log van een van
+ * beide pools, met een lagere `transactionIndex`). `undefined` als er geen is.
+ */
+export const blockerTip = (
+  poolTxs: readonly { transactionIndex: number; tip: bigint }[],
+  ownIndex: number,
+): bigint | undefined =>
+  poolTxs
+    .filter((tx) => tx.transactionIndex < ownIndex)
+    .reduce<bigint | undefined>((max, tx) => (max === undefined || tx.tip > max ? tx.tip : max), undefined);
+
+/**
+ * Na een blokkade verstuurt de keeper pas weer `sendRetryBlocks` blokken later (simuleren mag elk blok). Een
+ * gerevertte poging kost ~40k gas; één per ~30 blokken houdt de kosten voor de keeper onder aanval rond 1/69 van die
+ * van de aanvaller, die elk blok moet aanraken (L-3-metingen).
+ */
+export const firstSendBlock = (lastBlockadeBlock: bigint | null, sendRetryBlocks: number): bigint | null =>
+  lastBlockadeBlock === null ? null : lastBlockadeBlock + BigInt(sendRetryBlocks);
+
+/**
+ * Vroegste blok voor de volgende poging voor een owner:
+ * - ná de vorige poging voor die owner (`retryAfterBlock`) en ná de laatste eigen transactie (`lastRunBlock`). Een run
+ *   die de tick van een pool verandert, raakt die pool voor de rest van het blok aan; lees en simuleer de volgende
+ *   owner (en de volgende pagina) dus pas in een later blok;
+ * - na een blokkade niet vóór `sendFrom` (`firstSendBlock`); `throttled` zegt dat die grens bepaalt.
+ * `target` null: niet wachten.
+ */
+export const nextAttemptBlock = (
+  retryAfterBlock: bigint | null,
+  lastRunBlock: bigint | null,
+  sendFrom: bigint | null,
+): { target: bigint | null; throttled: boolean } => {
+  const after = retryAfterBlock !== null && (lastRunBlock === null || retryAfterBlock > lastRunBlock) ? retryAfterBlock : lastRunBlock;
+  const target = after === null ? null : after + 1n;
+  if (sendFrom !== null && (target === null || sendFrom > target)) {
+    return { target: sendFrom, throttled: true };
+  }
+  return { target, throttled: false };
+};
 
 export const formatEurc = (baseUnits: bigint): string => {
   const whole = baseUnits / EURC_UNIT;
