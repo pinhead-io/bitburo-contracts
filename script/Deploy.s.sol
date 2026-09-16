@@ -11,7 +11,7 @@ import {Rebalancer} from "../src/Rebalancer.sol";
  *      Arjan:
  *
  *   BASE_RPC_URL=… TREASURY=0x… WORKFLOW_OWNER=0x… \
- *   ~/.foundry/bin/forge script script/Deploy.s.sol --rpc-url base --broadcast --verify --private-key $DEPLOYER_KEY
+ *   ~/.foundry/bin/forge script script/Deploy.s.sol --rpc-url base --broadcast --verify --private-key $DEPLOYER_PRIVATE_KEY
  *
  * Zonder --broadcast is dit een droge run.
  */

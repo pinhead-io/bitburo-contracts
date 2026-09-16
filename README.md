@@ -4,6 +4,15 @@ Het onveranderbare `Rebalancer`-contract van Bitburo op Base mainnet, plus de tw
 
 De gebruiker geeft het contract een ERC-20-mandaat (allowance) voor EURC en cbBTC en zet zijn eigen instellingen. Het contract rebalancet vanuit de wallet van de gebruiker naar de gekozen verdeling; het geld blijft in de wallet. Bitburo heeft geen sleutel waarmee het instellingen of fondsen kan aanraken; de enige bevoegdheid van de treasury is de eenmalige uitschakelaar `retire()` (zie [Contract buiten gebruik stellen](#contract-buiten-gebruik-stellen)). Ontwerp en besluiten: zie de overdracht (privé artifact, bij Arjan).
 
+## Live op Base mainnet
+
+| Wat | Adres | Vanaf |
+|---|---|---|
+| Rebalancer (actief) | `0xE577D68948883FDF8e2694e38dF656D2D9CA2104` | blok 51341661, uitgerold vanaf commit `f8a6d49` |
+| Rebalancer (oud) | `0xED47…e6e5` | vervangen; blijft permissionless uitvoerbaar zolang gebruikers er een allowance hebben staan |
+
+> **Let op: het live contract dateert van vóór `retire()`.** Het is uitgerold vanaf commit `f8a6d49`; `retire()` kwam er één commit later bij en zit dus niet in de bytecode op de keten. `retired()` aanroepen op `0xE577…2104` revert. Alles wat hieronder over `retire`, `retired`, `ContractRetired` en `AlreadyRetired` staat geldt pas vanaf de eerstvolgende deploy. Tot die tijd is er geen noodstop; zie [Contract buiten gebruik stellen](#contract-buiten-gebruik-stellen).
+
 ## Contract-interface
 
 | Functie | Wat |
@@ -40,6 +49,8 @@ Gas van `execute` op de fork (audit 15 september 2026, tegen het 700k-budget van
 `onReport` schrijft bij een mislukte `execute` `lastAttemptAt[owner]`; `dueOwners` slaat die owner daarna een `interval` lang over. Een owner die structureel revert (blacklist, te krappe slippage, out-of-gas) kost de CRE-wekker zo hooguit één slot per interval in plaats van elk rapport. `isDue` en `execute` kijken er niet naar, dus het keeper-script en handmatige runs kunnen eerder opnieuw proberen.
 
 ## Contract buiten gebruik stellen
+
+> **Nog niet beschikbaar op het live contract.** `0xE577…2104` is uitgerold vanaf commit `f8a6d49` en mist `retire()`; dit draaiboek geldt pas vanaf de eerstvolgende deploy. Moet het huidige contract vandaag stil, dan is de enige weg per gebruiker: `setParams` met `active = false` en `approve(0)` op EURC en cbBTC. Dat kan alleen de gebruiker zelf, de treasury niet.
 
 Het contract heeft geen admin, upgrade of pauzeknop, wel één eenmalige en onomkeerbare uitschakelaar: `retire()`, alleen aan te roepen met de sleutel van `TREASURY`. Dit is het antwoord op audit-bevinding M-8/M-9 (oude mandaten die na een redeploy onzichtbaar actief blijven, en het ontbreken van een noodstop). Er is geen weg terug en geen `unretire`.
 

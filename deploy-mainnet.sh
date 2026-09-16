@@ -6,6 +6,19 @@
 #   set -a; source ~/Code/bitburo/.env; set +a; bash ~/Code/bitburo-contracts/deploy-mainnet.sh go
 #
 # "dry" simuleert alleen, "go" deployt echt, "verify" verifieert de laatste broadcast op Basescan (ETHERSCAN_API_KEY).
+#
+# WAARSCHUWINGEN, lees voor je "go" of "verify" draait:
+#
+#   * "go" is niet idempotent. Er is geen bestaanscheck en geen salt, dus een tweede run zet een
+#     tweede, los contract op mainnet en overschrijft broadcast/Deploy.s.sol/8453/run-latest.json.
+#     Die map staat in .gitignore, dus dat bestand is op deze machine het enige bewijs van de
+#     huidige deploy. Maak er een kopie van voor je opnieuw deployt.
+#   * "verify" slaagt alleen zolang src/ ongewijzigd is sinds de deploy. De huidige broadcast is van
+#     commit f8a6d49; daarna is retire() toegevoegd. Verifieren vanaf de huidige broncode biedt dus
+#     bytecode aan die niet matcht. Check uit op de commit uit run-latest.json voor je verifieert.
+#   * De sleutel gaat als --private-key op de opdrachtregel mee en is daarmee zichtbaar in de
+#     procestabel (ps) van deze machine. Voor een deploy vanaf een gedeelde machine: gebruik
+#     forge script --account <keystore> of --interactive.
 set -euo pipefail
 cd "$(dirname "$0")"
 
