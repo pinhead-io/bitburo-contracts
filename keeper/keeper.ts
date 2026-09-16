@@ -31,7 +31,11 @@
  *   (een blokkade), dan verstuurt het script pas na een willekeurig aantal blokken opnieuw (gemiddeld
  *   SEND_RETRY_BLOCKS, zodat een aanvaller het moment niet kan voorspellen), met minstens het dubbele
  *   van de vorige tip en minstens 10% boven de hoogste tip van wie de pool eerder in dat blok aanraakte, tot
- *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei). De verhoogde tip geldt voor de rest van deze run.
+ *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei). De verhoogde tip wordt bewaard in FEE_STATE_FILE en geldt zolang de
+ *   laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een revert telt alleen als blokkade als
+ *   een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit) én een transactie vóór de eigen
+ *   transactie een pool aanraakte (Swap, Mint of Burn).
+ * - Eén run tegelijk (LOCK_FILE), en de run leest na het retry-budget geen nieuwe kandidaten meer.
  *
  * Registratiespam (audit lead 9): iedereen kan zich registreren, ook zonder saldo, en het register krimpt nooit. Het
  * script leest daarom per 500 owners in één Multicall3 per 100 owners `params(owner).active` en saldo en allowance van
@@ -47,10 +51,10 @@
  *   RPC_URL=https://mainnet.base.org REBALANCER=0x… KEEPER_PRIVATE_KEY=0x… bun run keeper.ts
  * Optioneel: REWARD_TO=0x…  PAGE_SIZE=20  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
  *            RETRY_SECONDS=540  SEND_RETRY_BLOCKS=30  PRIORITY_FEE_GWEI=0.05  MAX_PRIORITY_FEE_GWEI=3
- *            GAS_LIMIT=1000000  COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600
- *            COOLDOWN_MAX_SECONDS=86400
+ *            GAS_LIMIT=1000000  FEE_STATE_FILE=./keeper-fee.json  FEE_HOLD_SECONDS=3600  LOCK_FILE=./keeper.lock
+ *            COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600  COOLDOWN_MAX_SECONDS=86400
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import {
   BaseError,
   ContractFunctionRevertedError,
@@ -62,12 +66,15 @@ import {
   type Address,
   type Hex,
   type TransactionReceipt,
+  WaitForTransactionReceiptTimeoutError,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import {
   type BlockOverrides,
   type CooldownState,
+  type FeeState,
+  type Resimulation,
   type OwnerFunds,
   OVERRIDE_PROBE_CODE,
   blockerTip,
@@ -87,6 +94,8 @@ import {
   nextAttemptBlock,
   nextBlockOverrides,
   nextSendBlock,
+  onchainRevertVerdict,
+  parseFeeState,
   nextPriorityFee,
   overridesApplied,
   parseCooldownState,
@@ -96,6 +105,7 @@ import {
   retryDeadline,
   runSizeSkipReason,
   shouldReadPageAgain,
+  startPriorityFee,
 } from "./selection";
 
 const abi = parseAbi([
@@ -126,6 +136,13 @@ const abi = parseAbi([
   "error StaleFeed(address feed)",
 ]);
 
+/** Pool-events die een observatie kunnen schrijven of de koers verschuiven (Uniswap v3). Collect en Flash tellen niet. */
+const poolEvents = parseAbi([
+  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
+  "event Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
+  "event Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
+]);
+
 const env = (name: string, fallback?: string): string => {
   const value = process.env[name] ?? fallback;
   if (value === undefined) throw new Error(`${name} ontbreekt`);
@@ -147,6 +164,9 @@ const feePolicy = {
   max: parseGwei(env("MAX_PRIORITY_FEE_GWEI", "3")),
 };
 const cooldownFile = env("COOLDOWN_FILE", "./keeper-cooldowns.json");
+const feeStateFile = env("FEE_STATE_FILE", "./keeper-fee.json");
+const feeHoldSeconds = Number(env("FEE_HOLD_SECONDS", "3600"));
+const lockFile = env("LOCK_FILE", "./keeper.lock");
 const cooldownPolicy = {
   baseSeconds: Number(env("COOLDOWN_SECONDS", "3600")),
   maxSeconds: Number(env("COOLDOWN_MAX_SECONDS", "86400")),
@@ -157,6 +177,43 @@ if (!Number.isInteger(blockRetries) || blockRetries < 0) throw new Error("BLOCK_
 if (!Number.isFinite(retrySeconds) || retrySeconds < 0) throw new Error("RETRY_SECONDS moet een getal >= 0 zijn");
 if (!Number.isInteger(sendRetryBlocks) || sendRetryBlocks < 1) throw new Error("SEND_RETRY_BLOCKS moet een geheel getal >= 1 zijn");
 if (feePolicy.base > feePolicy.max) throw new Error("PRIORITY_FEE_GWEI mag niet boven MAX_PRIORITY_FEE_GWEI liggen");
+if (!Number.isFinite(feeHoldSeconds) || feeHoldSeconds < 0) throw new Error("FEE_HOLD_SECONDS moet een getal >= 0 zijn");
+
+/**
+ * Eén run tegelijk: twee runs zouden om dezelfde nonce en hetzelfde cool-down-bestand vechten. Het lock-bestand bevat
+ * de pid; een lock van een proces dat niet meer bestaat, wordt opgeruimd.
+ */
+const acquireLock = (): boolean => {
+  if (existsSync(lockFile)) {
+    const pid = Number(readFileSync(lockFile, "utf8").trim());
+    let alive = false;
+    try {
+      if (Number.isInteger(pid) && pid > 0) {
+        process.kill(pid, 0);
+        alive = true;
+      }
+    } catch {
+      alive = false;
+    }
+    if (alive) return false;
+    unlinkSync(lockFile);
+  }
+  const fd = openSync(lockFile, "wx");
+  writeFileSync(fd, `${process.pid}\n`);
+  closeSync(fd);
+  return true;
+};
+if (!acquireLock()) {
+  console.warn(`Een andere keeper-run loopt nog (${lockFile}); deze run stopt.`);
+  process.exit(0);
+}
+process.on("exit", () => {
+  try {
+    if (readFileSync(lockFile, "utf8").trim() === String(process.pid)) unlinkSync(lockFile);
+  } catch {
+    // al weg
+  }
+});
 
 const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
 const account = dryRun ? undefined : privateKeyToAccount(env("KEEPER_PRIVATE_KEY") as Hex);
@@ -169,6 +226,23 @@ const deadline = retryDeadline(startSeconds, retrySeconds);
 
 /** Leest de node het volgende blok (blok-overrides)? Eén keer per run gecontroleerd met de probe. */
 let readsNextBlock = false;
+
+/**
+ * Waarop een lezing draait. Altijd vastgepind op het gelezen blok (`blockNumber`): anders kan de node al een blok verder
+ * zijn, en rekent hij met de overrides van het vorige blok op de staat van het nieuwe (dan telt een aanraking in dat
+ * nieuwe blok weer mee).
+ */
+type At = { blockNumber?: bigint; blockOverrides?: BlockOverrides };
+const atParams = (at: At) => ({
+  ...(at.blockNumber === undefined ? {} : { blockNumber: at.blockNumber }),
+  ...(at.blockOverrides === undefined ? {} : { blockOverrides: at.blockOverrides }),
+});
+
+/** Lezen op `latest`: vastgepind op dat blok, met de overrides van het volgende blok als de node die toepast. */
+const atLatest = (latest: { number: bigint; timestamp: bigint }): At => ({
+  blockNumber: latest.number,
+  blockOverrides: overridesFor(latest),
+});
 
 /** Overrides voor het blok ná `latest`, of undefined bij de terugval op het laatste blok. */
 const overridesFor = (latest: { number: bigint; timestamp: bigint }): BlockOverrides | undefined =>
@@ -186,26 +260,25 @@ const read = <T>(
     | "POOL_EURC_USDC"
     | "POOL_USDC_CBBTC",
   args: readonly unknown[] = [],
-  blockOverrides?: BlockOverrides,
+  at: At = {},
 ) =>
   publicClient.readContract({
     address: rebalancer,
     abi,
     functionName,
     args,
-    ...(blockOverrides === undefined ? {} : { blockOverrides }),
+    ...atParams(at),
     // biome-ignore lint/suspicious/noExplicitAny: viem's ABI-generics zijn te strikt voor een gedeelde helper
   } as any) as Promise<T>;
 
-const simulateExecute = (owner: Address, at: { blockNumber?: bigint; blockOverrides?: BlockOverrides } = {}) =>
+const simulateExecute = (owner: Address, at: At = {}) =>
   publicClient.simulateContract({
     address: rebalancer,
     abi,
     functionName: "execute",
     args: [owner, rewardTo],
     account,
-    ...(at.blockNumber === undefined ? {} : { blockNumber: at.blockNumber }),
-    ...(at.blockOverrides === undefined ? {} : { blockOverrides: at.blockOverrides }),
+    ...atParams(at),
   });
 
 const revertOf = (error: unknown): ContractFunctionRevertedError | undefined => {
@@ -281,33 +354,65 @@ const failed = (owner: Address, error: unknown) => {
 let lastRunBlock: bigint | null = null;
 /** Na een blokkade (eigen transactie on-chain gerevert door een tijdelijke oorzaak): vroegste blok voor een nieuwe send. */
 let sendFromBlock: bigint | null = null;
-/** Priority fee voor de volgende transactie; loopt op na een blokkade, tot MAX_PRIORITY_FEE_GWEI. */
-let priorityFee = feePolicy.base;
+/** Priority fee voor de volgende transactie; loopt op na een blokkade, tot MAX_PRIORITY_FEE_GWEI (`startPriorityFee`). */
+const readFeeState = (): FeeState | undefined => {
+  try {
+    return existsSync(feeStateFile) ? parseFeeState(readFileSync(feeStateFile, "utf8")) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+let priorityFee = startPriorityFee(readFeeState(), startSeconds, feePolicy, feeHoldSeconds);
+const saveFeeState = (blockadeAt: number) =>
+  writeFileSync(feeStateFile, `${JSON.stringify({ priorityFeeWei: priorityFee.toString(), lastBlockadeAt: blockadeAt }, null, 2)}\n`);
 
 let pools: readonly Address[] | undefined;
 
 /**
- * Hoogste tip van de transacties die vóór de eigen transactie in dat blok een van beide pools aanraakten (logs van de
- * pool). Best effort: bij een leesfout undefined, en dan verdubbelt alleen de eigen tip.
+ * Transacties die vóór de eigen transactie in dat blok een van beide pools aanraakten (Swap, Mint of Burn), en de
+ * hoogste tip daarvan. Bij een leesfout: `touched` onbekend (false) en geen tip; dan loopt de fee niet op.
  */
-const blockerTipOf = async (receipt: TransactionReceipt): Promise<bigint | undefined> => {
+const blockersOf = async (receipt: TransactionReceipt): Promise<{ touched: boolean; tip: bigint | undefined }> => {
   try {
     pools ??= [await read<Address>("POOL_EURC_USDC"), await read<Address>("POOL_USDC_CBBTC")];
     const [block, logs] = await Promise.all([
       publicClient.getBlock({ blockHash: receipt.blockHash }),
-      publicClient.getLogs({ address: [...pools], blockHash: receipt.blockHash }),
+      publicClient.getLogs({ address: [...pools], events: poolEvents, blockHash: receipt.blockHash }),
     ]);
     const hashes = [
       ...new Set(logs.filter((log) => (log.transactionIndex ?? Infinity) < receipt.transactionIndex).map((log) => log.transactionHash)),
     ].filter((hash): hash is Hex => hash !== null);
     const txs = await Promise.all(hashes.map((hash) => publicClient.getTransaction({ hash })));
-    return blockerTip(
+    const tip = blockerTip(
       txs.map((tx) => ({ transactionIndex: tx.transactionIndex ?? Infinity, tip: effectiveTip(tx, block.baseFeePerGas ?? 0n) })),
       receipt.transactionIndex,
     );
+    return { touched: hashes.length > 0, tip };
   } catch (error) {
-    console.warn(`tip van de aanraker niet te lezen: ${describeError(error)}`);
-    return undefined;
+    console.warn(`aanrakers in blok ${receipt.blockNumber} niet te lezen: ${describeError(error)}`);
+    return { touched: false, tip: undefined };
+  }
+};
+
+/**
+ * Hersimuleer een on-chain gerevert `execute` op de staat aan het begin van het blok van de transactie: het vorige blok,
+ * met de overrides van het blok zelf. Zo tellen alleen transacties vóór de eigen transactie, niet een aanraking erna.
+ * Zonder override-ondersteuning: op het blok zelf (dan kan een latere aanraking ook meetellen).
+ */
+const resimulateAtBlockStart = async (owner: Address, receipt: TransactionReceipt): Promise<Resimulation> => {
+  try {
+    if (readsNextBlock) {
+      const block = await publicClient.getBlock({ blockHash: receipt.blockHash });
+      await simulateExecute(owner, {
+        blockNumber: receipt.blockNumber - 1n,
+        blockOverrides: { number: receipt.blockNumber, time: block.timestamp },
+      });
+    } else {
+      await simulateExecute(owner, { blockNumber: receipt.blockNumber });
+    }
+    return { kind: "passed" };
+  } catch (error) {
+    return revertOf(error) === undefined ? { kind: "error" } : { kind: "reverted", errorName: errorNameOf(error) };
   }
 };
 
@@ -326,8 +431,8 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
   }
 
   const latest = await publicClient.getBlock();
-  const blockOverrides = overridesFor(latest);
-  const [due, eurcDelta] = await read<readonly [boolean, bigint]>("isDue", [owner], blockOverrides);
+  const at = atLatest(latest);
+  const [due, eurcDelta] = await read<readonly [boolean, bigint]>("isDue", [owner], at);
   const direction = eurcDelta > 0n ? "koop" : "verkoop";
   const eurc = formatEurc(eurcDelta < 0n ? -eurcDelta : eurcDelta);
   if (due) {
@@ -342,10 +447,11 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
   // slippage) blijft in dueOwners staan en zou anders elke run ~160k gas kosten zonder beloning. Ook als isDue
   // false zegt: dat kan een vol blokvenster zijn, en alleen de simulatie geeft de reden.
   let failure: unknown;
+  /** Oordeel over de fout, als die niet rechtstreeks uit `failure` volgt (on-chain revert). */
+  let verdict: ReturnType<typeof onchainRevertVerdict>["failure"] | undefined;
   let simulated = false;
-  let resimulationPassed = false;
   try {
-    await simulateExecute(owner, { blockOverrides });
+    await simulateExecute(owner, at);
     simulated = true;
   } catch (error) {
     failure = error;
@@ -358,13 +464,15 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
 
   if (simulated) {
     if (dryRun || !walletClient) {
-      console.log(`[dry-run] ${owner}: ${direction} ≈ ${eurc} EURC (simulatie ok${blockOverrides ? ", volgend blok" : ""})`);
+      console.log(`[dry-run] ${owner}: ${direction} ≈ ${eurc} EURC (simulatie ok${at.blockOverrides ? ", volgend blok" : ""})`);
       return { outcome: "dry-run", block: null };
     }
     try {
-      // Gas en beide fees expliciet: anders schat viem ze zelf, en eth_estimateGas draait op het laatste blok (waar
-      // een aanraking de schatting laat reverten) en zou de gekozen tip overschrijven. GAS_LIMIT 1.000.000 is de
-      // grens die test_fork_buyAndSellGasCost bewaakt.
+      // Gas, beide fees, nonce en chainId expliciet: anders schat viem ze zelf. eth_estimateGas draait op het laatste
+      // blok (waar een aanraking de schatting laat reverten), een fee-schatting overschrijft de gekozen tip, en zonder
+      // nonce probeert viem eerst eth_fillTransaction. GAS_LIMIT 1.000.000 is de grens die
+      // test_fork_buyAndSellGasCost bewaakt.
+      const nonce = await publicClient.getTransactionCount({ address: walletClient.account.address, blockTag: "pending" });
       const hash = await walletClient.writeContract({
         address: rebalancer,
         abi,
@@ -373,8 +481,23 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
         gas: gasLimit,
         maxPriorityFeePerGas: priorityFee,
         maxFeePerGas: maxFeePerGas(latest.baseFeePerGas ?? 0n, priorityFee),
+        nonce,
+        // `chainId` staat niet in het type van writeContract, maar gaat via sendTransaction mee naar
+        // prepareTransactionRequest; zonder probeert viem eerst eth_fillTransaction (viem 2.56.3).
+        ...({ chainId: base.id } as unknown as Record<string, never>),
       });
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      let receipt: TransactionReceipt;
+      try {
+        receipt = await publicClient.waitForTransactionReceipt({ hash });
+      } catch (error) {
+        if (error instanceof WaitForTransactionReceiptTimeoutError) {
+          // De transactie kan nog landen; een volgende send zou achter dezelfde nonce blijven hangen. Geen cool-down,
+          // de run stopt.
+          saveCooldowns();
+          throw new Error(`transactie ${hash} voor ${owner} niet binnen de wachttijd opgenomen; run gestopt`);
+        }
+        throw error;
+      }
       console.log(`${owner}: ${direction} ≈ ${eurc} EURC → ${receipt.status} ${hash} (tip ${formatGwei(priorityFee)} gwei)`);
       lastRunBlock = receipt.blockNumber;
       if (receipt.status === "success") {
@@ -382,31 +505,31 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
         saveCooldowns();
         return { outcome: "executed", block: receipt.blockNumber };
       }
-      // Gerevert na een geslaagde simulatie: de staat veranderde in de tussentijd. Simuleer op het blok van de
-      // transactie opnieuw voor de reden (bijvoorbeeld iemand die eerder in het blok de pool aanraakte).
+      // Gerevert na een geslaagde simulatie: de staat veranderde in de tussentijd. Hersimuleer op het begin van dat
+      // blok voor de reden, en kijk wie vóór ons een pool aanraakte.
       failure = new Error(`transactie ${hash} is gerevert`);
-      try {
-        await simulateExecute(owner, { blockNumber: receipt.blockNumber });
-        // Slaagt nu wel: de revert kwam door een tijdelijke stand eerder in dat blok, niet door de owner.
-        resimulationPassed = true;
-      } catch (error) {
-        if (errorNameOf(error) !== undefined) failure = error;
-      }
-      if (resimulationPassed || isBlockWindowRevert(errorNameOf(failure))) {
-        // Blokkade: een andere transactie stond vóór ons in het blok. Hogere tip, en pas gemiddeld SEND_RETRY_BLOCKS later.
+      const [resimulation, blockers] = await Promise.all([resimulateAtBlockStart(owner, receipt), blockersOf(receipt)]);
+      const judged = onchainRevertVerdict(resimulation, blockers.touched);
+      verdict = judged.failure;
+      if (resimulation.kind === "reverted") failure = new Error(`transactie ${hash} is gerevert (${resimulation.errorName ?? "revert"})`);
+      if (judged.blockade) {
+        // Blokkade: een andere transactie raakte vóór ons een pool aan. Hogere tip, en pas gemiddeld SEND_RETRY_BLOCKS later.
         sendFromBlock = nextSendBlock(receipt.blockNumber, sendRetryBlocks, Math.random());
-        const tip = await blockerTipOf(receipt);
-        priorityFee = nextPriorityFee(priorityFee, tip, feePolicy);
+        priorityFee = nextPriorityFee(priorityFee, blockers.tip, feePolicy);
+        saveFeeState(nowSec());
         console.warn(
-          `${owner}: blokkade in blok ${receipt.blockNumber} (${describeError(failure)}; tip aanraker ${tip === undefined ? "onbekend" : `${formatGwei(tip)} gwei`}); volgende tip ${formatGwei(priorityFee)} gwei`,
+          `${owner}: blokkade in blok ${receipt.blockNumber} (tip aanraker ${blockers.tip === undefined ? "onbekend" : `${formatGwei(blockers.tip)} gwei`}); volgende tip ${formatGwei(priorityFee)} gwei`,
         );
       }
     } catch (error) {
+      if (error instanceof Error && error.message.includes("run gestopt")) throw error;
       failure = error;
     }
   }
 
-  const action = failureAction({ errorName: errorNameOf(failure), resimulationPassed }, nowSec(), deadline);
+  // Een fout van de node (geen revert van het contract) zegt niets over de owner: tijdelijk, geen cool-down.
+  const judged = verdict ?? { errorName: errorNameOf(failure), transient: revertOf(failure) === undefined };
+  const action = failureAction(judged, nowSec(), deadline);
   if (action === "fail") {
     failed(owner, failure);
     return { outcome: "skipped", block: null };
@@ -426,13 +549,13 @@ const FUNDS_BATCH = 100;
 /** Multicall3 over losse contract-calls, één eth_call per portie; een mislukte call geeft undefined. */
 const multicallResults = async (
   contracts: readonly { address: Address; functionName: string; args?: readonly unknown[] }[],
-  blockOverrides?: BlockOverrides,
+  at: At = {},
 ): Promise<unknown[]> => {
   const results = await publicClient.multicall({
     contracts: contracts.map((c) => ({ abi, ...c })),
     allowFailure: true,
     batchSize: 0,
-    ...(blockOverrides === undefined ? {} : { blockOverrides }),
+    ...atParams(at),
     // biome-ignore lint/suspicious/noExplicitAny: gemengde functies in één multicall
   } as any);
   return (results as { status: string; result?: unknown }[]).map((r) => (r.status === "success" ? r.result : undefined));
@@ -495,13 +618,20 @@ const findCandidates = async (): Promise<Address[]> => {
   return found;
 };
 
-/** Welke van deze owners zijn nu due? `isDue` per owner in één multicall. Een mislukte call telt als niet due. */
-const dueAmong = async (owners: readonly Address[], blockOverrides?: BlockOverrides): Promise<Address[]> => {
+/**
+ * Welke van deze owners zijn nu due? `isDue` per owner in één multicall. `isDue` revert nooit, dus een mislukte call is
+ * een fout van de node (viem vangt die met `allowFailure` ook af): dan breekt de run af in plaats van de owners stil
+ * over te slaan.
+ */
+const dueAmong = async (owners: readonly Address[], at: At): Promise<Address[]> => {
   const results = await multicallResults(
     owners.map((owner) => ({ address: rebalancer, functionName: "isDue", args: [owner] })),
-    blockOverrides,
+    at,
   );
-  return owners.filter((_, i) => (results[i] as readonly [boolean, bigint] | undefined)?.[0] === true);
+  if (results.some((r) => r === undefined)) {
+    throw new Error("isDue niet te lezen voor een portie kandidaten (fout van de node); run gestopt");
+  }
+  return owners.filter((_, i) => (results[i] as readonly [boolean, bigint])[0] === true);
 };
 
 readsNextBlock = await probeOverrides();
@@ -530,7 +660,11 @@ const count = (owner: Address, result: { outcome: Outcome; block: bigint | null 
 const candidates = await findCandidates();
 console.log(`${checked} owners geregistreerd, ${candidates.length} kandidaten na het filter op saldo en allowance`);
 
-for (const batch of chunks(candidates, Number(pageSize))) {
+for (const [index, batch] of chunks(candidates, Number(pageSize)).entries()) {
+  if (nowSec() >= deadline) {
+    console.warn(`Retry-budget (${retrySeconds} s) op: ${candidates.length - index * Number(pageSize)} kandidaten niet meer gelezen; de volgende run gaat door.`);
+    break;
+  }
   let readBlock: bigint | null = null;
   for (let reads = 1; ; reads += 1) {
     // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze portie.
@@ -538,7 +672,7 @@ for (const batch of chunks(candidates, Number(pageSize))) {
     if (!(await waitForBlockAfter(after))) break;
     const latest = await publicClient.getBlock();
     readBlock = latest.number;
-    const fresh = newOwners(await dueAmong(batch, overridesFor(latest)), handled);
+    const fresh = newOwners(await dueAmong(batch, atLatest(latest)), handled);
 
     for (const owner of fresh) {
       handled.add(owner.toLowerCase());

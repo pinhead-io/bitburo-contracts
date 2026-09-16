@@ -25,6 +25,9 @@ import {
   nextAttemptBlock,
   nextBlockOverrides,
   nextSendBlock,
+  onchainRevertVerdict,
+  parseFeeState,
+  startPriorityFee,
   nextPriorityFee,
   overridesApplied,
   parseCooldownState,
@@ -54,6 +57,11 @@ describe("runSizeSkipReason", () => {
 
   test("a minimum of 0 keeps everything", () => {
     expect(runSizeSkipReason(1n, 0)).toBeNull();
+  });
+
+  test("a fractional minimum does not throw and rounds up", () => {
+    expect(runSizeSkipReason(20_500_000n, 20.5)).toBeNull();
+    expect(runSizeSkipReason(20_499_999n, 20.5)).toContain("te klein");
   });
 });
 
@@ -96,12 +104,45 @@ describe("block window reverts", () => {
     expect(failureAction("SpotDeviatesFromOracle", 1_000, 540)).toBe("fail");
   });
 
+  test("a node or network error is temporary and never a cool-down", () => {
+    expect(isTemporaryFailure({ errorName: undefined, transient: true })).toBe(true);
+    expect(failureAction({ errorName: undefined, transient: true }, 0, 540)).toBe("retry");
+    expect(failureAction({ errorName: undefined, transient: true }, 540, 540)).toBe("skip");
+  });
+
   test("an on-chain revert whose re-simulation passes is temporary (review I-1)", () => {
     expect(isTemporaryFailure({ errorName: undefined, resimulationPassed: true })).toBe(true);
     expect(failureAction({ errorName: undefined, resimulationPassed: true }, 0, 540)).toBe("retry");
     expect(failureAction({ errorName: undefined, resimulationPassed: true }, 540, 540)).toBe("skip");
     // Geeft de hersimulatie een echte fout, dan telt die.
     expect(isTemporaryFailure({ errorName: "SpotDeviatesFromOracle", resimulationPassed: false })).toBe(false);
+  });
+});
+
+describe("on-chain revert verdict (L-3)", () => {
+  test("re-simulation at block start passes: temporary, a blockade only if a pool was touched before us", () => {
+    expect(onchainRevertVerdict({ kind: "passed" }, true)).toEqual({
+      failure: { errorName: undefined, resimulationPassed: true },
+      blockade: true,
+    });
+    // Bijvoorbeeld een andere keeper die dezelfde owner eerder in het blok uitvoerde, zonder pool-log vóór ons: geen
+    // hogere tip, wel tijdelijk (geen cool-down).
+    const noTouch = onchainRevertVerdict({ kind: "passed" }, false);
+    expect(noTouch.blockade).toBe(false);
+    expect(failureAction(noTouch.failure, 0, 540)).toBe("retry");
+  });
+
+  test("a real revert at block start is the real reason, even if a pool was touched", () => {
+    const v = onchainRevertVerdict({ kind: "reverted", errorName: "SpotDeviatesFromOracle" }, true);
+    expect(v.blockade).toBe(false);
+    expect(failureAction(v.failure, 0, 540)).toBe("fail");
+  });
+
+  test("a block window revert at block start or a node error stays temporary", () => {
+    expect(onchainRevertVerdict({ kind: "reverted", errorName: "BlockMoveExceeded" }, true).blockade).toBe(true);
+    const err = onchainRevertVerdict({ kind: "error" }, false);
+    expect(err.blockade).toBe(false);
+    expect(failureAction(err.failure, 0, 540)).toBe("retry");
   });
 });
 
@@ -225,6 +266,23 @@ describe("priority fee (L-3)", () => {
     expect(blockerTip(txs, 4)).toBe(9n);
     expect(blockerTip(txs, 0)).toBeUndefined();
     expect(blockerTip([], 10)).toBeUndefined();
+  });
+
+  test("the fee is kept between runs for FEE_HOLD_SECONDS after the last blockade", () => {
+    const state = { priorityFeeWei: (2n * GWEI).toString(), lastBlockadeAt: 10_000 };
+    expect(startPriorityFee(undefined, 10_000, policy, 3600)).toBe(policy.base);
+    expect(startPriorityFee(state, 10_000 + 3599, policy, 3600)).toBe(2n * GWEI);
+    expect(startPriorityFee(state, 10_000 + 3600, policy, 3600)).toBe(policy.base);
+    // Buiten het beleid (bijvoorbeeld een lager plafond na een configwijziging): begrensd.
+    expect(startPriorityFee({ ...state, priorityFeeWei: (10n * GWEI).toString() }, 10_000, policy, 3600)).toBe(policy.max);
+    expect(startPriorityFee({ ...state, priorityFeeWei: "1" }, 10_000, policy, 3600)).toBe(policy.base);
+  });
+
+  test("parseFeeState accepts its own format and ignores garbage", () => {
+    expect(parseFeeState('{"priorityFeeWei":"100000000","lastBlockadeAt":5}')).toEqual({ priorityFeeWei: "100000000", lastBlockadeAt: 5 });
+    expect(parseFeeState("{}")).toBeUndefined();
+    expect(parseFeeState('{"priorityFeeWei":"-1","lastBlockadeAt":5}')).toBeUndefined();
+    expect(parseFeeState('{"priorityFeeWei":100,"lastBlockadeAt":5}')).toBeUndefined();
   });
 
   test("after a blockade the next send waits a random 1 to 59 blocks, 30 on average", () => {

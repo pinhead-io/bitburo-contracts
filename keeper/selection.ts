@@ -8,7 +8,7 @@ export const EURC_UNIT = 1_000_000n;
 /** Reden om een due owner over te slaan op grond van de run-omvang, of null als de run meedoet. */
 export const runSizeSkipReason = (eurcDelta: bigint, minRunEurc: number): string | null => {
   const size = eurcDelta < 0n ? -eurcDelta : eurcDelta;
-  if (size < BigInt(minRunEurc) * EURC_UNIT) {
+  if (size < BigInt(Math.ceil(minRunEurc * Number(EURC_UNIT)))) {
     return `run te klein (${formatEurc(size)} EURC < ${minRunEurc} EURC)`;
   }
   return null;
@@ -37,10 +37,44 @@ export const isBlockWindowRevert = (errorName: string | undefined): boolean =>
 export type Failure = {
   errorName: string | undefined;
   resimulationPassed?: boolean;
+  /**
+   * Geen revert van het contract maar een fout van de node of het netwerk (429, timeout, "header not found"). Zegt niets
+   * over de owner, dus geen cool-down.
+   */
+  transient?: boolean;
 };
 
 export const isTemporaryFailure = (failure: Failure): boolean =>
-  isBlockWindowRevert(failure.errorName) || failure.resimulationPassed === true;
+  isBlockWindowRevert(failure.errorName) || failure.resimulationPassed === true || failure.transient === true;
+
+/**
+ * Uitkomst van de hersimulatie na een eigen transactie die on-chain revertte: op de staat aan het begin van dat blok
+ * (vorig blok, met de overrides van het blok zelf), zodat alleen transacties vóór de eigen transactie het verschil
+ * kunnen maken en niet wat er ná kwam.
+ */
+export type Resimulation = { kind: "passed" } | { kind: "reverted"; errorName: string | undefined } | { kind: "error" };
+
+/**
+ * Oordeel over een on-chain revert:
+ * - de hersimulatie slaagt: iets eerder in het blok liet de transactie reverten; tijdelijk;
+ * - de hersimulatie revert met een blokvenster-error, of de node gaf een fout: tijdelijk;
+ * - de hersimulatie revert met een andere error: die error is de echte reden (cool-down);
+ * - `blockade`: tijdelijk én een transactie vóór de eigen raakte een pool aan (Swap, Mint of Burn). Alleen dan loopt
+ *   de priority fee op; een eerdere feed-update of een andere keeper die dezelfde owner uitvoerde, is geen reden om
+ *   meer te bieden.
+ */
+export const onchainRevertVerdict = (
+  resimulation: Resimulation,
+  touchedBefore: boolean,
+): { failure: Failure; blockade: boolean } => {
+  const failure: Failure =
+    resimulation.kind === "passed"
+      ? { errorName: undefined, resimulationPassed: true }
+      : resimulation.kind === "error"
+        ? { errorName: undefined, transient: true }
+        : { errorName: resimulation.errorName };
+  return { failure, blockade: touchedBefore && isTemporaryFailure(failure) };
+};
 
 /**
  * Wat te doen na een mislukte simulatie of transactie voor een owner (audit L-3):
@@ -176,6 +210,43 @@ export const nextPriorityFee = (current: bigint, blockerTip: bigint | undefined,
   }
   if (next < policy.base) next = policy.base;
   return next > policy.max ? policy.max : next;
+};
+
+/** Opgeslagen priority fee tussen keeper-runs (`FEE_STATE_FILE`). */
+export type FeeState = { priorityFeeWei: string; lastBlockadeAt: number };
+
+/**
+ * Priority fee aan het begin van een run. Zonder geheugen zou elke run weer op de basis beginnen en weer ~6 blokkades
+ * nodig hebben om het plafond te halen; de aanvaller betaalt dan vooral lage tips. Daarom houdt de keeper de tip vast
+ * zolang de laatste blokkade minder dan `holdSeconds` (FEE_HOLD_SECONDS, standaard 3600) geleden is, en begint hij
+ * daarna weer op de basis. Zonder aanval kost dat hooguit een uur runs op de verhoogde tip.
+ */
+export const startPriorityFee = (
+  state: FeeState | undefined,
+  nowSeconds: number,
+  policy: FeePolicy,
+  holdSeconds: number,
+): bigint => {
+  if (state === undefined || nowSeconds - state.lastBlockadeAt >= holdSeconds) {
+    return policy.base;
+  }
+  const fee = BigInt(state.priorityFeeWei);
+  if (fee < policy.base) return policy.base;
+  return fee > policy.max ? policy.max : fee;
+};
+
+export const parseFeeState = (json: string): FeeState | undefined => {
+  const parsed: unknown = JSON.parse(json);
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    typeof (parsed as FeeState).priorityFeeWei !== "string" ||
+    !/^\d+$/.test((parsed as FeeState).priorityFeeWei) ||
+    typeof (parsed as FeeState).lastBlockadeAt !== "number"
+  ) {
+    return undefined;
+  }
+  return { priorityFeeWei: (parsed as FeeState).priorityFeeWei, lastBlockadeAt: (parsed as FeeState).lastBlockadeAt };
 };
 
 /**
