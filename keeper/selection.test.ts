@@ -51,6 +51,7 @@ import {
   recordFailure,
   replacementFees,
   retryDeadline,
+  rewardToError,
   runSizeSkipReason,
   scanSegments,
   servedBefore,
@@ -697,5 +698,26 @@ describe("stuck transaction (final review I-6)", () => {
   test("no replacement above the tip cap: the run stops clearly", () => {
     expect(replacementFees({ maxPriorityFeePerGas: max, maxFeePerGas: max * 2n }, parseGwei("0.005"), max)).toBeNull();
     expect(replacementFees({ maxPriorityFeePerGas: parseGwei("2.7"), maxFeePerGas: max * 2n }, 0n, max)).toBeNull();
+  });
+});
+
+describe("REWARD_TO (final review I-8)", () => {
+  const REBALANCER = "0x68B1D87F95878fE05B998F19b66F4baba5De1aed";
+
+  test("a valid address, also the zero address (no reward), passes", () => {
+    expect(rewardToError(OWNER, REBALANCER)).toBeNull();
+    expect(rewardToError(OWNER.toLowerCase(), REBALANCER)).toBeNull();
+    expect(rewardToError("0x0000000000000000000000000000000000000000", REBALANCER)).toBeNull();
+  });
+
+  test("an invalid address is refused with a clear message", () => {
+    expect(rewardToError("0x123", REBALANCER)).toBe("REWARD_TO is geen geldig adres: 0x123");
+    expect(rewardToError("", REBALANCER)).toContain("geen geldig adres");
+    expect(rewardToError("mijn-wallet.eth", REBALANCER)).toContain("geen geldig adres");
+  });
+
+  test("the Rebalancer itself is refused, whatever the case", () => {
+    expect(rewardToError(REBALANCER, REBALANCER)).toContain("Rebalancer-contract zelf");
+    expect(rewardToError(REBALANCER.toLowerCase(), REBALANCER)).toContain("Rebalancer-contract zelf");
   });
 });

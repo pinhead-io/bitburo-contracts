@@ -133,6 +133,7 @@ import {
   recordFailure,
   replacementFees,
   retryDeadline,
+  rewardToError,
   runSizeSkipReason,
   scanSegments,
   servedBefore,
@@ -291,6 +292,12 @@ setTimeout(() => {
 const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
 const account = dryRun ? undefined : privateKeyToAccount(env("KEEPER_PRIVATE_KEY") as Hex);
 const rewardTo = (process.env.REWARD_TO ?? account?.address ?? "0x0000000000000000000000000000000000000000") as Address;
+// Eindreview I-8: een ongeldige REWARD_TO liet elke simulatie falen met een encodefout, die als fout van de node gold;
+// de keeper probeerde dan tot het budget op was, zonder duidelijke melding. Nu stopt de run meteen.
+{
+  const problem = rewardToError(rewardTo, rebalancer);
+  if (problem !== null) throw new Error(problem);
+}
 const walletClient = account ? createWalletClient({ account, chain: base, transport: http(rpcUrl) }) : undefined;
 
 const nowSec = () => Math.floor(Date.now() / 1000);

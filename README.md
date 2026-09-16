@@ -232,7 +232,7 @@ DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh verify
 
 `go` weigert zolang er al een deploy in `broadcast/` staat: een tweede run zet een tweede, los contract op mainnet terwijl gebruikers hun allowance op het oude adres houden. Wil je dat echt, dan `FORCE_REDEPLOY=1`, en lees eerst het draaiboek in issue #7. `verify` weigert zolang je op een andere commit staat dan die is uitgerold, of zolang `src/` of `script/` ongecommitte wijzigingen heeft; Basescan kan de bytecode anders niet matchen. Zonder keystore werkt `DEPLOYER_PRIVATE_KEY` nog steeds, maar dan staat de sleutel in de procestabel.
 
-Keeper-script (vanuit `keeper/`):
+Keeper-script (vanuit `keeper/`). `REWARD_TO` moet een geldig adres zijn en niet de Rebalancer zelf; anders stopt het script meteen (eindreview I-8).
 
 ```bash
 bun install

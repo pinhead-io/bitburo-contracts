@@ -708,3 +708,16 @@ export const replacementFees = (previous: TxFees, baseFeePerGas: bigint, maxTip:
 export const isStuck = (sentAtBlock: bigint, latestBlock: bigint, waitBlocks: number): boolean =>
   latestBlock >= sentAtBlock + BigInt(waitBlocks);
 
+
+// ─── Eindreview I-8: REWARD_TO ─────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Eindreview I-8: REWARD_TO moet een geldig adres zijn en niet de Rebalancer zelf (het contract zou de beloning dan
+ * vervangen door address(0), dus de hele fee naar de treasury, en dat is vrijwel zeker een configuratiefout).
+ * address(0) mag: bewust geen beloning. Geeft de foutmelding, of null als het goed is.
+ */
+export const rewardToError = (value: string, rebalancer: string): string | null => {
+  if (!isAddress(value, { strict: false })) return `REWARD_TO is geen geldig adres: ${value}`;
+  if (value.toLowerCase() === rebalancer.toLowerCase()) return "REWARD_TO mag niet het Rebalancer-contract zelf zijn";
+  return null;
+};
