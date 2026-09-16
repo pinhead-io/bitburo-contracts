@@ -5,6 +5,7 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -894,6 +895,33 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(treasury), 0);
     }
 
+    /// @dev Testgat execute 7 (EX-09), de schrijvende kant: `transfer` van een nep-token draait wél met
+    ///      schrijfrechten. Terug de run van een due owner in via `execute` stuit op de reentrancy-guard; het enige
+    ///      dat lukt is het nep-token zelf als owner registreren (`_owners` vervuilen), zonder saldo of effect.
+    function test_sweep_maliciousTokenReentryCanOnlyRegisterItself() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        ReentrantSweepToken evil = new ReentrantSweepToken(r, alice);
+
+        r.sweep(IERC20(address(evil)));
+
+        assertEq(
+            bytes4(evil.executeRevertData()),
+            ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector,
+            "execute kwam binnen"
+        );
+        assertEq(eurc.balanceOf(alice), 1000e6);
+        assertEq(r.lastExecutedAt(alice), 0);
+        assertEq(r.ownerCount(), 2);
+        assertEq(r.owners(1, 1)[0], address(evil), "nep-token staat als owner geregistreerd");
+        (bool due,) = r.isDue(address(evil));
+        assertFalse(due, "zonder saldo nooit due");
+        assertEq(eurc.balanceOf(address(r)), 0);
+
+        // De echte owner loopt daarna gewoon.
+        r.execute(alice, keeper);
+        assertEq(eurc.balanceOf(alice), 900e6);
+    }
+
     function test_execute_rewardToSelfGoesToTreasury() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         vm.expectEmit(true, false, false, true, address(r));
@@ -1140,6 +1168,38 @@ contract RebalancerTest is RebalancerTestBase {
 
     function test_dueOwners_emptyRegistry() public view {
         assertEq(r.dueOwners(0, 10).length, 0);
+    }
+
+    /// @dev Testgat execute 2 en mandaat 1: een wekker die pagina voor pagina door `dueOwners` loopt (zoals
+    ///      keeper.ts, hier met pagina's van 5) bereikt elke due owner, ook nummer 6 en verder. Kleine wallets
+    ///      met toegestane params (10 EURC, onder de vloer) staan ertussen, zijn nooit due en verdringen niemand.
+    function test_dueOwners_pagingReachesEveryDueOwner() public {
+        uint256 count = 12;
+        uint256 pageSize = 5;
+        address[] memory users = new address[](count);
+        for (uint256 i = 0; i < count; i++) {
+            users[i] = makeAddr(string(abi.encodePacked("paged", i)));
+            bool isSmallWallet = i % 2 == 0;
+            _setUser(users[i], isSmallWallet ? 10e6 : 1000e6, 0, _defaultParams());
+        }
+        assertEq(r.dueOwners(0, count).length, count / 2);
+
+        uint256 executed;
+        for (uint256 offset = 0; offset < r.ownerCount(); offset += pageSize) {
+            address[] memory page = r.dueOwners(offset, pageSize);
+            for (uint256 j = 0; j < page.length; j++) {
+                r.execute(page[j], keeper);
+                executed++;
+            }
+        }
+
+        assertEq(executed, count / 2, "niet elke due owner bereikt");
+        for (uint256 i = 0; i < count; i++) {
+            bool isSmallWallet = i % 2 == 0;
+            assertEq(r.lastExecutedAt(users[i]), isSmallWallet ? 0 : uint64(START));
+        }
+        assertEq(eurc.balanceOf(users[count - 1]), 900e6, "de laatste owner is ook uitgevoerd");
+        assertEq(r.dueOwners(0, count).length, 0, "na de ronde is niemand meer due");
     }
 
     // quote ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -1503,6 +1563,59 @@ contract RebalancerTest is RebalancerTestBase {
         }
     }
 
+    /// @dev Testgat math 1 (M-01): bij een willekeurig, niet-rond koersgetal en volle allowance is een owner due
+    ///      precies als de begrensde correctie de minTrade haalt, met die correctie als delta; is hij due, dan
+    ///      slaagt `execute` ook (geen NothingToDo door afronding in de omrekening naar sats).
+    function testFuzz_isDue_matchesCorrectionAtAnyPrice(
+        uint256 price,
+        uint256 cash,
+        uint256 btc,
+        uint16 targetSteps,
+        uint16 band,
+        uint16 cap,
+        uint64 minTrade
+    ) public {
+        price = bound(price, 20_000e6, 200_000e6);
+        cash = bound(cash, 0, 1e12);
+        btc = bound(btc, 0, 1e10);
+        Rebalancer.Params memory p = _defaultParams();
+        p.targetBps = uint16(bound(targetSteps, 5, 95)) * 100;
+        p.bandBps = uint16(bound(band, 1, 9999));
+        p.maxCorrectionBps = uint16(bound(cap, 10, 10_000));
+        p.minTradeEurc = uint64(bound(minTrade, 20e6, 1e9));
+        _setPrice(price);
+        router.setPrice(price);
+        _setUser(alice, cash, btc, p);
+
+        uint256 position = Math.mulDiv(btc, price, 1e8);
+        uint256 total = cash + position;
+        uint256 correction;
+        bool isBuy;
+        if (total > 0) {
+            uint256 fractionWad = Math.mulDiv(position, 1e18, total);
+            uint256 targetWad = uint256(p.targetBps) * 1e18 / BPS;
+            isBuy = fractionWad < targetWad;
+            uint256 driftWad = isBuy ? targetWad - fractionWad : fractionWad - targetWad;
+            if (driftWad > uint256(p.bandBps) * 1e18 / BPS) {
+                uint256 capEurc = Math.max(Math.mulDiv(total, p.maxCorrectionBps, BPS), p.minTradeEurc);
+                correction = Math.min(Math.mulDiv(driftWad, total, 1e18), capEurc);
+            }
+        }
+        bool expectDue = correction >= p.minTradeEurc;
+
+        (bool due, int256 delta) = r.isDue(alice);
+        assertEq(due, expectDue, "due wijkt af van correctie >= minTrade");
+        if (!expectDue) {
+            assertEq(delta, 0);
+            vm.expectRevert(Rebalancer.NothingToDo.selector);
+            r.execute(alice, keeper);
+            return;
+        }
+        assertEq(delta, isBuy ? int256(correction) : -int256(correction));
+        r.execute(alice, keeper);
+        assertEq(r.lastExecutedAt(alice), uint64(START));
+    }
+
     function testFuzz_setParamsValidation(
         uint16 target,
         uint16 band,
@@ -1793,6 +1906,42 @@ contract MaliciousSweepToken {
     }
 
     function transfer(address, uint256) external pure returns (bool) {
+        return true;
+    }
+}
+
+/// @dev Nep-token voor `sweep` met een schrijvende `transfer`: probeert de run van `victim` binnen te komen en
+///      registreert zichzelf daarna als owner.
+contract ReentrantSweepToken {
+    Rebalancer private immutable _r;
+    address private immutable _victim;
+    bytes public executeRevertData;
+
+    constructor(Rebalancer r_, address victim_) {
+        _r = r_;
+        _victim = victim_;
+    }
+
+    function balanceOf(address) external pure returns (uint256) {
+        return 1;
+    }
+
+    function transfer(address, uint256) external returns (bool) {
+        try _r.execute(_victim, address(this)) {}
+        catch (bytes memory reason) {
+            executeRevertData = reason;
+        }
+        _r.setParams(
+            Rebalancer.Params({
+                active: true,
+                targetBps: 8000,
+                bandBps: 500,
+                maxCorrectionBps: 1000,
+                minTradeEurc: 20e6,
+                interval: 1 hours,
+                maxSlippageBps: 100
+            })
+        );
         return true;
     }
 }

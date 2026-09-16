@@ -163,12 +163,21 @@ Het interessante detail: de spot-check begrenst de *pool* vóór de swap op 0,5%
 
 ## Testgaten
 
-1. **Economische ondergrens ontbreekt volledig**: geen test met `minTradeEurc = 1`/`maxCorrectionBps = 1` en klein saldo die laat zien dat zo'n owner elk uur due is met fee 0 (EX-01), noch een fork-test dat `amountIn = 1` op de echte route revert (EX-02).
-2. **Meerdere due owners over meerdere runs**: alle `onReport`-tests hebben ≤ 5 owners in één tx. Geen test (contract of CRE `main.test.ts`) die vastlegt dat owner nummer 6+ ooit aan de beurt komt.
-3. **Eeuwig-due na revert**: `test_execute_revertsWhenOwnerBlacklisted` en `test_execute_lastExecutedAtNotSetOnRevert` stoppen bij `lastExecutedAt == 0`; ze asserten niet dat `isDue`/`dueOwners` de owner blijven aanbieden, en er is geen keeper-test voor herhaald verlies.
-4. **Bovengrens verlies per run**: geen fork-test die spot-push + slippage combineert en asserteert dat het verlies van de owner ≤ `FEE_BPS + maxSlippageBps` blijft (EX-03).
-5. **Treasury-blacklist / falende treasury-transfer** (EX-05) is ongetest.
-6. **Rapport met dubbele of al-uitgevoerde owners** (EX-04): geen test dat een duplicaat in `report` netjes `NotDue` geeft en de rest doorloopt.
-7. **`sweep` met een kwaadaardig token** (EX-09): ongetest dat het niets anders kan dan `_owners` vervuilen.
-8. **CRE-selectiegedrag**: `main.test.ts` test paginering en de cap, maar niet de volgorde-afhankelijkheid (wie valt af) en niet een filter op `eurcDelta`.
-9. Foundry-gotcha voor toekomstige tijdreeks-tests: onder `via_ir` wordt `block.timestamp` binnen één testfunctie gecachet, waardoor `vm.warp(block.timestamp + …)` in een lus niet doorwerkt; gebruik `vm.getBlockTimestamp()`. (De huidige tests warpen hooguit één keer per test, dus dit raakt ze niet.)
+1. [x] **Economische ondergrens ontbreekt volledig**: geen test met `minTradeEurc = 1`/`maxCorrectionBps = 1` en klein saldo die laat zien dat zo'n owner elk uur due is met fee 0 (EX-01), noch een fork-test dat `amountIn = 1` op de echte route revert (EX-02).
+   → Gedekt: de vloer maakt de opzet onmogelijk. `test_setParams_rejectsMinTradeBelowFloor`, `test_poc_microRunNoLongerPossible`, `test_execute_allowanceBelowMinTradeIsNothingToDo` en fork `test_dustOwnerCannotRegisterAnymore`. EX-02 (`amountIn = 1` op de route) is onbereikbaar: `_plan` zet elke run onder `minTradeEurc` (≥ 20 EURC) op 0.
+2. [x] **Meerdere due owners over meerdere runs**: alle `onReport`-tests hebben ≤ 5 owners in één tx. Geen test (contract of CRE `main.test.ts`) die vastlegt dat owner nummer 6+ ooit aan de beurt komt.
+   → Gedekt: `test_dueOwners_pagingReachesEveryDueOwner` (12 owners, pagina’s van 5, ook de laatste wordt uitgevoerd). De cap van 5 per rapport is met het rapportpad verdwenen.
+3. [x] **Eeuwig-due na revert**: `test_execute_revertsWhenOwnerBlacklisted` en `test_execute_lastExecutedAtNotSetOnRevert` stoppen bij `lastExecutedAt == 0`; ze asserten niet dat `isDue`/`dueOwners` de owner blijven aanbieden, en er is geen keeper-test voor herhaald verlies.
+   → Gedekt: `test_execute_revertsWhenOwnerBlacklisted` asserteert ook dat `isDue` en `dueOwners` de owner blijven aanbieden; de cool-down van het keeper-script staat in `keeper/selection.test.ts` („recordFailure doubles the wait per consecutive failure, capped at maxSeconds”).
+4. [x] **Bovengrens verlies per run**: geen fork-test die spot-push + slippage combineert en asserteert dat het verlies van de owner ≤ `FEE_BPS + maxSlippageBps` blijft (EX-03).
+   → Gedekt: fork `test_fork_lossPerRunBoundedUnderSpotPush` (60 en 100 bps, pool vooraf tot de rand van de spot-check geduwd) en unit `testFuzz_poc_lossPerRunBoundedByFeePlusSlippage`.
+5. [x] **Treasury-blacklist / falende treasury-transfer** (EX-05) is ongetest.
+   → Gedekt: `test_execute_continuesWhenTreasuryBlacklistedAndSweepRecoversFee`, `test_execute_sellRetainsWholeFeeWhenTreasuryBlacklisted`, `test_execute_continuesWhenTreasuryBlacklisted`, `test_poc_blacklistedTreasuryNoLongerBricksExecute`.
+6. [vervallen] **Rapport met dubbele of al-uitgevoerde owners** (EX-04): geen test dat een duplicaat in `report` netjes `NotDue` geeft en de rest doorloopt.
+   → Er is geen rapport meer sinds het CRE-oppervlak eruit is (a798bde). Het equivalent, dezelfde owner twee keer uitvoeren, geeft `NotDue` in `test_execute_revertsNotDue`; dubbele registratie kan niet (`test_setParams_registersOnlyOnce`).
+7. [x] **`sweep` met een kwaadaardig token** (EX-09): ongetest dat het niets anders kan dan `_owners` vervuilen.
+   → Gedekt: `test_sweep_maliciousTokenCannotChangeState` (lezende `balanceOf`) en `test_sweep_maliciousTokenReentryCanOnlyRegisterItself` (schrijvende `transfer`: `execute` stuit op de reentrancy-guard, alleen zelfregistratie lukt).
+8. [vervallen] **CRE-selectiegedrag**: `main.test.ts` test paginering en de cap, maar niet de volgorde-afhankelijkheid (wie valt af) en niet een filter op `eurcDelta`.
+   → De CRE-workflow is weg (#2). Het keeper-script heeft geen cap en loopt alle pagina’s af, dus er valt niemand af; het filter op `eurcDelta` is `runSizeSkipReason` in `keeper/selection.test.ts` („skips runs below the minimum in both directions”). De paginalus in `keeper.ts` zelf is een script zonder testopzet en blijft ongetest.
+9. [x] Foundry-gotcha voor toekomstige tijdreeks-tests: onder `via_ir` wordt `block.timestamp` binnen één testfunctie gecachet, waardoor `vm.warp(block.timestamp + …)` in een lus niet doorwerkt; gebruik `vm.getBlockTimestamp()`. (De huidige tests warpen hooguit één keer per test, dus dit raakt ze niet.)
+   → Geen testgat maar een aanwijzing; gevolgd in de tijdreeks-tests (`vm.getBlockTimestamp()`, zie de kop van `test/AuditMath.t.sol`).

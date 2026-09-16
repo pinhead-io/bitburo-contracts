@@ -149,14 +149,22 @@ Datum: 2026-09-15. Scope: `pinheadio/bitburo-contracts` (main, `c2cf093`) en `pi
 
 ## Testgaten
 
-1. Forge: geen test voor uithongering/kostenasymmetrie van `dueOwners` bij dust-owners (M-02); geen test met `minTradeEurc = 1` en 1 EURC saldo als "due".
-2. Forge: geen test die aantoont dat een owner met `maxCorrectionBps = 10000` in één run zijn hele positie verkoopt (fuzz dekt het rekenkundig, maar niet als expliciet "dit is toegestaan"-scenario voor M-03).
-3. Pest/Vitest: geen test dat buiten-bereik `defaults` (cap > 1000, band < 100, interval < 86400) door de kaart geweigerd worden (M-03).
-4. Pest: geen test voor een legacy-contractadres (allowance tonen/intrekken na redeploy) (M-04).
-5. Pest: geen test dat een user met actief schema én actief mandaat niet dubbel handelt (M-07).
+1. [x] Forge: geen test voor uithongering/kostenasymmetrie van `dueOwners` bij dust-owners (M-02); geen test met `minTradeEurc = 1` en 1 EURC saldo als "due".
+   → Gedekt: fork `test_dustOwnerCannotRegisterAnymore` en `test_setParams_rejectsMinTradeBelowFloor` (de dust-opzet is niet te registreren); `test_dueOwners_pagingReachesEveryDueOwner` laat zien dat kleine wallets met toegestane params nooit due zijn en niemand verdringen.
+2. [x] Forge: geen test die aantoont dat een owner met `maxCorrectionBps = 10000` in één run zijn hele positie verkoopt (fuzz dekt het rekenkundig, maar niet als expliciet "dit is toegestaan"-scenario voor M-03).
+   → Gedekt: `test_execute_boundedByBalance` zet `maxCorrectionBps = 10000` en asserteert dat één run 95 van 100 EURC koopt en 95% van de cbBTC-positie verkoopt (meer kan niet: target ligt tussen 5% en 95%).
+3. [x] Pest/Vitest: geen test dat buiten-bereik `defaults` (cap > 1000, band < 100, interval < 86400) door de kaart geweigerd worden (M-03).
+   → Laravel-repo, gedekt aan de clientkant: Vitest `resources/js/lib/rebalancer-abi.test.ts` (`describe('mandateLimitViolation')`, o.a. „keeps an out-of-range active mandate from being encoded at all”) en browser `tests/Browser/StrategyTest.php` („refuses to sign settings outside the safe bounds and says why”). Een servervalidatie van cap/band bestaat niet en is dus ook niet getest.
+4. [x] Pest: geen test voor een legacy-contractadres (allowance tonen/intrekken na redeploy) (M-04).
+   → Laravel-repo, gedekt: `tests/Feature/WalletControllerTest.php` („the wallet page reads what is left of the mandate on every legacy contract” en drie verwante tests) en `tests/Browser/StrategyTest.php` („shows what is left on a previous vault and takes it back with the regular revoke”).
+5. [x] Pest: geen test dat een user met actief schema én actief mandaat niet dubbel handelt (M-07).
+   → Laravel-repo, gedekt: `tests/Feature/ScheduleRunnerTest.php` („a wallet under an active on-chain mandate is skipped, so the two engines never trade the same wallet” plus de varianten uitgeschakeld/onleesbaar). Niet gecombineerd met een geforceerde run.
 6. Pest: geen test/verificatie van de Privy-policyregels tegen de echte policy-engine (alle policy-tests vergelijken alleen de request-body); de residual-risk-methodes in de swap-policy zijn nergens afgedekt (M-01).
-7. CRE: `main.test.ts` test de cap, niet de volgorde-afhankelijkheid (M-02).
+   → Open, Laravel-repo: `tests/Feature/SetupSwapPolicyCommandTest.php` controleert de DENY-regels alleen in de request-body; niets toetst ze tegen de echte Privy-policy-engine.
+7. [vervallen] CRE: `main.test.ts` test de cap, niet de volgorde-afhankelijkheid (M-02).
+   → De CRE-workflow is weg (#2); het keeper-script heeft geen cap.
 8. Geen integratietest voor `bitburo:setup-keeper-wallet --update` na een adreswissel (policy sluit tot update; alleen unit-test op body).
+   → Open, Laravel-repo: `tests/Feature/SetupKeeperWalletCommandTest.php` test `--update` alleen met een gemockte `PrivyApiClient`; geen test die een adreswissel doorloopt.
 
 ## Adres-mismatches
 

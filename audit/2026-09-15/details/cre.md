@@ -188,12 +188,21 @@ PoC `test_poc_frontrunSlot`: iemand die vlak vóór het rapport zelf `execute(ow
 
 ## Testgaten
 
-1. **Gas per trade-omvang op de fork**: geen test boven 1.000 EURC; toevoegen: parametrische fork-test die `execute{gas: EXECUTE_GAS}` bij 2,5k/5k/10k/20k EURC meet en vastlegt tot welk bedrag het budget volstaat (CRE-01).
-2. **`isDue` true terwijl `execute` binnen `EXECUTE_GAS` faalt**: geen test die de divergentie tussen de view en de uitvoering laat zien, noch dat zo'n owner elk uur opnieuw in `dueOwners` staat (CRE-01).
-3. **Meervoudige-uren-selectie in de workflow**: `main.test.ts` test één run; geen test die aantoont dat dezelfde vijf owners elk uur opnieuw worden gekozen en een zesde nooit (CRE-02).
-4. **`receiverContractExecutionStatus === REVERTED`** in `main.test.ts` (CRE-03).
-5. **Metadata korter dan 62 bytes** en **rapport dat niet als `address[]` decodeert**: geen contracttest dat de hele call dan revert (gedrag is acceptabel, maar hoort vastgelegd).
-6. **Replay via `onReport`**: `NotDue` is alleen via `execute` getest, niet als tweede levering van hetzelfde rapport (CRE-06; PoC beschikbaar).
-7. **Vijf owners op vol budget binnen de werkelijke forwarder-marge**: geen test met 3,5–3,7M gas en vijf owners die elk ~650k verbruiken (PoC beschikbaar).
-8. **End-to-end op mainnet**: geen enkel `ReportProcessed`-event voor dit contract; de CRE-keten is nog niet bewezen (CRE-03).
-9. **Fuzz op `_decodeMetadata`-offsets** tegen de forwarder-layout (bijvoorbeeld door de echte `rawReport[45:109]`-slice na te bouwen) ontbreekt; nu alleen een handgeschreven 64-byte fixture.
+1. [vervallen] **Gas per trade-omvang op de fork**: geen test boven 1.000 EURC; toevoegen: parametrische fork-test die `execute{gas: EXECUTE_GAS}` bij 2,5k/5k/10k/20k EURC meet en vastlegt tot welk bedrag het budget volstaat (CRE-01).
+   → `EXECUTE_GAS` bestaat niet meer (a798bde); wekkers schatten gas zelf via simulatie. Het gas van een koop en verkoop wordt nog gemeten in fork `test_fork_buyAndSellGasCost`.
+2. [vervallen] **`isDue` true terwijl `execute` binnen `EXECUTE_GAS` faalt**: geen test die de divergentie tussen de view en de uitvoering laat zien, noch dat zo'n owner elk uur opnieuw in `dueOwners` staat (CRE-01).
+   → Geen gasbudget meer in het contract. Dat een mislukte owner due blijft is gedekt door `test_execute_revertsWhenOwnerBlacklisted`.
+3. [vervallen] **Meervoudige-uren-selectie in de workflow**: `main.test.ts` test één run; geen test die aantoont dat dezelfde vijf owners elk uur opnieuw worden gekozen en een zesde nooit (CRE-02).
+   → De CRE-workflow is weg (#2).
+4. [vervallen] **`receiverContractExecutionStatus === REVERTED`** in `main.test.ts` (CRE-03).
+   → De CRE-workflow en `main.test.ts` zijn weg (#2).
+5. [vervallen] **Metadata korter dan 62 bytes** en **rapport dat niet als `address[]` decodeert**: geen contracttest dat de hele call dan revert (gedrag is acceptabel, maar hoort vastgelegd).
+   → `onReport` en de metadata-decodering zijn weg (a798bde).
+6. [vervallen] **Replay via `onReport`**: `NotDue` is alleen via `execute` getest, niet als tweede levering van hetzelfde rapport (CRE-06; PoC beschikbaar).
+   → `onReport` is weg (a798bde); dubbel `execute` geeft `NotDue` in `test_execute_revertsNotDue`.
+7. [vervallen] **Vijf owners op vol budget binnen de werkelijke forwarder-marge**: geen test met 3,5–3,7M gas en vijf owners die elk ~650k verbruiken (PoC beschikbaar).
+   → Geen forwarder en geen rapport meer (a798bde).
+8. [vervallen] **End-to-end op mainnet**: geen enkel `ReportProcessed`-event voor dit contract; de CRE-keten is nog niet bewezen (CRE-03).
+   → Het CRE-pad wordt niet meer gebruikt; `ReportProcessed` bestaat voor dit contract niet meer.
+9. [vervallen] **Fuzz op `_decodeMetadata`-offsets** tegen de forwarder-layout (bijvoorbeeld door de echte `rawReport[45:109]`-slice na te bouwen) ontbreekt; nu alleen een handgeschreven 64-byte fixture.
+   → `_decodeMetadata` is weg (a798bde).
