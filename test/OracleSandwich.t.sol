@@ -5,6 +5,8 @@ import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Rebalancer} from "src/Rebalancer.sol";
+import {IUniswapV3Pool} from "src/interfaces/IUniswapV3Pool.sol";
+import {TickMath} from "src/libraries/TickMath.sol";
 
 interface ISwapRouter02 {
     struct ExactInputSingleParams {
@@ -131,10 +133,40 @@ contract OracleSandwichTest is Test {
         vm.warp(vm.getBlockTimestamp() + 2);
     }
 
-    /// @dev Pushes (EURC verkocht in EURC/USDC) die binnen het blokvenster kunnen blijven: de pool beweegt gemeten
-    ///      ~1 bp per 200 EURC. Zonder zulke pushes zou elke aanval reverten en bewijst een test niets.
-    function _smallPushes() internal pure returns (uint256[5] memory) {
-        return [uint256(25e6), 100e6, 250e6, 500e6, 900e6];
+    /// @dev Kleine pushes (EURC verkocht in EURC/USDC): de pool beweegt gemeten ~1 bp per 200 EURC. Sinds de blokcheck
+    ///      slaagt een run alleen na een push die binnen de huidige tick blijft (anders PoolTouchedThisBlock). Hoeveel
+    ///      EURC dat is, hangt af van waar de koers in de tick staat; daarom is de laatste push berekend: half de ruimte
+    ///      tot de onderrand van de tick. (Was 900 EURC, ~4,5 bp: die gaat nu altijd over de tickgrens.) Zonder zo'n
+    ///      push zou elke aanval reverten en bewijst een test niets.
+    function _smallPushes() internal view returns (uint256[5] memory) {
+        return [uint256(25e6), 100e6, 250e6, 500e6, _pushWithinTick(500_000)];
+    }
+
+    /// @dev EURC-input die EURC/USDC `ppm` miljoenste van de ruimte tot P(tick) omlaag duwt, bij de in-range liquiditeit
+    ///      (binnen de tick is die constant): amount0 = L × 2^96 × (√P − √doel) / (√P × √doel), plus 0,05% poolfee.
+    function _pushWithinTick(uint256 ppm) internal view returns (uint256) {
+        (uint160 s, int24 t,,,,,) = IUniswapV3Pool(POOL_EURC_USDC).slot0();
+        uint160 edge = TickMath.getSqrtPriceAtTick(t);
+        if (s <= edge + 1) return 1;
+        uint160 target = s - uint160(Math.mulDiv(s - edge - 1, ppm, 1e6));
+        uint256 liquidity = IUniswapV3Pool(POOL_EURC_USDC).liquidity();
+        uint256 net = Math.mulDiv(liquidity << 96, s - target, s) / target;
+        return Math.max(net * 1e6 / (1e6 - 500), 1);
+    }
+
+    /// @dev Idem voor de verkooprichting: USDC-input die EURC/USDC `ppm` van de ruimte tot P(tick + 1) omhoog duwt.
+    ///      amount1 = L × (√doel − √P) / 2^96, plus 0,05% poolfee. De laatste van de kleine USDC-pushes.
+    function _smallUsdcPushes() internal view returns (uint256[5] memory pushes) {
+        pushes = [uint256(25e6), 100e6, 250e6, 500e6, 0];
+        (uint160 s, int24 t,,,,,) = IUniswapV3Pool(POOL_EURC_USDC).slot0();
+        uint160 edge = TickMath.getSqrtPriceAtTick(t + 1);
+        if (s + 1 >= edge) {
+            pushes[4] = 1;
+            return pushes;
+        }
+        uint160 target = s + uint160(Math.mulDiv(edge - 1 - s, 500_000, 1e6));
+        uint256 net = Math.mulDiv(IUniswapV3Pool(POOL_EURC_USDC).liquidity(), target - s, 1 << 96);
+        pushes[4] = Math.max(net * 1e6 / (1e6 - 500), 1);
     }
 
     function _fundVictim(uint256 eurcAmount, uint16 slippageBps) internal {
@@ -401,7 +433,7 @@ contract OracleSandwichTest is Test {
         uint256 oracle = r.quote();
         uint256 maxPush = _maxUsdcPushWithinDeviation();
         console.log("maxPush USDC binnen 50 bps:", maxPush);
-        uint256[5] memory smallPushes = _smallPushes(); // ~1 USDC per EURC: dezelfde orde
+        uint256[5] memory smallPushes = _smallUsdcPushes(); // ~1 USDC per EURC: dezelfde orde; de laatste binnen de tick
         uint256[3] memory btcs = [uint256(7_500_000), 18_750_000, 37_500_000]; // ~5k, 12.5k, 25k EURC waarde
         uint256 okCount;
         for (uint256 k = 0; k < btcs.length; k++) {
