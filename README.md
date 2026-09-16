@@ -99,6 +99,17 @@ RUN_FORK=false ~/.foundry/bin/forge test              # zonder fork
 
 `test/AuditMath.t.sol` bevat de fuzz-, invariant- en PoC-tests uit de interne audit van 15 september 2026 (`audit/2026-09-15/`). Let op bij tijdreeksen onder `via_ir`: Solidity cachet `block.timestamp` binnen een testfunctie, gebruik na `vm.warp` dus `vm.getBlockTimestamp()`.
 
+Deployen naar Base mainnet:
+
+```bash
+cast wallet import bitburo-deployer --interactive     # eenmalig, zet de sleutel in een keystore
+DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh dry
+DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh go
+DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh verify
+```
+
+`go` weigert zolang er al een deploy in `broadcast/` staat: een tweede run zet een tweede, los contract op mainnet terwijl gebruikers hun allowance op het oude adres houden. Wil je dat echt, dan `FORCE_REDEPLOY=1`, en lees eerst het draaiboek in issue #7. `verify` weigert zolang je op een andere commit staat dan die is uitgerold, of zolang `src/` of `script/` ongecommitte wijzigingen heeft; Basescan kan de bytecode anders niet matchen. Zonder keystore werkt `DEPLOYER_PRIVATE_KEY` nog steeds, maar dan staat de sleutel in de procestabel.
+
 Keeper-script (vanuit `keeper/`):
 
 ```bash
