@@ -2,7 +2,7 @@
 pragma solidity 0.8.37;
 
 import {console} from "forge-std/Test.sol";
-import {OracleSandwichTest} from "./OracleSandwich.t.sol";
+import {OracleSandwichBase} from "./OracleSandwich.t.sol";
 import {IAggregatorV3} from "src/interfaces/IAggregatorV3.sol";
 
 /// @notice M-1: sandwich-winst per rungrootte, met en zonder cbBTC/USD-feed 0,3% te hoog (binnen de deviation-drempel).
@@ -11,7 +11,7 @@ import {IAggregatorV3} from "src/interfaces/IAggregatorV3.sol";
 ///         een eerlijke aanroeper ook krijgt, en minstens één geduwde aanval slaagt (anders bewijst de test niets).
 /// @dev `_grid(walletEurc, …)` krijgt de EURC-omvang van de wallet mee; de correctie is 80% daarvan (de run kan door
 ///      de liquiditeit kleiner zijn). Overslaan met RUN_FORK=false.
-contract OracleLagSandwichTest is OracleSandwichTest {
+contract OracleLagSandwichTest is OracleSandwichBase {
     function _grid(uint256 victimEurc, int256 lagBpsTimes10) internal {
         if (lagBpsTimes10 != 0) {
             (uint80 a, int256 ans, uint256 s, uint256 u, uint80 b) = IAggregatorV3(FEED_CBBTC_USD).latestRoundData();

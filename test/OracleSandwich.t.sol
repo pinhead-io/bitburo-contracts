@@ -83,11 +83,10 @@ contract Sandwicher {
     }
 }
 
-/// @notice Fork-regressies voor audit M-1 (zelf-sandwich) en L-3 (DoS door de spot te duwen). Sinds het blokvenster
-///         (MAX_BLOCK_MOVE_BPS) reverten pushes tot de spotcheck vóór de swap; pushes binnen het venster slagen, maar
-///         leveren de aanvaller niet meer op dan de beloning die een eerlijke aanroeper ook krijgt. Overslaan met
-///         RUN_FORK=false.
-contract OracleSandwichTest is Test {
+/// @notice Gedeelde fork-opzet voor de sandwich-tests: adressen, een vers Rebalancer-contract, de aanvaller en de
+///         helpers voor pushes en runs. Abstract en zonder tests, zodat `OracleSandwichTest` en
+///         `OracleLagSandwichTest` er elk alleen hun eigen tests bij zetten en niets dubbel draait.
+abstract contract OracleSandwichBase is Test {
     IERC20 internal constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 internal constant CBBTC = IERC20(0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf);
     IERC20 internal constant USDC = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
@@ -245,7 +244,13 @@ contract OracleSandwichTest is Test {
         }
         assertGt(okCount, 0, "geen push binnen het venster geslaagd: de test bewijst dan niets");
     }
+}
 
+/// @notice Fork-regressies voor audit M-1 (zelf-sandwich) en L-3 (DoS door de spot te duwen). Sinds het blokvenster
+///         (MAX_BLOCK_MOVE_BPS) reverten pushes tot de spotcheck vóór de swap; pushes binnen het venster slagen, maar
+///         leveren de aanvaller niet meer op dan de beloning die een eerlijke aanroeper ook krijgt. Overslaan met
+///         RUN_FORK=false.
+contract OracleSandwichTest is OracleSandwichBase {
     function test_poc_selfSandwich_10k_slippage100() public {
         uint256 oracle = r.quote();
         uint256 spot0 = r.spot();
