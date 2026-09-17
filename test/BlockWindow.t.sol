@@ -17,6 +17,10 @@ contract RebalancerWindowHarness is Rebalancer {
         return _window(pool);
     }
 
+    function windowFitsTickSpacing(uint16 moveBps, int24 spacing) external pure returns (bool) {
+        return _windowFitsTickSpacing(moveBps, spacing);
+    }
+
     function maxRunEurc(bool isBuy, uint256 price) external view returns (uint256 eurc, address binding) {
         (, Window memory w1, Window memory w2) = _windows();
         return _maxRunEurc(isBuy, price, w1, w2);
@@ -760,7 +764,16 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
-    /// @notice Lead 3: een donatie tijdens een ronde vergroot het budget niet.
+    /// @notice Zelf-audit 2026-09-17, lead 13: de constructor weigert een venster dat niet ruim binnen de tick-afstand
+    ///         past. Met de constanten van dit contract (6 bp, spacing 10) klopt het; 10 of meer bij spacing 10 niet.
+    function test_constructor_windowFitsTickSpacing() public view {
+        assertTrue(h.windowFitsTickSpacing(r.MAX_BLOCK_MOVE_BPS(), r.TICK_SPACING()), "constanten van dit contract");
+        assertTrue(h.windowFitsTickSpacing(9, 10));
+        assertFalse(h.windowFitsTickSpacing(10, 10), "venster even breed als de tick-afstand");
+        assertFalse(h.windowFitsTickSpacing(60, 10));
+        assertFalse(h.windowFitsTickSpacing(6, 0), "spacing 0");
+    }
+
     /// @notice Zelf-audit 2026-09-17, lead 11: krimpt de wallet tijdens een ronde (opnemen of een koersdaling), dan is
     ///         een deel nooit groter dan `maxCorrectionBps` van de waarde van dat moment. Vroeger gold het budget van
     ///         de eerste run, zodat een deel hier 375 EURC op een wallet van 3.000 EURC kon zijn.
@@ -789,6 +802,7 @@ contract BlockWindowTest is RebalancerTestBase {
         assertLe(remaining, total * 1000 / BPS, "restbudget boven het budget van de huidige waarde");
     }
 
+    /// @notice Lead 3: een donatie tijdens een ronde vergroot het budget niet.
     function test_chunk_donationDoesNotGrowRoundBudget() public {
         poolEurcUsdc.setLiquidity(2e12);
         _setUser(alice, 10_000e6, 0, _params(1000, 20e6)); // budget 1.000

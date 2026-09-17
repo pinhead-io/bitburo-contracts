@@ -275,6 +275,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     error UnexpectedFeedDecimals(address feed);
     /// @notice `token` heeft niet de decimalen waar het contract op rekent (EURC 6, cbBTC 8, USDC 6).
     error UnexpectedTokenDecimals(address token);
+    /// @notice MAX_BLOCK_MOVE_BPS past niet ruim binnen TICK_SPACING; `_maxInput` zou dan grenzen missen.
+    error WindowExceedsTickSpacing();
     error NoOutput();
     /// @notice Het contract is buiten gebruik gesteld; alleen `setParams` met `active = false` en `sweep` kunnen nog.
     error ContractRetired();
@@ -339,6 +341,17 @@ contract Rebalancer is ReentrancyGuardTransient {
         _requireDecimals(d.eurc, EURC_DECIMALS);
         _requireDecimals(d.cbbtc, CBBTC_DECIMALS);
         _requireDecimals(d.usdc, USDC_DECIMALS);
+
+        // `_maxInput` kijkt naar hooguit één initialiseerbare tickgrens in het venster; dat klopt alleen zolang het
+        // venster (1 tick ≈ 1 bp) minder ticks beslaat dan TICK_SPACING (zelf-audit 2026-09-17, lead 13).
+        if (!_windowFitsTickSpacing(MAX_BLOCK_MOVE_BPS, TICK_SPACING)) revert WindowExceedsTickSpacing();
+    }
+
+    /// @dev Per richting kruist een swap binnen het venster hooguit `moveBps` opeenvolgende ticks (omlaag t tot en
+    ///      met t − moveBps + 1, omhoog t + 1 tot en met t + moveBps − 1). Minder dan `spacing` opeenvolgende ticks
+    ///      bevatten hooguit één veelvoud van `spacing`.
+    function _windowFitsTickSpacing(uint16 moveBps, int24 spacing) internal pure returns (bool) {
+        return spacing > 0 && int256(uint256(moveBps)) < int256(spacing);
     }
 
     function _requireDecimals(address token, uint8 expected) private view {
