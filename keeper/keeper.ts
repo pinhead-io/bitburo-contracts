@@ -72,7 +72,7 @@
  *            SEARCH_SECONDS=180  SCAN_STATE_FILE=./keeper-scan.json  OWNERS_FILE=./owners.txt
  *            COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600  COOLDOWN_MAX_SECONDS=86400
  */
-import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import {
   BaseError,
   ContractFunctionRevertedError,
@@ -88,6 +88,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
+import { acquireLock } from "./lock";
 import {
   type BlockOverrides,
   type CooldownState,
@@ -108,11 +109,9 @@ import {
   filterCandidates,
   formatEurc,
   formatGwei,
-  formatLock,
   isBlockWindowRevert,
   isCoolingDown,
   isStuck,
-  lockIsStale,
   lockWatchdogSeconds,
   maxFeePerGas,
   minRunBaseUnits,
@@ -261,19 +260,17 @@ const pidAlive = (pid: number): boolean => {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 };
-const acquireLock = (): boolean => {
-  if (existsSync(lockFile)) {
-    const lock = parseLock(readFileSync(lockFile, "utf8"), Math.floor(statSync(lockFile).mtimeMs / 1000));
-    if (!lockIsStale(lock, lockStartedAt, lockMaxSeconds, pidAlive)) return false;
-    console.warn(`verlopen lock opgeruimd (pid ${lock.pid}, ${lockStartedAt - lock.startedAt} s oud)`);
-    unlinkSync(lockFile);
-  }
-  const fd = openSync(lockFile, "wx");
-  writeFileSync(fd, formatLock({ pid: process.pid, startedAt: lockStartedAt }));
-  closeSync(fd);
-  return true;
-};
-if (!acquireLock()) {
+// Verificatie 579f763 (K-3): een verlopen lock wordt atomair opgeruimd (`acquireLock` in lock.ts), zodat twee runs die
+// tegelijk starten niet elkaars nieuwe lock verwijderen.
+if (
+  !acquireLock(lockFile, {
+    pid: process.pid,
+    nowSeconds: lockStartedAt,
+    maxAgeSeconds: lockMaxSeconds,
+    isAlive: pidAlive,
+    onStaleRemoved: (lock) => console.warn(`verlopen lock opgeruimd (pid ${lock.pid}, ${lockStartedAt - lock.startedAt} s oud)`),
+  })
+) {
   console.warn(`Een andere keeper-run loopt nog (${lockFile}); deze run stopt.`);
   process.exit(0);
 }
