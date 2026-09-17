@@ -13,9 +13,9 @@ Internal reports referenced below: `audit/2026-09-15/RAPPORT.md` (+ `details/`),
 | | |
 |---|---|
 | Repository | `pinheadio/bitburo-contracts` |
-| Branch | `docs/translate-to-english` (on `development` after PRs #18–#22) |
-| **Commit of the audited code** | **`d6fbfb1a7a013f5e2b286d891fc9690df858adb1`** (`d6fbfb1`) |
-| Note | The package was first prepared for `579f763` and then for `05ed03c` (PR #18). The self-audit of 17 Sept 2026 on `development` (`audit/2026-09-17-self/ai-audit.md`) led to three contract changes on top of `05ed03c`, rows `09-17-self/*` in `FINDINGS-STATUS.md`: the keeper reward is at most half the fee (L-D, `a10271f`), a chunk never exceeds the budget of the current wallet value (lead 11, `3ea8787`), and a sequencer `startedAt` in the future gives `SequencerDown` (Info-G, `b23d422`); plus NatSpec, README and keeper comments (`36bb2e5`, `f392f3c`). After the owner's decisions a constructor check `MAX_BLOCK_MOVE_BPS < TICK_SPACING` was added (lead 13, `2f88af6`) and review comments fixed (`7ad8a81`). All `file:line` references in this package were re-mapped to `7ad8a81`. The measurements of leads 17 and 18 (PR #22) changed `audit/` and `README.md` only. Finally all comments, NatSpec, messages and documents were translated to English (`7cce352` … `d6fbfb1`): every source line kept its line number, so all references stay valid, and the runtime bytecode of `Rebalancer` is identical to `7ad8a81` apart from the metadata hash (compared with `forge inspect … deployedBytecode`, CBOR metadata stripped). Later commits on the branch change `README.md`, `deploy-mainnet.sh` and `audit/` only. |
+| Branch | `development` |
+| **Commit of the audited code** | **The latest commit on `development` when the audit starts.** We confirm the exact hash when we contact the auditor. |
+| Note | All `file:line` references in this package were checked against `development` on 17 Sept 2026. If code changes before the audit starts, this package is updated with it. |
 
 ### 1.2 Files and size
 
@@ -320,7 +320,7 @@ Chainlink's Reference Data Directory labels both cbBTC/USD and EURC/USD on Base 
 
 ```bash
 git clone https://github.com/pinheadio/bitburo-contracts && cd bitburo-contracts
-git checkout d6fbfb1a7a013f5e2b286d891fc9690df858adb1
+git checkout development   # the latest commit; see §1.1
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ```
@@ -329,7 +329,7 @@ Fork tests read `BASE_RPC_URL` (default `https://mainnet.base.org`, rate-limited
 
 ### 7.2 Commands and actual results
 
-All results below were produced on 17 Sept 2026 on commit `7ad8a81`; after the translation (`d6fbfb1`) the full suite was re-run with identical results (`FORK_BLOCK=51425248`: 215 passed; `RUN_FORK=false`: 167 passed, 8 skipped; keeper 97 pass).
+All results below were produced on 17 Sept 2026 on `development`.
 
 ```bash
 ~/.foundry/bin/forge fmt --check
