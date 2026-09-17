@@ -1,4 +1,4 @@
-# Uitvoer Leads17And18Fork.t.sol, 2026-09-17, code 39dcddf (development), FORK_BLOCK=51425248
+# Output of Leads17And18Fork.t.sol, 2026-09-17, code 39dcddf (development; comments translated to English, same code), FORK_BLOCK=51425248. Regenerated after the translation; all numbers identical to the first run.
 Ran 10 tests for test/Leads17And18Fork.t.sol:Leads17And18ForkTest
 [PASS] test_lead17_lp_currentFee() (gas: 336789468)
   L1718,lead17-p2only,buy,corr=10000,phiPm=990,feeOff=0,lag=0/0,accepted=10/24,maxPush_bpx10=500,bestAtk_bpx100=-37094,victimExtra_bpx100=500,victimVsTrue_bpx100=3595,worstVictim_bpx100=5018,atkAtWorst_bpx100=-371375,victimVsTrueAtWorst_bpx100=8128
@@ -84,13 +84,13 @@ Ran 10 tests for test/Leads17And18Fork.t.sol:Leads17And18ForkTest
   L1718,lead17-both,sell,corr=50000,phiPm=990,feeOff=1,lag=0/0,accepted=8/24,maxPush_bpx10=400,bestAtk_bpx100=2744,victimExtra_bpx100=3999,victimVsTrue_bpx100=8081,worstVictim_bpx100=3999,atkAtWorst_bpx100=2744,victimVsTrueAtWorst_bpx100=8081
   L1718,lead17-both,sell,corr=50000,phiPm=990,feeOff=1,lag=30/10,accepted=16/24,maxPush_bpx10=800,bestAtk_bpx100=5486,victimExtra_bpx100=7973,victimVsTrue_bpx100=12035,worstVictim_bpx100=7973,atkAtWorst_bpx100=5486,victimVsTrueAtWorst_bpx100=12035
 [PASS] test_lead18_inTickOnTopOfPrevPush_protocolFeeOff() (gas: 44001133)
-  L1718,lead18: basis zonder in-tick push revert, prevPush bpx10 900
+  L1718,lead18: base without in-tick push reverts, prevPush bpx10 900
   L1718,lead18-inTick+prev,buy,corr=10000,phiPm=990,feeOff=1,lag=30/10,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-18,victimExtra_bpx100=26,victimVsTrue_bpx100=12209,worstVictim_bpx100=105,atkAtWorst_bpx100=-71,victimVsTrueAtWorst_bpx100=12290
-  L1718,lead18: basis zonder in-tick push revert, prevPush bpx10 800
+  L1718,lead18: base without in-tick push reverts, prevPush bpx10 800
   L1718,lead18-inTick+prev,sell,corr=10000,phiPm=990,feeOff=1,lag=30/10,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-8,victimExtra_bpx100=22,victimVsTrue_bpx100=11927,worstVictim_bpx100=89,atkAtWorst_bpx100=-34,victimVsTrueAtWorst_bpx100=11993
-  L1718,lead18: basis zonder in-tick push revert, prevPush bpx10 900
+  L1718,lead18: base without in-tick push reverts, prevPush bpx10 900
   L1718,lead18-inTick+prev,buy,corr=10000,phiPm=999,feeOff=1,lag=30/10,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-18,victimExtra_bpx100=26,victimVsTrue_bpx100=12181,worstVictim_bpx100=105,atkAtWorst_bpx100=-71,victimVsTrueAtWorst_bpx100=12261
-  L1718,lead18: basis zonder in-tick push revert, prevPush bpx10 800
+  L1718,lead18: base without in-tick push reverts, prevPush bpx10 800
   L1718,lead18-inTick+prev,sell,corr=10000,phiPm=999,feeOff=1,lag=30/10,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-8,victimExtra_bpx100=22,victimVsTrue_bpx100=11900,worstVictim_bpx100=89,atkAtWorst_bpx100=-34,victimVsTrueAtWorst_bpx100=11966
 [PASS] test_lead18_inTick_currentFee() (gas: 31790213)
   L1718,lead18-inTick,buy,corr=10000,phiPm=990,feeOff=0,lag=0/0,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-1169,victimExtra_bpx100=31,victimVsTrue_bpx100=3125,worstVictim_bpx100=126,atkAtWorst_bpx100=-4672,victimVsTrueAtWorst_bpx100=3220
@@ -106,5 +106,5 @@ Ran 10 tests for test/Leads17And18Fork.t.sol:Leads17And18ForkTest
   L1718,lead18-inTick,buy,corr=10000,phiPm=999,feeOff=1,lag=30/10,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-15,victimExtra_bpx100=31,victimVsTrue_bpx100=3097,worstVictim_bpx100=126,atkAtWorst_bpx100=-60,victimVsTrueAtWorst_bpx100=3192
   L1718,lead18-inTick,sell,corr=10000,phiPm=999,feeOff=1,lag=0/0,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-12,victimExtra_bpx100=18,victimVsTrue_bpx100=3965,worstVictim_bpx100=73,atkAtWorst_bpx100=-49,victimVsTrueAtWorst_bpx100=4020
   L1718,lead18-inTick,sell,corr=10000,phiPm=999,feeOff=1,lag=30/10,accepted=4/4,maxPush_bpx10=999,bestAtk_bpx100=-12,victimExtra_bpx100=18,victimVsTrue_bpx100=3962,worstVictim_bpx100=73,atkAtWorst_bpx100=-49,victimVsTrueAtWorst_bpx100=4016
-Suite result: ok. 10 passed; 0 failed; 0 skipped; finished in 2.42s (9.12s CPU time)
-Ran 1 test suite in 2.43s (2.42s CPU time): 10 tests passed, 0 failed, 0 skipped (10 total tests)
+Suite result: ok. 10 passed; 0 failed; 0 skipped; finished in 2.24s (8.74s CPU time)
+Ran 1 test suite in 2.24s (2.24s CPU time): 10 tests passed, 0 failed, 0 skipped (10 total tests)

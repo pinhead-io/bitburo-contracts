@@ -1,35 +1,35 @@
-# Proof-of-concepts bij de audit van 15 september 2026
+# Proofs of concept for the audit of 15 September 2026
 
-Deze map is het archief zoals de audit hem opleverde. De bestanden hier draaien **niet** mee met
-`forge test`: ze staan buiten het testpad en een deel gebruikt de importpaden van een los
-scratch-project (`repo/...`).
+This folder is the archive as the audit delivered it. The files here do **not** run with
+`forge test`: they are outside the test path and some use the import paths of a separate
+scratch project (`repo/...`).
 
-## Overgenomen in de suite
+## Adopted into the suite
 
-| PoC | Waar nu | Wat ermee gebeurd is |
+| PoC | Where now | What happened to it |
 |---|---|---|
-| `AuditMath.t.sol` | `test/AuditMath.t.sol` | Ongewijzigd overgenomen bij de verharding. |
-| `CrePoC.t.sol` | `test/CrePoC.t.sol` | Vier tests op het `onReport`-oppervlak ongewijzigd. PoC-1 (slot-starvation) omgeschreven: de stof-params zijn sinds de verharding niet meer te registreren, dus de test asserteert nu de weigering en de fee die de goedkoopst toegestane run wél kost. |
-| `PocFork.t.sol` | `test/PocFork.t.sol` | Feed bijgewerkt naar `0x9867…01e0` (audit M-2). De twee stof-tests zijn samengevoegd tot één test die asserteert dat de opzet wordt geweigerd. De sandwich-test asserteert nu dat `execute` revert met `SpotDeviatesFromOracle`. |
-| `OracleSandwich.t.sol` | `test/OracleSandwich.t.sol` | Feed bijgewerkt. De 30-bps-variant is 60 bps geworden, de krapst toegestane stand sinds audit L-2. De assertie van de 10k-variant is omgekeerd: de aanval hoort níet meer te lonen. |
-| `PocStarvation.t.sol` | vervallen | Dezelfde aanval als PoC-1 van `CrePoC`, met dezelfde mocks. De herschreven test daar dekt het; een tweede kopie voegde niets toe. |
+| `AuditMath.t.sol` | `test/AuditMath.t.sol` | Adopted unchanged during the hardening. |
+| `CrePoC.t.sol` | `test/CrePoC.t.sol` | Four tests on the `onReport` surface unchanged. PoC-1 (slot starvation) rewritten: since the hardening the dust params can no longer be registered, so the test now asserts the rejection and the fee that the cheapest allowed run does cost. |
+| `PocFork.t.sol` | `test/PocFork.t.sol` | Feed updated to `0x9867…01e0` (audit M-2). The two dust tests were merged into one test that asserts the setup is rejected. The sandwich test now asserts that `execute` reverts with `SpotDeviatesFromOracle`. |
+| `OracleSandwich.t.sol` | `test/OracleSandwich.t.sol` | Feed updated. The 30 bps variant became 60 bps, the tightest allowed setting since audit L-2. The assertion of the 10k variant is inverted: the attack should no longer pay off. |
+| `PocStarvation.t.sol` | dropped | The same attack as PoC-1 of `CrePoC`, with the same mocks. The rewritten test there covers it; a second copy added nothing. |
 
-## Niet overgenomen
+## Not adopted
 
-`GasProbe.t.sol` en `CreForkGas.t.sol` zijn eenmalige metingen zonder asserties. Ze dienden om
-`EXECUTE_GAS` te ijken, wat tot de verhoging van 700.000 naar 1.000.000 leidde. `CreForkGas.t.sol`
-heeft bovendien het inmiddels vervangen contractadres `0xED47…e6e5` hard gecodeerd. Wie opnieuw wil
-meten, kopieert ze naar `test/` en past het adres aan.
+`GasProbe.t.sol` and `CreForkGas.t.sol` are one-off measurements without assertions. They served to
+calibrate `EXECUTE_GAS`, which led to the increase from 700,000 to 1,000,000. `CreForkGas.t.sol`
+also hard-codes the since-replaced contract address `0xED47…e6e5`. Anyone who wants to measure
+again copies them to `test/` and adjusts the address.
 
-## Wat de omgeschreven tests aantonen
+## What the rewritten tests show
 
-De PoC's reproduceerden niet meer op het verharde contract. Dat is het resultaat, niet een probleem:
+The PoCs no longer reproduced on the hardened contract. That is the result, not a problem:
 
-- Stof-owners zijn niet meer te registreren. `MIN_TRADE_FLOOR` (20 EURC), `MIN_CORRECTION_BPS` (10) en
-  `MIN_SLIPPAGE_BPS` (60) weigeren elke dimensie van de oorspronkelijke opzet.
-- De zelf-sandwich uit M-1 levert niets meer op. Bij zowel 60 als 100 bps slippage kapt de router de
-  aanval af met "Too little received", verdient de aanvaller niets boven de gewone beloning van
-  0,05 EURC, en verliest het slachtoffer niets. `_requireSpotNear` draait sinds de verharding ook ná
-  de swap, dus voorschuiving en eigen prijsimpact moeten samen binnen de tolerantie blijven.
+- Dust owners can no longer be registered. `MIN_TRADE_FLOOR` (20 EURC), `MIN_CORRECTION_BPS` (10) and
+  `MIN_SLIPPAGE_BPS` (60) reject every dimension of the original setup.
+- The self-sandwich from M-1 no longer yields anything. At both 60 and 100 bps slippage the router cuts
+  the attack off with "Too little received", the attacker earns nothing above the regular reward of
+  0.05 EURC, and the victim loses nothing. Since the hardening `_requireSpotNear` also runs after
+  the swap, so the front-run and the run's own price impact together have to stay within the tolerance.
 
-De omgeschreven tests leggen dat vast: gaat een van die eigenschappen ooit verloren, dan falen ze.
+The rewritten tests pin that down: if any of those properties is ever lost, they fail.
