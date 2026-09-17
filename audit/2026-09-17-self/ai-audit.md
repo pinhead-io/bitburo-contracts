@@ -14,8 +14,8 @@ Aderyn nummert zijn eigen meldingen H-1 en L-1 tot en met L-4 (`aderyn.md`). Die
 - **Geen bevinding van Medium of hoger.** De blokcheck, het blokvenster en de Chainlink-validatie houden stand. Negen AI-reviewers, de QuillShield oracle-checklist, 211 tests en 14 diepe invariants vonden er geen gat in.
 - **Drie nieuwe Low-bevindingen, geen daarvan met verlies voor gebruikers bij de huidige instellingen van Uniswap:**
   - **L-D (raakt het verdienmodel):** een run op de vloer van 20 EURC levert de treasury niets op. Een owner die zelf `execute` aanroept met `rewardTo` = zichzelf, handelt dan zonder fee. Met `maxCorrectionBps` 10 is elke run van een wallet tot 20.000 EURC zo'n vloerrun. Bewezen met een test: 24 runs, 480 EURC volume, 0 EURC voor de treasury. Het live contract heeft dit ook.
-  - **L-E:** staat de koers precies op een tickgrens, dan kan iemand in het blok van de run liquiditeit bijzetten zonder dat de blokcheck het ziet, anders dan de NatSpec zegt. Op de fork gemeten: het slachtoffer krijgt een iets betere prijs, de JIT-positie int +3,72 bp van de run aan poolfee (ten koste van andere LP's), en de run blijft onder de in-range bovengrens.
-  - **L-F:** een Chainlink-feed die binnen zijn drempel achterloopt, verruimt de geaccepteerde push in het vorige blok (`PR18-review/I-4`, SCOPE §5.3) van 40–50 bp naar 80–90 bp. Winst voor een aanvaller alleen als drie dingen samenvallen: protocolfee 0 (nu 68), 99% van de liquiditeit, en geen arbitrage tussen de blokken. Dan +82,3 bp in plaats van +44,2 bp. Bij de huidige protocolfee verliest de aanvaller 300 bp.
+  - **L-E:** staat de koers precies op een tickgrens, dan kan iemand in het blok van de run liquiditeit bijzetten zonder dat de blokcheck het ziet, anders dan de NatSpec zegt. Op de fork gemeten: het slachtoffer krijgt een iets betere prijs, de JIT-positie int +3,72 bp van de run aan poolfee (ten koste van andere LP's), en de run komt hooguit 1 sat (afronding van de verkoop) boven de in-range bovengrens.
+  - **L-F:** een Chainlink-feed die binnen zijn drempel achterloopt, verruimt de geaccepteerde push in het vorige blok (`PR18-review/I-4`, SCOPE §5.3) in deze meting van 40–50 bp naar 80–90 bp. Winst voor een aanvaller gemeten bij drie voorwaarden samen: protocolfee 0 (nu 68), 99% van de liquiditeit (alleen 0% en 99% gemeten), en geen arbitrage tussen de blokken. Dan +82,3 bp in plaats van +44,2 bp. Bij de huidige protocolfee verliest de aanvaller 161 tot 485 bp van de run.
 - **Twee informatieve punten:** Info-G, een Panic in plaats van `SequencerDown`, en Info-H, een verouderd commentaar in `script/Deploy.s.sol`.
 - **Compiler en statische analyse:** solc 0.8.37 heeft 0 bekende compilerbugs. Slither (39 meldingen) en Aderyn (1 High, 4 Low) vonden geen echte bugs (`triage.md`). De "High" van Aderyn in `TickMath.sol` is een false positive.
 - **Niet gedaan of mislukt:**
@@ -49,7 +49,7 @@ Aderyn nummert zijn eigen meldingen H-1 en L-1 tot en met L-4 (`aderyn.md`). Die
 
 | Tool | Versie / commit | Resultaat | Output |
 |---|---|---|---|
-| Compilerbuglijst | `docs/bugs_by_version.json` van `argotorg/solidity` | 0 bugs voor 0.8.37 | `compiler-bugs.txt` |
+| Compilerbuglijst | `docs/bugs_by_version.json` en `docs/bugs.json` van `argotorg/solidity` | 0 bugs voor 0.8.37 | `compiler-bugs.txt` |
 | forge test (alle suites, fork gepind) | forge 1.5.1 | 211 geslaagd, 0 gefaald, 0 overgeslagen | `forge-test.txt` |
 | Foundry invariants | 1.000 runs × depth 100 | 14 geslaagd | `invariants.txt` |
 | Slither | 0.11.6 | 39 meldingen, geen echte bug | `slither.txt`, `slither.json`, `triage.md` |
@@ -59,7 +59,7 @@ Aderyn nummert zijn eigen meldingen H-1 en L-1 tot en met L-4 (`aderyn.md`). Die
 | keeper `bun test` | bun 1.3.5 | 97 geslaagd, 0 gefaald | niet opgeslagen |
 | Eigen PoC's | — | 11 tests geslaagd | `poc/`, `poc/output.txt` |
 
-`audit/run-static.sh` leverde de eerste vijf rijen. Het script stopte eerst op de bash van macOS (3.2): een leeg array onder `set -u`. Dat is gerepareerd in `cc54fe0`, dat nu ook tijdstip en `FORK_BLOCK` in `versions.txt` schrijft.
+`audit/run-static.sh` leverde de eerste vijf rijen. Het script stopte eerst op de bash van macOS (3.2): een leeg array onder `set -u`. Dat is gerepareerd in `cc54fe0`, dat nu ook tijdstip en `FORK_BLOCK` in `versions.txt` schrijft. De vastgelegde run (gestart 12:11) draaide met die bash-fix nog ongecommit, vóór `cc54fe0` (12:14:58); `versions.txt` zegt daarom `commit: bab2ed3`. De regels `gedraaid` en `FORK_BLOCK` in die `versions.txt` zijn met de hand toegevoegd, inclusief de eindtijden van forge test en Aderyn (uit de bestandstijden).
 
 **Perspectieven van `solidity-auditor`:**
 - **Afgerond:** math-precision, access-control, economic-security, execution-trace, invariant, periphery, first-principles, asymmetry en boundary. Economic-security lukte bij de tweede poging.
@@ -68,7 +68,7 @@ Aderyn nummert zijn eigen meldingen H-1 en L-1 tot en met L-4 (`aderyn.md`). Die
 
 ## Compiler
 
-Solc 0.8.37 heeft volgens `docs/bugs_by_version.json` geen bekende compilerbugs (`compiler-bugs.txt`, opgehaald 2026-09-17 12:11). Er is geen upgrade nodig. De zes bugs van 0.8.28 zijn in de vorige ronde behandeld (`audit/2026-09-16/ai-audit.md`, sectie Compiler).
+Solc 0.8.37 heeft volgens `docs/bugs_by_version.json` en `docs/bugs.json` geen bekende compilerbugs (`compiler-bugs.txt`, opgehaald 2026-09-17 12:11). Er is geen upgrade nodig. De zes bugs van 0.8.28 zijn in de vorige ronde behandeld (`audit/2026-09-16/ai-audit.md`, sectie Compiler).
 
 ---
 
@@ -96,10 +96,10 @@ In README en SCOPE §3.1 staat alleen dat "de fee altijd de beloning dekt". Dat 
 | `test_poc_floorRunsYieldNothingForTreasuryWithAnyKeeper` | zelfde wallet, externe keeper | keeper 50.000, treasury 0 |
 | `test_poc_normalRunStillPaysTreasury` | `maxCorrectionBps` 1000, run 2.000 EURC, owner beloont zichzelf | treasury 4.950.000 (4,95 EURC) |
 
-**Gevolg.** Geen verlies voor gebruikers. Het raakt wel de enige inkomstenbron van Bitburo, de contractfee (zie memory "verdienmodel alleen fee"):
+**Gevolg.** Geen verlies voor gebruikers. Het raakt wel de enige inkomstenbron van Bitburo, de contractfee van 0,25% (sinds app-PR #150 "Verwijder het abonnement: de contractfee is de enige kosten"):
 - **Kleine wallets met een eigen keeper** handelen fee-vrij.
 - **Grotere wallets** kunnen hetzelfde bereiken door zich over meerdere adressen te verdelen.
-- **Ook met een externe keeper** krijgt de treasury bij elke vloerrun niets.
+- **Ook met een externe keeper** die `rewardTo` op een eigen adres zet, krijgt de treasury bij elke vloerrun niets. De app-keeper doet dat niet: zijn Privy-policy pint `rewardTo` op de treasury (`app/Console/Commands/SetupKeeperWalletCommand.php:17-20` @ `bf04fbc`), dus bij zijn runs krijgt de treasury de hele fee.
 
 **Live contract:** ja. `f8a6d49` heeft dezelfde beloning, vloer en `rewardTo`-regel (live `:71`, `:83`, `:340`, `_takeFee` `:599-606`; on-chain bevestigd hierboven). Bij verkopen geldt het live nog iets vaker, omdat de fee daar over `received` wordt berekend (`09-16/L-B`).
 
@@ -136,7 +136,7 @@ De aanvaller moet de koers daarvoor in een eerder blok precies op P(b) zetten. H
 | verkoop (tick = b − 1) | 1370 | nee | 525,482378 / 525,482378 | 525,481952 | 523,726785 / 523,806271 EURC | +0,195584 EURC = +3,72 bp van de run |
 
 - **Slachtoffer:** krijgt met de JIT per eenheid nooit minder. Geasserteerd.
-- **Runomvang:** blijft onder de in-range bovengrens, met een marge van 1 sat omdat de verkoop-delta naar boven afrondt. Geasserteerd. Bij de koop tilt de JIT een liquiditeitsklif op tot precies die bovengrens, het gedrag uit SCOPE §5.2.
+- **Runomvang:** komt hooguit 1 sat boven de in-range bovengrens. Geasserteerd met `plain.inRangeBound + r.quote() / 1e8`: de verkoop-delta van `isDue` rondt `amountIn` naar boven af en lag 426 basiseenheden (0,000426 EURC) boven de grens, bij de koop precies erop. Bij de koop tilt de JIT een liquiditeitsklif op tot precies die bovengrens, het gedrag uit SCOPE §5.2.
 - **Winst:** de +3,72 bp is gewone poolfee (99% × 5 bp × ¾ na de protocolfee) op het volume van het slachtoffer. Die gaat ten koste van de andere LP's, niet van het slachtoffer.
 - **Andere maat dan de README:** `README.md:67` zegt dat JIT buiten de range "geen winst oplevert". Daar gaat het om de extra winst van een push bij gelijke JIT; deze meting vergelijkt JIT met geen JIT, zonder push.
 
@@ -161,7 +161,7 @@ De aanvaller moet de koers daarvoor in een eerder blok precies op P(b) zetten. H
 
 **Gevonden door:** QuillShield oracle-checklist, gemeten op de fork. Economic-security gaf de push door een dominante LP in het vorige blok als lead, zonder de achterstand.
 
-**Oorzaak.** De spotcheck vergelijkt de pool met Chainlink, niet met de markt. Chainlink mag binnen de deviation-drempel achterlopen: cbBTC/USD 0,3%, EURC/USD 0,1% (Chainlink-directory, sectie Reproduceren). Loopt de feed in het voordeel van de aanvaller achter, dan telt die achterstand op bij de tolerantie van 50 bp. De geaccepteerde push aan het eind van het vorige blok (`PR18-review/I-4`, SCOPE §5.3) mag dan veel groter zijn. SCOPE §5.3 rekent zonder achterstand: grootste push 25 bp (koop) / 50 bp (verkoop), LP 99% bij protocolfee 0 tot +41,5 bp.
+**Oorzaak.** De spotcheck vergelijkt de pool met Chainlink, niet met de markt. Chainlink mag binnen de deviation-drempel achterlopen: cbBTC/USD 0,3%, EURC/USD 0,1% (Chainlink-directory, sectie Reproduceren). Loopt de feed in het voordeel van de aanvaller achter, dan telt die achterstand op bij de tolerantie van 50 bp. De geaccepteerde push aan het eind van het vorige blok (`PR18-review/I-4`, SCOPE §5.3) mag dan veel groter zijn. SCOPE §5.3 rekent zonder achterstand: grootste push 25 bp (koop) / 50 bp (verkoop), LP 99% bij protocolfee 0 tot +41,5 bp. Die meting komt uit het L-3-onderzoek (niet in de repo, ander blok, correctie van 10.000 EURC). De meting hieronder, op blok 51.425.248 met alleen een push in EURC/USDC, gaf zonder achterstand 50 bp (koop) / 40 bp (verkoop) en +44,2 bp: de grootste push hangt af van hoe ver de spot vooraf van Chainlink lag.
 
 **Bewijs.** `poc/PrevBlockLagFork.t.sol` (geschreven door de QuillShield-reviewer, door mij opnieuw gedraaid met identieke uitkomst). Fork met `FORK_BLOCK=51425248`, gedraaid 2026-09-17 12:56. De opzet:
 - **Correctie:** 10.000 EURC, `maxSlippageBps` 100.
@@ -182,14 +182,14 @@ De aanvaller moet de koers daarvoor in een eerder blok precies op P(b) zetten. H
 Alle regels staan in `poc/output.txt` (prefix `PBL,`). Een push boven de grootste geaccepteerde push revert met `SpotDeviatesFromOracle` (`0x1b3ce45e`).
 
 **Gevolg.**
-- **Bij de huidige protocolfee** maakt niemand winst: de aanvaller verliest 300 tot 485 bp om het slachtoffer ~80–90 bp slechter te laten handelen. Dat is griefing tegen eigen verlies.
+- **Bij de huidige protocolfee** maakt niemand winst: bij volledige achterstand verliest de aanvaller 161 tot 485 bp van de run (koop 300–485 bp, verkoop 161–271 bp; `poc/output.txt`) om het slachtoffer ~80–90 bp slechter te laten handelen. Dat is griefing tegen eigen verlies.
 - **Bij protocolfee 0 (hypothetisch)** met 99% van de liquiditeit en zonder arbitrage verdubbelt de geaccepteerde restwinst uit SCOPE §5.3 ongeveer.
 - **Verliesgrens:** de grens `FEE_BPS + maxSlippageBps` geldt tegenover de achterlopende feed, niet tegenover de markt. Gemeten tot 123,5 bp tegenover de echte koers; theoretisch tot 125 bp plus de achterstand van ~40 bp.
 - **Niet gemeten:** een push in beide pools met achterstand (lead 17).
 
 **Live contract:** ja, en daar zwaarder. `f8a6d49` heeft geen blokcheck, dus ook de push in hetzelfde blok (de oude `09-16/M-1`) krijgt daar de achterstand erbij (`09-16/M-1`, tabel "0,3% te hoog": tot +18,71 EURC).
 
-**Fix:** documentatie. Voeg de achterstandsterm toe aan SCOPE §5.3, README "Niet gedekt" en de NatSpec `:60-61`, en noem hem bij vraag 2 aan de auditors. `MAX_SPOT_DEVIATION_BPS` verlagen verkleint de ruimte, maar laat eerlijke runs vaker reverten (SCOPE §4.5: > 50 bp in 0,14% van de uurmetingen). De kosten daarvan zijn niet gemeten.
+**Fix:** documentatie. Voeg de achterstandsterm toe aan SCOPE §5.3, README "Niet gedekt" en de NatSpec `:60-61`, en voeg een vraag aan de auditors toe: SCOPE §6 heeft geen vraag over §5.3 (vraag 2 gaat over §3.3 en §5.4). `MAX_SPOT_DEVIATION_BPS` verlagen verkleint de ruimte, maar laat eerlijke runs vaker reverten (SCOPE §4.5: > 50 bp in 0,14% van de uurmetingen). De kosten daarvan zijn niet gemeten.
 
 ---
 
@@ -224,7 +224,7 @@ Alle regels staan in `poc/output.txt` (prefix `PBL,`). Een push boven de grootst
 
 11. **Rondebudget schaalt niet mee met de wallet** (execution-trace, invariant).
     - **Wat:** in een deel is het budget `rounds[owner].remainingEurc` (`:900-903`), vastgesteld bij de eerste run.
-    - **Voorbeeld:** wallet 1.000.000 EURC, `maxCorrectionBps` 1000, budget 100.000 EURC. De eerste run doet 30.000; de owner haalt daarna geld weg tot 100.000 EURC. Volgende delen mogen dan tot min(40.000, 70.000, liquiditeit), meer dan 10% van de wallet van dat moment.
+    - **Voorbeeld:** wallet 1.000.000 EURC, `maxCorrectionBps` 1000, budget 100.000 EURC. De eerste run doet 30.000 (liquiditeit), er blijft 70.000 budget over. De owner haalt daarna geld weg tot 100.000 EURC, met nog 40% afwijking van het doel: correctie = 40% × 100.000 = 40.000. Volgende delen mogen dan tot min(40.000, 70.000, liquiditeit), meer dan de 10% × 100.000 = 10.000 die een nieuwe ronde zou krijgen.
     - **Wie kan het:** alleen de owner zelf (opnemen), of de koers.
     - **Richting en grenzen:** elk deel gaat richting het doel en blijft begrensd door band en venster.
     - **Documentatie:** SCOPE §3.4 noemt het vaste budget "ook na een donatie", maar niet het krimpen.
@@ -241,7 +241,7 @@ Alle regels staan in `poc/output.txt` (prefix `PBL,`). Een push boven de grootst
     - **Ongewijzigde v3-code:** de blokcheck gaat ervan uit dat de pools op Base ongewijzigde v3-core-code draaien. Per actie op de fork aangetoond met `test_observationSemantics_perAction` (`test/BlockWindowReviewFork.t.sol:525`).
     - **Unieke tijdstempel per blok:** de check gaat er ook van uit dat elk blok een eigen tijdstempel heeft. Delen twee blokken er een, dan weigert de check alleen te vaak (first-principles), en dat is veilig.
 17. **L-F met een push in beide pools** (QuillShield). Alleen EURC/USDC is geduwd; de omvang en winst bij een push in USDC/cbBTC erbij zijn niet gemeten.
-18. **Achterstand plus push binnen de tick, voor een LP-aanvaller** (QuillShield). De achterstand veranderde de uitvoeringskoers niet: de rijen met en zonder achterstand gaven bij dezelfde push dezelfde koers. Daarom wordt geen nieuw effect verwacht, maar voor een LP-aanvaller is dit niet apart gemeten.
+18. **Achterstand plus push binnen de tick, voor een LP-aanvaller** (QuillShield). De achterstand veranderde de uitvoeringskoers nauwelijks: de rijen met en zonder achterstand gaven bij dezelfde push bij kopen dezelfde koers en bij verkopen tot 0,1 bp verschil (bijvoorbeeld 81,25 / 81,18 / 81,15 bp bij een push van 40 bp). Daarom wordt geen nieuw effect verwacht, maar voor een LP-aanvaller is dit niet apart gemeten.
 
 ## Opgemerkt, geen impact
 
@@ -289,15 +289,21 @@ Alle regels staan in `poc/output.txt` (prefix `PBL,`). Een push boven de grootst
 
 ## Reproduceren
 
-Alle commando's vanuit de root van `bitburo-contracts`, op commit `bab2ed3` of de branch `chore/audit-2026-09-17`.
+Alle commando's vanuit de root van `bitburo-contracts`, op de branch `chore/audit-2026-09-17` (vanaf `8e4e138`, waar `poc/` bij kwam). De code onder test (`src/`, `test/`, `script/`, `keeper/`) is gelijk aan `bab2ed3`.
+
+**Vereisten:**
+- Foundry (`~/.foundry/bin/forge`, `cast`), `slither`, `aderyn`, `gh` en `python3` (`run-static.sh` controleert ze), en bun voor de keeper.
+- `.env` in de root met `BASE_RPC_URL`: een RPC voor Base die historische staat levert (archive). Er is geen `.env.example`; alleen die ene variabele is nodig. `.env` staat in `.gitignore`.
+- OpenZeppelin-submodule: `git submodule update --init lib/openzeppelin-contracts`.
 
 ```bash
 # Deterministische stappen (compilerbugs, tests, invariants, Slither, Aderyn)
 set -a; source .env; set +a                 # BASE_RPC_URL; waarde niet tonen
-FORK_BLOCK=51425248 bash audit/run-static.sh audit/2026-09-17-self
+# Naar een nieuwe map; audit/2026-09-17-self bevat de vastgelegde uitvoer (versions.txt is met de hand aangevuld)
+FORK_BLOCK=51425248 bash audit/run-static.sh audit/2026-09-17-self-rerun
 
 # Keeper
-cd keeper && bun test && cd ..
+cd keeper && bun install && bun test && cd ..
 
 # PoC's: kopiëren naar test/, draaien, weer weghalen
 cp audit/2026-09-17-self/poc/*.t.sol test/
@@ -310,14 +316,14 @@ rm test/SelfKeeperFeeCapture.t.sol test/BoundaryJitFork.t.sol test/PrevBlockLagF
 **Valkuilen:**
 - `forge` op het PATH is Laravel Forge; gebruik `~/.foundry/bin/forge`. `run-static.sh` zet Foundry zelf voorop.
 - `BoundaryJitForkTest` erft van `BlockWindowReviewForkTest`. Zonder `--match-test boundaryJit` draaien alle 16 geërfde fork-tests mee.
-- De PoC's compileren alleen in `test/`, want ze importeren `./Rebalancer.t.sol` of `./BlockWindowFork.t.sol`.
+- De PoC's compileren alleen in `test/`, want ze importeren `./Rebalancer.t.sol`, `./BlockWindowFork.t.sol` of `./BlockWindowReviewFork.t.sol`.
 - Fork-tests zonder `FORK_BLOCK` forken het laatste blok, en de getallen verschuiven dan per run. De RPC moet historische staat voor blok 51.425.248 leveren; `https://mainnet.base.org` is rate-limited.
 - Onder `via_ir` cachet Solidity `block.timestamp` in een testfunctie. Gebruik na `vm.warp` `vm.getBlockTimestamp()`.
 - `run-static.sh` op de bash van macOS werkt pas vanaf `cc54fe0`.
 
 **Metingen en tijdstippen (CEST, 2026-09-17):**
-- `run-static.sh`: gestart 12:11, forge test klaar 12:12:58, Aderyn 12:13:34 (`versions.txt`).
-- PoC's (`poc/output.txt`): 12:56 (L-F) en 12:57 (L-D, L-E), op `FORK_BLOCK=51425248`.
+- `run-static.sh`: gestart 12:11, forge test klaar 12:12:58, Aderyn 12:13:34 (met de hand in `versions.txt` gezet, uit de bestandstijden van de uitvoer).
+- PoC's: L-F om 12:56 in een scratch-kopie, daarna alle drie samen vanuit `test/` in deze repo om 12:57, op `FORK_BLOCK=51425248`. `poc/output.txt` is de uitvoer van die laatste run (zonder tijdstempels; tijden uit de bestandstijden).
 - `cast call` op het live contract: blok 51.426.659.
 
 **Externe bronnen** (op 2026-09-17 geraadpleegd, niet in de repo opgeslagen):
@@ -359,17 +365,18 @@ Geen eerdere bevinding is door deze ronde heropend.
    - **L-E:** NatSpec `src/Rebalancer.sol:41-43`, README "JIT buiten de range" (`README.md:67`), SCOPE §3.3 punt 1 en vraag 1(c).
    - **L-F:** NatSpec `:60-61`, README "Niet gedekt" (`README.md:63`), SCOPE §5.3 en vraag 2.
    - **Info-H:** `script/Deploy.s.sol:26-27`.
-   - **Lead 11:** SCOPE §3.4.
+   - **Lead 11:** SCOPE §3.4, na het besluit in stap 4.
    - **Auditpakket:** de externe auditor krijgt `audit/2026-09-17/`. Neem deze punten daar op of voeg dit rapport toe, anders mist hij ze.
-3. **Info-G** meenemen in dezelfde contractversie als L-D (één voorwaarde op `:602`), met een test naar het voorbeeld van `test_execute_revertsSequencerDownWhenStartedAtZero` (`test/Rebalancer.t.sol:577`).
-4. **Leads 11, 13, 14, 15, 17 en 18** per stuk nalopen en besluiten: fixen, documenteren of verwerpen. Lead 17 en 18 zijn uit te breiden in `poc/PrevBlockLagFork.t.sol`.
+3. **Info-G** meenemen in de eerstvolgende contractversie (één voorwaarde op `:602`), met een test naar het voorbeeld van `test_execute_revertsSequencerDownWhenStartedAtZero` (`test/Rebalancer.t.sol:577`).
+4. **Leads 11, 13, 14, 15, 17 en 18** per stuk nalopen en besluiten: fixen, documenteren of verwerpen. Lead 11 eerst, want stap 2 hangt ervan af. Lead 17 en 18 zijn uit te breiden in `poc/PrevBlockLagFork.t.sol`. Lead 12 is al geaccepteerd en lead 16 al op de fork getoetst: daar is geen actie nodig.
 5. **De drie ontbrekende pashov-perspectieven** (numerical-gap, trust-gap, flow-gap) later opnieuw proberen, bijvoorbeeld met een ander model. Of de externe audit dat laten dekken.
 6. **Nieuwe deploy: alleen met uitdrukkelijk akkoord van Arjan.**
-   - **Live mist nog:** het live contract `0xE577…2104` (`f8a6d49`) heeft geen blokvenster en geen `retire()` (`README.md:14`). Daar gelden de oude `09-16/M-1`, L-D, L-F (zwaarder) en Info-G nog.
+   - **Live mist nog:** het live contract `0xE577…2104` (`f8a6d49`) heeft geen blokvenster (`git show f8a6d49:src/Rebalancer.sol`, geen `observations`) en geen `retire()` (`README.md:14`). Daar gelden de oude `09-16/M-1`, L-D, L-F (zwaarder) en Info-G nog.
    - **Draaiboek:** lees eerst het draaiboek in issue #7 van `pinheadio/bitburo-contracts`.
-   - **Valkuil `broadcast/`:** `deploy-mainnet.sh go` weigert zolang `broadcast/` al een deploy bevat (`FORCE_REDEPLOY=1`). `broadcast/` staat in `.gitignore`, dus een verse clone gedraagt zich anders.
+   - **Valkuil `broadcast/`:** `deploy-mainnet.sh go` weigert zolang `broadcast/` al een deploy bevat, tenzij `FORCE_REDEPLOY=1` (`deploy-mainnet.sh:82`). `broadcast/` staat in `.gitignore`, dus een verse clone gedraagt zich anders.
    - **App bijwerken na de deploy:**
      - `BITBURO_REBALANCER_ADDRESS` en `BITBURO_REBALANCER_DEPLOY_BLOCK`;
      - het oude adres in `BITBURO_REBALANCER_LEGACY_ADDRESSES` (`config/bitburo.php`);
-     - `REBALANCER` voor `keeper/keeper.ts`.
+     - `REBALANCER` voor `keeper/keeper.ts`;
+     - `php artisan bitburo:setup-keeper-wallet --update`: de Privy-policy van de app-keeper pint het contractadres en moet na elke wijziging van `BITBURO_REBALANCER_ADDRESS` opnieuw (signature in `app/Console/Commands/SetupKeeperWalletCommand.php:45`).
 7. **Externe audit** op de versie die uit stap 1 tot en met 3 komt, met dit rapport als aanvulling op `audit/2026-09-17/`.
