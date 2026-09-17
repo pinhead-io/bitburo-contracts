@@ -544,6 +544,13 @@ export const nextScanOffset = (scannedTo: bigint, firstUnprocessed: bigint | nul
 };
 
 /**
+ * Plek in het register van de eerste kandidaat die nog niet gelezen is (adressen uit OWNERS_FILE hebben geen plek), of
+ * null. Voor `nextScanOffset`, bij het retry-budget en bij een fout (verificatie 579f763, info c).
+ */
+export const firstRegisterIndex = (pending: readonly { index: bigint | null }[]): bigint | null =>
+  pending.find((c) => c.index !== null)?.index ?? null;
+
+/**
  * Eindreview F-2: `OWNERS_FILE`, adressen die elke run eerst worden bediend (zoals de app-keeper eigen gebruikers eerst
  * bedient), vóór het register. Scheiding door witruimte of komma's; `#` begint commentaar tot het eind van de regel.
  * Een ongeldig adres is een fout (liever niet starten dan een eigen gebruiker stil overslaan); dubbele adressen tellen

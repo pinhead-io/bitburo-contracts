@@ -109,6 +109,7 @@ import {
   eurcToWei,
   failureAction,
   filterCandidates,
+  firstRegisterIndex,
   formatEurc,
   formatGwei,
   isBlockWindowRevert,
@@ -941,6 +942,13 @@ const dueAmong = async (owners: readonly Address[], at: At): Promise<Address[]> 
 
 // Verificatie 579f763 (info b): een fout die nergens anders wordt afgevangen, niet door Bun laten printen (dan staat de
 // volledige RPC-URL met een mogelijke API-sleutel in de log), maar hier, zonder die URL.
+/**
+ * Verificatie 579f763 (info c): de scanvoortgang (eindreview F-2) wordt ook bewaard als de run door een fout stopt, in
+ * `finally`. `scan` is gezet zodra het register gelezen is; `pending` zijn de kandidaten die nog niet (helemaal) gelezen
+ * zijn: bij het retry-budget de rest, bij een fout de portie waarin het misging en alles erna.
+ */
+let scan: { count: bigint; scannedTo: bigint } | undefined;
+let pending: readonly Candidate[] = [];
 try {
   readsNextBlock = await probeOverrides();
   if (!readsNextBlock) {
@@ -984,23 +992,21 @@ try {
       }
       console.log(`${priorityOwners.length} adressen uit OWNERS_FILE, ${candidates.length} kandidaten`);
     }
-    const scan = await scanRegister(checked, scanStart, ctx, new Set(priorityOwners.map((o) => o.toLowerCase())));
-    candidates.push(...scan.candidates);
-    scannedTo = scan.scannedTo;
+    const found = await scanRegister(checked, scanStart, ctx, new Set(priorityOwners.map((o) => o.toLowerCase())));
+    candidates.push(...found.candidates);
+    scannedTo = found.scannedTo;
+    scan = { count: checked, scannedTo };
     console.log(
-      `${checked} owners geregistreerd, ${scan.read} gelezen vanaf ${scanStart}${scan.complete ? " (hele register)" : ""}, ${candidates.length} kandidaten na het filter op saldo en allowance`,
+      `${checked} owners geregistreerd, ${found.read} gelezen vanaf ${scanStart}${found.complete ? " (hele register)" : ""}, ${candidates.length} kandidaten na het filter op saldo en allowance`,
     );
   }
 
-  /** Eerste kandidaat uit het register die deze run niet meer gelezen is, als het retry-budget op raakt. */
-  let firstUnprocessed: bigint | null = null;
   const batches = chunks(candidates, Number(pageSize));
   for (const [index, batch] of batches.entries()) {
+    pending = batches.slice(index).flat();
     if (nowSec() >= deadline) {
-      const rest = batches.slice(index).flat();
-      firstUnprocessed = rest.find((c) => c.index !== null)?.index ?? null;
       console.warn(
-        `Retry-budget (${retrySeconds} s) op: ${rest.length} kandidaten niet meer gelezen; de volgende run begint in het register bij ${firstUnprocessed ?? scannedTo}.`,
+        `Retry-budget (${retrySeconds} s) op: ${pending.length} kandidaten niet meer gelezen; de volgende run begint in het register bij ${firstRegisterIndex(pending) ?? scannedTo}.`,
       );
       break;
     }
@@ -1031,6 +1037,7 @@ try {
       }
       if (!shouldReadPageAgain(fresh.length, reads, blockRetries + 1, readsNextBlock)) break;
     }
+    pending = batches.slice(index + 1).flat();
   }
 
   // Tijdelijk geblokkeerde owners om de beurt, elk in een nieuw blok, tot ze lukken of het retry-budget op is.
@@ -1040,11 +1047,6 @@ try {
     count(next.owner, await attemptOwner(next.owner, next.block, true));
   }
 
-  saveCooldowns();
-  if (ctx !== undefined) {
-    const nextOffset = nextScanOffset(scannedTo, firstUnprocessed, checked);
-    writeFileSync(scanStateFile, `${JSON.stringify({ nextOffset: nextOffset.toString() }, null, 2)}\n`);
-  }
   // Eindreview F-1: een run zonder blokkade en zonder eigen transactie laat de tip ook zakken.
   if (!blockadeThisRun && !sentThisRun && !dryRun) lowerFee();
   console.log(`Klaar: ${checked} owners geregistreerd, ${executed} uitgevoerd, ${skipped} overgeslagen${dryRun ? " (dry-run)" : ""}.`);
@@ -1052,4 +1054,15 @@ try {
   const full = error instanceof Error ? (error.stack ?? error.message) : String(error);
   console.error(`run afgebroken: ${redactRpcUrl(full, rpcUrl)}`);
   process.exitCode = 1;
+} finally {
+  try {
+    saveCooldowns();
+    if (scan !== undefined) {
+      const nextOffset = nextScanOffset(scan.scannedTo, firstRegisterIndex(pending), scan.count);
+      writeFileSync(scanStateFile, `${JSON.stringify({ nextOffset: nextOffset.toString() }, null, 2)}\n`);
+    }
+  } catch (error) {
+    console.error(`staat niet op te slaan: ${describeError(error)}`);
+    process.exitCode = 1;
+  }
 }

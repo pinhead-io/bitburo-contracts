@@ -18,6 +18,7 @@ import {
   eurcToWei,
   failureAction,
   filterCandidates,
+  firstRegisterIndex,
   isCandidate,
   isDirectExecute,
   formatEurc,
@@ -484,6 +485,28 @@ describe("register scan rotation (final review F-2)", () => {
     // Hele register gelezen: scannedTo is weer de start.
     expect(nextScanOffset(20_001n, null, 20_001n)).toBe(0n);
     expect(nextScanOffset(7n, null, 0n)).toBe(0n);
+  });
+
+  test("verification 579f763 (info c): after a crash the next run resumes at the first unread register candidate", () => {
+    const owner = (i: number) => `0x${i.toString(16).padStart(40, "0")}` as Address;
+    // Kandidaten: twee uit OWNERS_FILE (geen plek), dan register-plekken 12.100, 12.340 en 12.410.
+    const candidates = [
+      { owner: owner(1), index: null },
+      { owner: owner(2), index: null },
+      { owner: owner(3), index: 12_100n },
+      { owner: owner(4), index: 12_340n },
+      { owner: owner(5), index: 12_410n },
+    ];
+    const batches = chunks(candidates, 2);
+    // Fout in de tweede portie: die portie en alles erna is nog niet gelezen.
+    const pending = batches.slice(1).flat();
+    expect(firstRegisterIndex(pending)).toBe(12_100n);
+    expect(nextScanOffset(12_500n, firstRegisterIndex(pending), 20_001n)).toBe(12_100n);
+    // Fout in de laatste portie.
+    expect(firstRegisterIndex(batches.slice(2).flat())).toBe(12_410n);
+    // Fout ná alle porties (in de retry-wachtrij) of alleen OWNERS_FILE over: waar het zoeken stopte.
+    expect(nextScanOffset(12_500n, firstRegisterIndex([]), 20_001n)).toBe(12_500n);
+    expect(nextScanOffset(12_500n, firstRegisterIndex(candidates.slice(0, 2)), 20_001n)).toBe(12_500n);
   });
 
   test("with spam in front of a real owner, the rotation reaches him within ceil(count / per run) runs", () => {
