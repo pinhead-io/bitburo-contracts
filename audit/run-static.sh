@@ -31,6 +31,9 @@ done
 step "Versies"
 {
   echo "commit: $(git rev-parse --short HEAD) ($(git branch --show-current))"
+  echo "gedraaid: $(date '+%F %T %Z')"
+  # Fork-tests zonder vast blok geven per run andere getallen; zet FORK_BLOCK voor een herhaalbare meting.
+  echo "FORK_BLOCK: ${FORK_BLOCK:-latest}"
   forge --version | head -1
   echo "slither $(slither --version)"
   aderyn --version
@@ -68,7 +71,8 @@ if [ "${SKIP_FORK:-0}" = "1" ]; then
 else
   FORGE_ARGS=()
 fi
-forge test "${FORGE_ARGS[@]}" > "$OUT/forge-test.txt" 2>&1 || fail "forge test faalt, zie $OUT/forge-test.txt"
+# `${arr[@]+...}`: een leeg array geeft onder `set -u` in bash 3.2 (macOS) "unbound variable".
+forge test ${FORGE_ARGS[@]+"${FORGE_ARGS[@]}"} > "$OUT/forge-test.txt" 2>&1 || fail "forge test faalt, zie $OUT/forge-test.txt"
 grep -E '^Ran [0-9]+ test suites?' "$OUT/forge-test.txt" || true
 
 step "Invariants diep ($INVARIANT_RUNS runs x depth $INVARIANT_DEPTH)"

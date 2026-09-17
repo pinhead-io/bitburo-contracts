@@ -1,0 +1,619 @@
+Compiling 17 files with Solc 0.8.37
+Solc 0.8.37 finished in 39.22s
+Compiler run successful!
+
+Ran 104 tests for test/Rebalancer.t.sol:RebalancerTest
+[PASS] testFuzz_isDue_matchesCorrectionAtAnyPrice(uint256,uint256,uint256,uint16,uint16,uint16,uint64) (runs: 512, μ: 641300, ~: 490761)
+[PASS] testFuzz_planBoundedAndAccountingClosed(uint256,uint256,uint16,uint16,uint16,uint64,uint256,uint256,bool) (runs: 513, μ: 550307, ~: 412728)
+[PASS] testFuzz_setParamsValidation(uint16,uint16,uint16,uint64,uint32,uint16) (runs: 512, μ: 18957, ~: 18854)
+[PASS] test_constructor_rejectsFeedWithWrongDecimals() (gas: 1042621)
+[PASS] test_constructor_rejectsNonContracts() (gas: 4117722)
+[PASS] test_constructor_rejectsPoolNotFromRouterFactory() (gas: 6281804)
+[PASS] test_constructor_rejectsPoolWithWrongFee() (gas: 2394450)
+[PASS] test_constructor_rejectsPoolWithWrongTickSpacing() (gas: 193420)
+[PASS] test_constructor_rejectsPoolWithWrongTokens() (gas: 1259198)
+[PASS] test_constructor_rejectsTokenWithWrongDecimals() (gas: 3892517)
+[PASS] test_constructor_rejectsTokenWithoutDecimals() (gas: 115775)
+[PASS] test_constructor_rejectsZeroAddress() (gas: 173843)
+[PASS] test_dueOwners_emptyOnFeedFailureNeverReverts() (gas: 357437)
+[PASS] test_dueOwners_emptyRegistry() (gas: 13416)
+[PASS] test_dueOwners_filtersAndPaginatesLikeIsDue() (gas: 1943745)
+[PASS] test_dueOwners_pagingReachesEveryDueOwner() (gas: 3525436)
+[PASS] test_execute_allowanceBelowMinTradeIsNothingToDo() (gas: 332539)
+[PASS] test_execute_anyoneMayCall() (gas: 710381)
+[PASS] test_execute_boundedByAllowance() (gas: 709965)
+[PASS] test_execute_boundedByBalance() (gas: 998707)
+[PASS] test_execute_buy_exactAmounts() (gas: 737291)
+[PASS] test_execute_continuesWhenTreasuryBlacklisted() (gas: 703473)
+[PASS] test_execute_continuesWhenTreasuryBlacklistedAndSweepRecoversFee() (gas: 737901)
+[PASS] test_execute_feedAndSpotDivergeIndependently() (gas: 949303)
+[PASS] test_execute_lastExecutedAtNotSetOnRevert() (gas: 500992)
+[PASS] test_execute_minSlippageCoversSpotDeviationPlusPoolFees() (gas: 1117174)
+[PASS] test_execute_revertsInactiveWhenDeactivated() (gas: 232587)
+[PASS] test_execute_revertsInactiveWhenUnknown() (gas: 19055)
+[PASS] test_execute_revertsInvalidFeedAnswer() (gas: 376242)
+[PASS] test_execute_revertsNoOutputWhenBuyYieldsZero() (gas: 765132)
+[PASS] test_execute_revertsNotDue() (gas: 877918)
+[PASS] test_execute_revertsNothingToDoAtBandEdge() (gas: 367578)
+[PASS] test_execute_revertsNothingToDoBelowMinTrade() (gas: 370212)
+[PASS] test_execute_revertsNothingToDoWithinBand() (gas: 639136)
+[PASS] test_execute_revertsNothingToDoZeroAllowance() (gas: 312866)
+[PASS] test_execute_revertsNothingToDoZeroBalance() (gas: 259144)
+[PASS] test_execute_revertsOnSlippageBuy() (gas: 971491)
+[PASS] test_execute_revertsOnSlippageSell() (gas: 921318)
+[PASS] test_execute_revertsSequencerDownAnswerOne() (gas: 306044)
+[PASS] test_execute_revertsSequencerDownWhenStartedAtZero() (gas: 770456)
+[PASS] test_execute_revertsSequencerDownWithinGrace() (gas: 761813)
+[PASS] test_execute_revertsStaleFeedCbbtc() (gas: 772415)
+[PASS] test_execute_revertsStaleFeedEurc() (gas: 786353)
+[PASS] test_execute_revertsStaleFeedWhenUpdatedAtInFuture() (gas: 376088)
+[PASS] test_execute_revertsWhenOnlyEurcPoolDeviates() (gas: 485890)
+[PASS] test_execute_revertsWhenOwnerBlacklisted() (gas: 522193)
+[PASS] test_execute_revertsWhenQuoteRoundsToZero() (gas: 374399)
+[PASS] test_execute_revertsWhenSpotDeviatesAfterSwap() (gas: 1909815)
+[PASS] test_execute_revertsWhenSpotDeviatesFromOracle() (gas: 1225166)
+[PASS] test_execute_revertsWhenTokenPaused() (gas: 373217)
+[PASS] test_execute_rewardCappedByFee() (gas: 713321)
+[PASS] test_execute_rewardFallsBackToTreasuryWhenRewardToBlacklisted() (gas: 716649)
+[PASS] test_execute_rewardToSelfGoesToTreasury() (gas: 686365)
+[PASS] test_execute_rewardToZeroSendsWholeFeeToTreasury() (gas: 684049)
+[PASS] test_execute_secondRunAfterIntervalUsesNewState() (gas: 872366)
+[PASS] test_execute_sellBoundedByAllowance() (gas: 665197)
+[PASS] test_execute_sellFeeFloorUsesExpectedOut() (gas: 1159404)
+[PASS] test_execute_sellRetainsWholeFeeWhenTreasuryBlacklisted() (gas: 1077097)
+[PASS] test_execute_sellWithRewardToZero() (gas: 683451)
+[PASS] test_execute_sell_exactAmounts() (gas: 735447)
+[PASS] test_execute_spotCheckIgnoresPoolFeesOnly() (gas: 733280)
+[PASS] test_isDue_buyReturnsPositiveCorrection() (gas: 328118)
+[PASS] test_isDue_deltaIsAllowanceBoundedAmount() (gas: 740698)
+[PASS] test_isDue_deltaMatchesExecutedAmountWhenAllowanceBinds() (gas: 754396)
+[PASS] test_isDue_eurcDepegTurnsHoldIntoSell() (gas: 466657)
+[PASS] test_isDue_falseBelowMinTradeAndZeroAllowance() (gas: 562558)
+[PASS] test_isDue_falseOnFeedFailureNeverReverts() (gas: 296480)
+[PASS] test_isDue_falseWhenNotDue() (gas: 831050)
+[PASS] test_isDue_falseWhenUnknownOrInactive() (gas: 232653)
+[PASS] test_isDue_falseWithinBand() (gas: 365821)
+[PASS] test_isDue_matchesPhpReferenceVectors() (gas: 3547105)
+[PASS] test_isDue_sellReturnsNegativeCorrection() (gas: 322038)
+[PASS] test_owners_andDueOwners_maxLimitNeverOverflows() (gas: 717281)
+[PASS] test_owners_emptyRegistry() (gas: 9665)
+[PASS] test_owners_pagination() (gas: 453339)
+[PASS] test_quote_usesBothFeeds() (gas: 57879)
+[PASS] test_retire_executeReverts() (gas: 362965)
+[PASS] test_retire_executeRevertsForEveryOwner() (gas: 423506)
+[PASS] test_retire_isDueFalseAndDueOwnersEmpty() (gas: 530920)
+[PASS] test_retire_revertsForNonTreasury() (gas: 17296)
+[PASS] test_retire_secondCallReverts() (gas: 39650)
+[PASS] test_retire_setParamsCanOnlyDeactivate() (gas: 358511)
+[PASS] test_retire_setsFlagAndEmits() (gas: 39977)
+[PASS] test_retire_sweepStillWorks() (gas: 789581)
+[PASS] test_setParams_boundaryValuesAccepted() (gas: 181282)
+[PASS] test_setParams_inactiveParamsStillValidated() (gas: 17177)
+[PASS] test_setParams_minBandBps() (gas: 123837)
+[PASS] test_setParams_registersOnlyOnce() (gas: 131013)
+[PASS] test_setParams_rejectsBand() (gas: 27356)
+[PASS] test_setParams_rejectsIntervalBelowOneHour() (gas: 23885)
+[PASS] test_setParams_rejectsMaxCorrection() (gas: 29182)
+[PASS] test_setParams_rejectsMinTradeBelowFloor() (gas: 33987)
+[PASS] test_setParams_rejectsSlippage() (gas: 34964)
+[PASS] test_setParams_rejectsTargetNotMultipleOf100() (gas: 21889)
+[PASS] test_setParams_rejectsTargetOutOfRange() (gas: 25714)
+[PASS] test_setParams_storesAndRegisters() (gas: 120964)
+[PASS] test_spot_extremeSqrtPriceNeverPanicsInViews() (gas: 1071527)
+[PASS] test_spot_matchesFeedsAcrossBothPools() (gas: 159322)
+[PASS] test_spot_pairsWithReversedTokenOrder() (gas: 5940896)
+[PASS] test_spot_smallSqrtPriceDoesNotDivideByZero() (gas: 478807)
+[PASS] test_sweep_maliciousTokenCannotChangeState() (gas: 1024200503)
+[PASS] test_sweep_maliciousTokenReentryCanOnlyRegisterItself() (gas: 1196469)
+[PASS] test_sweep_sendsFullBalanceToTreasury() (gas: 164454)
+[PASS] test_takeFee_cappedAtMaxFee() (gas: 3765899)
+Suite result: ok. 104 passed; 0 failed; 0 skipped; finished in 335.64ms (358.15ms CPU time)
+
+Ran 34 tests for test/BlockWindow.t.sol:BlockWindowTest
+[PASS] testFuzz_cliff_neverLargerAndMinLiquidity(int128,uint8,bool) (runs: 512, μ: 187272, ~: 194422)
+[PASS] testFuzz_dueOwners_matchesIsDuePerOwner(uint256,uint128,int128,uint8) (runs: 512, μ: 3348862, ~: 3371563)
+[PASS] testFuzz_window_conservativeAndTight(int24,uint256) (runs: 512, μ: 62356, ~: 62463)
+[PASS] testFuzz_window_observationThisBlockMeansTouched(int24,uint16,uint16,uint32) (runs: 512, μ: 101116, ~: 105061)
+[PASS] test_chunk_allowanceBoundRunOpensNoRound() (gas: 699340)
+[PASS] test_chunk_belowFloorWaitsAndKeepsRound() (gas: 894298)
+[PASS] test_chunk_budgetCapsRound() (gas: 1124606)
+[PASS] test_chunk_directionChangeNeverStartsChunk() (gas: 1121214)
+[PASS] test_chunk_donationDoesNotGrowRoundBudget() (gas: 1026982)
+[PASS] test_chunk_freshRoundAfterIntervalReplacesStaleRound() (gas: 898755)
+[PASS] test_chunk_nextOnlyAfterChunkInterval() (gas: 1009933)
+[PASS] test_chunk_roundEndsWhenRunReachesBand() (gas: 1085556)
+[PASS] test_chunk_runsUntilWithinBand() (gas: 1215026)
+[PASS] test_chunk_smallerThanUserMinTradeButAboveFloor() (gas: 896046)
+[PASS] test_chunk_tailBelowMinTradeEndsRound() (gas: 714389)
+[PASS] test_cliff_buy_boundaryInWindowUsesThinnerSide() (gas: 1082705)
+[PASS] test_cliff_negativeTickInCbbtcPool() (gas: 190299)
+[PASS] test_cliff_noBoundaryInWindowIgnoresNet() (gas: 301583)
+[PASS] test_cliff_sell_boundaryInWindowUsesThinnerSide() (gas: 405306)
+[PASS] test_cliff_zeroLiquidityBeyondBoundary_notDue() (gas: 761975)
+[PASS] test_constructor_acceptsCardinalityOne() (gas: 3642548)
+[PASS] test_execute_pushWithinTickAllowed_pushOverTickRefused() (gas: 925418)
+[PASS] test_execute_revertsBlockMoveExceededAfterSwap() (gas: 2529573)
+[PASS] test_execute_revertsPoolTouchedBeforeSwap() (gas: 873343)
+[PASS] test_execute_revertsPoolTouchedBeforeSwapInCbbtcPool() (gas: 319191)
+[PASS] test_execute_twoOwnersSameBlockShareWindow() (gas: 1218134)
+[PASS] test_execute_twoOwnersSameBlockWithinTickShareWindow() (gas: 1194071)
+[PASS] test_plan_buyBoundedByLiquidityOpensRound() (gas: 798104)
+[PASS] test_plan_sellBoundedByLiquidityOpensRound() (gas: 798326)
+[PASS] test_poolTouchedThisBlock_revertsAndNotDue() (gas: 911484)
+[PASS] test_poolTouchedThisBlock_selector() (gas: 525)
+[PASS] test_setParams_abortsRound() (gas: 757881)
+[PASS] test_window_extremeTicksDoNotOverflow() (gas: 133521)
+[PASS] test_window_swapWithinTickKeepsWindow_tickChangeTouches() (gas: 185069)
+Suite result: ok. 34 passed; 0 failed; 0 skipped; finished in 1.43s (1.56s CPU time)
+
+Ran 11 tests for test/AuditMath.t.sol:AuditMathTest
+[PASS] testFuzz_audit_corridorFeeResidue(uint256,uint256,uint16,uint16,uint16,uint64,uint16,uint16,uint256,uint256,uint256,uint256) (runs: 513, μ: 685479, ~: 510419)
+[PASS] testFuzz_audit_noPingPongConstantPrice(uint256,uint256,uint16,uint16,uint16,uint16) (runs: 512, μ: 830410, ~: 861994)
+[PASS] testFuzz_poc_lossPerRunBoundedByFeePlusSlippage(uint16,uint16,bool) (runs: 512, μ: 785197, ~: 786592)
+[PASS] testFuzz_poc_sellOnMinTradeFloorAlwaysDue(uint256,uint64,uint256) (runs: 513, μ: 834301, ~: 833289)
+[PASS] test_poc_blacklistedTreasuryNoLongerBricksExecute() (gas: 1007489)
+[PASS] test_poc_capIsPerRunNotPerDay() (gas: 1291502)
+[PASS] test_poc_microRunNoLongerPossible() (gas: 384647)
+[PASS] test_poc_minSlippageBelowSpotDeviationPlusPoolFees() (gas: 835782)
+[PASS] test_poc_partialRunAdvancesCadence() (gas: 713567)
+[PASS] test_poc_sellOvershootTailRuns() (gas: 821743)
+[PASS] test_poc_smallWalletCanSellWithNonRoundPrice() (gas: 1195703)
+Suite result: ok. 11 passed; 0 failed; 0 skipped; finished in 1.55s (2.79s CPU time)
+
+Ran 2 tests for test/BlockWindowFork.t.sol:BlockWindowChunksForkTest
+[PASS] test_fork_honestCorrectionInChunks_buy() (gas: 4505897)
+[PASS] test_fork_honestCorrectionInChunks_sell() (gas: 4295148)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 23.74s (19.47s CPU time)
+
+Ran 3 tests for test/BlockWindowFork.t.sol:BlockWindowAttackForkTest
+[PASS] test_fork_attackGrid_buy() (gas: 234250496)
+[PASS] test_fork_attackGrid_sell() (gas: 237931928)
+[PASS] test_fork_twoOwnersSameBlockAfterOnePush() (gas: 45041351)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 25.08s (21.44s CPU time)
+
+Ran 7 tests for test/Rebalancer.t.sol:RebalancerInvariantTest
+[PASS] invariant_chunkKeepsRoundDirection() (runs: 64, calls: 2048, reverts: 20)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | approve      | 179   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | deposit      | 183   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 150   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 159   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | retire       | 188   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 179   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setParams    | 176   | 20      | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 183   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 170   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 165   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 160   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 156   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_contractNeverHoldsBalance() (runs: 64, calls: 2048, reverts: 33)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | approve      | 175   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | deposit      | 146   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 176   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 181   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | retire       | 186   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 152   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setParams    | 194   | 33      | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 154   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 165   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 188   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 170   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 161   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_executeFailsOnlyForKnownReasons() (runs: 64, calls: 2048, reverts: 22)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | approve      | 157   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | deposit      | 164   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 196   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 159   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | retire       | 176   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 171   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setParams    | 186   | 22      | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 161   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 168   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 167   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 162   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 181   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_noExecutedAfterRetire() (runs: 64, calls: 2048, reverts: 24)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | approve      | 166   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | deposit      | 163   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 171   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 172   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | retire       | 178   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 150   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setParams    | 172   | 24      | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 178   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 189   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 165   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 180   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 164   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_ownerBalancesOnlyMoveThroughExecute() (runs: 64, calls: 2048, reverts: 20)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | approve      | 161   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | deposit      | 165   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 165   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 171   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | retire       | 174   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 164   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setParams    | 169   | 20      | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 170   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 191   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 169   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 172   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 177   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_roundBudgetNeverExceeded() (runs: 64, calls: 2048, reverts: 19)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | approve      | 188   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | deposit      | 175   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 160   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 173   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | retire       | 173   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 161   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setParams    | 183   | 19      | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 151   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 160   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 177   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 181   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 166   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_treasuryMonotonic() (runs: 64, calls: 2048, reverts: 22)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | approve      | 176   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | deposit      | 165   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 175   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 173   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | retire       | 176   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 167   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setParams    | 167   | 22      | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 170   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 169   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 170   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 174   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 166   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 25.71s (2.36s CPU time)
+
+Ran 2 tests for test/PocFork.t.sol:PocFork
+[PASS] test_dustOwnerCannotRegisterAnymore() (gas: 157226)
+[PASS] test_poc_executorSandwich() (gas: 8826411)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 36.87s (34.14s CPU time)
+
+Ran 7 tests for test/Rebalancer.t.sol:RebalancerInvariantTestNoRetire
+[PASS] invariant_chunkKeepsRoundDirection() (runs: 64, calls: 2048, reverts: 0)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | deposit      | 213   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 224   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 237   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 220   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 230   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 262   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 199   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 211   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 252   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_contractNeverHoldsBalance() (runs: 64, calls: 2048, reverts: 0)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | deposit      | 254   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 212   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 221   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 245   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 230   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 200   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 192   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 226   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 268   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_executeFailsOnlyForKnownReasons() (runs: 64, calls: 2048, reverts: 0)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | deposit      | 237   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 225   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 235   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 220   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 199   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 230   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 205   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 251   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 246   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_noExecutedAfterRetire() (runs: 64, calls: 2048, reverts: 0)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | deposit      | 225   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 229   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 226   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 213   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 232   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 247   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 244   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 209   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 223   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_ownerBalancesOnlyMoveThroughExecute() (runs: 64, calls: 2048, reverts: 0)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | deposit      | 232   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 200   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 241   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 239   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 236   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 245   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 242   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 229   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 184   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_roundBudgetNeverExceeded() (runs: 64, calls: 2048, reverts: 0)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | deposit      | 250   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 233   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 217   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 231   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 197   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 230   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 232   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 211   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 247   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+[PASS] invariant_treasuryMonotonic() (runs: 64, calls: 2048, reverts: 0)
+
+╭-------------------+--------------+-------+---------+----------╮
+| Contract          | Selector     | Calls | Reverts | Discards |
++===============================================================+
+| RebalancerHandler | deposit      | 225   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | execute      | 212   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | pushInBlock  | 237   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setLiquidity | 223   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | setPrice     | 217   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | shiftSpot    | 248   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | sweep        | 238   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warp         | 249   | 0       | 0        |
+|-------------------+--------------+-------+---------+----------|
+| RebalancerHandler | warpShort    | 199   | 0       | 0        |
+╰-------------------+--------------+-------+---------+----------╯
+
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 38.18s (2.76s CPU time)
+
+Ran 10 tests for test/RebalancerFork.t.sol:RebalancerForkTest
+[PASS] test_fork_buyAndSellGasCost() (gas: 1036131)
+[PASS] test_fork_buyRun() (gas: 691337)
+[PASS] test_fork_constructorChecksTokenDecimals() (gas: 3739403)
+[PASS] test_fork_feedCadenceWithinMaxAge() (gas: 362123)
+[PASS] test_fork_feedsAreFreshAndMatchConstants() (gas: 75616)
+[PASS] test_fork_postSwapSpotWithinTolerance() (gas: 633640)
+[PASS] test_fork_quoteWithinSaneRange() (gas: 58817)
+[PASS] test_fork_sellRun() (gas: 735967)
+[PASS] test_fork_spotDeviationBlocksRun() (gas: 522119)
+[PASS] test_fork_spotMatchesOracle() (gas: 97443)
+Suite result: ok. 10 passed; 0 failed; 0 skipped; finished in 44.62s (43.24s CPU time)
+
+Ran 16 tests for test/BlockWindowReviewFork.t.sol:BlockWindowReviewForkTest
+[PASS] test_observationSemantics_perAction() (gas: 2329270)
+[PASS] test_review_liquidityCliff_isDueAgreesWithExecute() (gas: 2095752)
+[PASS] test_review_pushThenJit_fiveOwnersRefused() (gas: 3241860)
+[PASS] test_review_pushThenJit_refused() (gas: 262168668)
+[PASS] test_scenario_jitOutOfRange_currentProtocolFee() (gas: 311653228)
+[PASS] test_scenario_jitOutOfRange_protocolFeeOff() (gas: 165692527)
+[PASS] test_scenario_lpNearCapacity_currentProtocolFee_belowHalfBp() (gas: 365398489)
+[PASS] test_scenario_lpNearCapacity_protocolFeeOff_victimBelowTwoBp() (gas: 365156066)
+[PASS] test_scenario_lpPriorBlock_currentProtocolFee_belowHalfBp() (gas: 444980760)
+[PASS] test_scenario_lpPriorBlock_protocolFeeOff_belowTwoBp_pushBothPools() (gas: 232921239)
+[PASS] test_scenario_lpPriorBlock_protocolFeeOff_belowTwoBp_pushEurcPool() (gas: 433363821)
+[PASS] test_scenario_pushWithoutLp_noProfit() (gas: 314487672)
+[PASS] test_scenario_twoOwnersOneBlock_jitRefused() (gas: 192485341)
+[PASS] test_scenario_twoOwnersOneBlock_lpPriorBlock() (gas: 347986072)
+[PASS] test_scenario_twoOwnersOneBlock_lpPriorBlock_pushBothPools_protocolFeeOff() (gas: 177673023)
+[PASS] test_scenario_twoOwnersOneBlock_pushOnly() (gas: 165993024)
+Suite result: ok. 16 passed; 0 failed; 0 skipped; finished in 43.23s (58.03s CPU time)
+
+Ran 6 tests for test/OracleLagSandwich.t.sol:OracleLagSandwichTest
+[PASS] test_poc_lag30_2500() (gas: 85668562)
+[PASS] test_poc_lag30_5000() (gas: 85668408)
+[PASS] test_poc_lag30_8000() (gas: 85668606)
+[PASS] test_poc_noLag_2500() (gas: 85678066)
+[PASS] test_poc_noLag_4000() (gas: 85678330)
+[PASS] test_poc_noLag_5000() (gas: 85678000)
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 69.10s (114.50s CPU time)
+
+Ran 7 tests for test/OracleSandwich.t.sol:OracleSandwichTest
+[PASS] test_fork_lossPerRunBoundedUnderSpotPush() (gas: 30713301)
+[PASS] test_poc_dosBySpotPush() (gas: 15300759)
+[PASS] test_poc_selfSandwich_10k_slippage100() (gas: 19772925)
+[PASS] test_poc_selfSandwich_10k_slippage60() (gas: 21213539)
+[PASS] test_poc_selfSandwich_1k_slippage100() (gas: 21213340)
+[PASS] test_poc_sweep() (gas: 47175377)
+[PASS] test_poc_sweepSell() (gas: 38000850)
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 69.10s (104.42s CPU time)
+
+Ran 2 tests for test/BlockWindowFork.t.sol:BlockWindowLpForkTest
+[PASS] test_fork_dueOwnersGasPerPage() (gas: 28964472)
+[PASS] test_fork_lpAttackerProfitAtCurrentProtocolFee() (gas: 98735908)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 71.79s (67.64s CPU time)
+
+Ran 13 test suites in 71.80s (450.73s CPU time): 211 tests passed, 0 failed, 0 skipped (211 total tests)
