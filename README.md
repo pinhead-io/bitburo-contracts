@@ -64,6 +64,7 @@ Een wekker had dezelfde run ook zonder kwade opzet kunnen doen, op elk moment da
   - grootste geaccepteerde push zonder achterstand 50 bp (koop) / 40 bp (verkoop), met achterstand 90 / 80 bp;
   - LP 99% bij protocolfee 0: extra winst +44,2 bp zonder en +82,3 bp met achterstand (koop); het slachtoffer handelt dan 123,5 bp onder de echte koers, inclusief de fee;
   - bij de huidige protocolfee verliest de aanvaller bij die grootste push 161 tot 485 bp van de run.
+  - grotere runs en andere pools (zelf-audit leads 17 en 18, `audit/2026-09-17-self/poc/Leads17And18Fork.t.sol`): duwen in alleen EURC/USDC blijft het ergste geval, tot +88,1 bp bij een correctie van 50.000 EURC. Duwen in USDC/cbBTC of in beide pools kost een vast bedrag aan poolfee voor de bestaande LP's van die diepe pool (~300 USDC voor 90 bp) en loont pas bij grote runs (+50,7 / +63,7 bp bij 100.000 EURC). De extra winst van de aanvaller blijft altijd onder het extra verlies van het slachtoffer (hooguit 90,6 bp). Een push binnen de tick in het blok van de run voegt met of zonder achterstand niets toe (slachtoffer ≤ 1,26 bp, aanvaller ≤ −0,08 bp). Geaccepteerd door Arjan.
 
   De verliesgrens `FEE_BPS + maxSlippageBps` geldt dus tegenover de feed; tegenover de markt komt daar de achterstand bij (hooguit ~40 bp). Geen fix in het contract: `MAX_SPOT_DEVIATION_BPS` verlagen laat eerlijke runs vaker reverten.
 
