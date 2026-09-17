@@ -135,6 +135,7 @@ import {
   parseScanState,
   pruneExpired,
   recordFailure,
+  redactRpcUrl,
   replacementFees,
   retryDeadline,
   rewardToError,
@@ -384,8 +385,9 @@ const describeError = (error: unknown): string => {
   if (reverted?.data?.errorName) {
     return `${reverted.data.errorName}(${(reverted.data.args ?? []).join(", ")})`;
   }
-  if (error instanceof BaseError) return error.shortMessage;
-  return (error as Error).message.split("\n")[0];
+  // Verificatie 579f763 (info b): nooit de RPC-URL (met een mogelijke API-sleutel) in de log.
+  if (error instanceof BaseError) return redactRpcUrl(error.shortMessage, rpcUrl);
+  return redactRpcUrl(String((error as Error)?.message ?? error).split("\n")[0], rpcUrl);
 };
 
 /**
@@ -937,109 +939,117 @@ const dueAmong = async (owners: readonly Address[], at: At): Promise<Address[]> 
   return owners.filter((_, i) => (results[i] as readonly [boolean, bigint])[0] === true);
 };
 
-readsNextBlock = await probeOverrides();
-if (!readsNextBlock) {
-  console.warn(
-    "De node past blok-overrides niet toe: terugval op het laatste blok. Een aanraking van een pool in het laatste blok laat owners dan niet due lijken (audit L-3).",
-  );
-}
-
-const checked = await read<bigint>("ownerCount");
-let executed = 0;
-let skipped = 0;
-/** Owners die deze run al behandeld zijn (uitgevoerd, overgeslagen of mislukt); die worden niet opnieuw geprobeerd. */
-const handled = new Set<string>();
-/** Owners met een tijdelijke revert, om de beurt opnieuw geprobeerd tot het retry-budget op is. */
-const retryQueue: { owner: Address; block: bigint | null }[] = [];
-
-const count = (owner: Address, result: { outcome: Outcome; block: bigint | null }) => {
-  if (result.outcome === "executed") executed += 1;
-  if (result.outcome === "skipped") skipped += 1;
-  if (result.outcome === "retry") retryQueue.push({ owner, block: result.block });
-};
-
-// Audit lead 9 en eindreview F-2: eerst de adressen uit OWNERS_FILE, dan het register vanaf de opgeslagen offset, binnen
-// de zoektijd. Alles off-chain gefilterd op actief, saldo en allowance (gebundeld met Multicall3), zodat lege
-// spam-registraties de run niet ophouden. Alleen de kandidaten krijgen een isDue.
-const scanStart = nextScanOffset(parseScanState(existsSync(scanStateFile) ? readFileSync(scanStateFile, "utf8") : undefined), null, checked);
-const ctx = await filterContext();
-const candidates: Candidate[] = [];
-let scannedTo = scanStart;
-if (ctx !== undefined) {
-  if (priorityOwners.length > 0) {
-    for (const batch of chunks(priorityOwners, FUNDS_BATCH)) {
-      try {
-        const funded = await fundedAmong(batch, ctx);
-        for (const owner of batch) if (funded.has(owner.toLowerCase())) candidates.push({ owner, index: null });
-      } catch (error) {
-        // Eigen gebruikers niet stil laten vallen: bij een fout van de node gaan ze ongefilterd door naar isDue.
-        console.warn(`saldo en allowance van OWNERS_FILE niet te lezen (${describeError(error)}); ongefilterd verder`);
-        for (const owner of batch) candidates.push({ owner, index: null });
-      }
-    }
-    console.log(`${priorityOwners.length} adressen uit OWNERS_FILE, ${candidates.length} kandidaten`);
-  }
-  const scan = await scanRegister(checked, scanStart, ctx, new Set(priorityOwners.map((o) => o.toLowerCase())));
-  candidates.push(...scan.candidates);
-  scannedTo = scan.scannedTo;
-  console.log(
-    `${checked} owners geregistreerd, ${scan.read} gelezen vanaf ${scanStart}${scan.complete ? " (hele register)" : ""}, ${candidates.length} kandidaten na het filter op saldo en allowance`,
-  );
-}
-
-/** Eerste kandidaat uit het register die deze run niet meer gelezen is, als het retry-budget op raakt. */
-let firstUnprocessed: bigint | null = null;
-const batches = chunks(candidates, Number(pageSize));
-for (const [index, batch] of batches.entries()) {
-  if (nowSec() >= deadline) {
-    const rest = batches.slice(index).flat();
-    firstUnprocessed = rest.find((c) => c.index !== null)?.index ?? null;
+// Verificatie 579f763 (info b): een fout die nergens anders wordt afgevangen, niet door Bun laten printen (dan staat de
+// volledige RPC-URL met een mogelijke API-sleutel in de log), maar hier, zonder die URL.
+try {
+  readsNextBlock = await probeOverrides();
+  if (!readsNextBlock) {
     console.warn(
-      `Retry-budget (${retrySeconds} s) op: ${rest.length} kandidaten niet meer gelezen; de volgende run begint in het register bij ${firstUnprocessed ?? scannedTo}.`,
+      "De node past blok-overrides niet toe: terugval op het laatste blok. Een aanraking van een pool in het laatste blok laat owners dan niet due lijken (audit L-3).",
     );
-    break;
   }
-  const owners = batch.map((c) => c.owner);
-  let readBlock: bigint | null = null;
-  for (let reads = 1; ; reads += 1) {
-    // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze portie.
-    const after = readBlock !== null && (lastRunBlock === null || readBlock > lastRunBlock) ? readBlock : lastRunBlock;
-    if (!(await waitForBlockAfter(after))) break;
-    let fresh: Address[];
-    try {
-      const latest = await publicClient.getBlock();
-      readBlock = latest.number;
-      fresh = newOwners(await dueAmong(owners, atLatest(latest)), handled);
-    } catch (error) {
-      console.warn(`isDue voor ${owners.length} kandidaten niet te lezen (${describeError(error)}); portie overgeslagen`);
+
+  const checked = await read<bigint>("ownerCount");
+  let executed = 0;
+  let skipped = 0;
+  /** Owners die deze run al behandeld zijn (uitgevoerd, overgeslagen of mislukt); die worden niet opnieuw geprobeerd. */
+  const handled = new Set<string>();
+  /** Owners met een tijdelijke revert, om de beurt opnieuw geprobeerd tot het retry-budget op is. */
+  const retryQueue: { owner: Address; block: bigint | null }[] = [];
+
+  const count = (owner: Address, result: { outcome: Outcome; block: bigint | null }) => {
+    if (result.outcome === "executed") executed += 1;
+    if (result.outcome === "skipped") skipped += 1;
+    if (result.outcome === "retry") retryQueue.push({ owner, block: result.block });
+  };
+
+  // Audit lead 9 en eindreview F-2: eerst de adressen uit OWNERS_FILE, dan het register vanaf de opgeslagen offset, binnen
+  // de zoektijd. Alles off-chain gefilterd op actief, saldo en allowance (gebundeld met Multicall3), zodat lege
+  // spam-registraties de run niet ophouden. Alleen de kandidaten krijgen een isDue.
+  const scanStart = nextScanOffset(parseScanState(existsSync(scanStateFile) ? readFileSync(scanStateFile, "utf8") : undefined), null, checked);
+  const ctx = await filterContext();
+  const candidates: Candidate[] = [];
+  let scannedTo = scanStart;
+  if (ctx !== undefined) {
+    if (priorityOwners.length > 0) {
+      for (const batch of chunks(priorityOwners, FUNDS_BATCH)) {
+        try {
+          const funded = await fundedAmong(batch, ctx);
+          for (const owner of batch) if (funded.has(owner.toLowerCase())) candidates.push({ owner, index: null });
+        } catch (error) {
+          // Eigen gebruikers niet stil laten vallen: bij een fout van de node gaan ze ongefilterd door naar isDue.
+          console.warn(`saldo en allowance van OWNERS_FILE niet te lezen (${describeError(error)}); ongefilterd verder`);
+          for (const owner of batch) candidates.push({ owner, index: null });
+        }
+      }
+      console.log(`${priorityOwners.length} adressen uit OWNERS_FILE, ${candidates.length} kandidaten`);
+    }
+    const scan = await scanRegister(checked, scanStart, ctx, new Set(priorityOwners.map((o) => o.toLowerCase())));
+    candidates.push(...scan.candidates);
+    scannedTo = scan.scannedTo;
+    console.log(
+      `${checked} owners geregistreerd, ${scan.read} gelezen vanaf ${scanStart}${scan.complete ? " (hele register)" : ""}, ${candidates.length} kandidaten na het filter op saldo en allowance`,
+    );
+  }
+
+  /** Eerste kandidaat uit het register die deze run niet meer gelezen is, als het retry-budget op raakt. */
+  let firstUnprocessed: bigint | null = null;
+  const batches = chunks(candidates, Number(pageSize));
+  for (const [index, batch] of batches.entries()) {
+    if (nowSec() >= deadline) {
+      const rest = batches.slice(index).flat();
+      firstUnprocessed = rest.find((c) => c.index !== null)?.index ?? null;
+      console.warn(
+        `Retry-budget (${retrySeconds} s) op: ${rest.length} kandidaten niet meer gelezen; de volgende run begint in het register bij ${firstUnprocessed ?? scannedTo}.`,
+      );
       break;
     }
-
-    for (const owner of fresh) {
-      handled.add(owner.toLowerCase());
-      if (isCoolingDown(cooldowns, owner, nowSeconds)) {
-        console.log(`${owner}: overgeslagen, cool-down tot ${new Date((cooldownUntil(cooldowns, owner) ?? 0) * 1000).toISOString()}`);
-        skipped += 1;
-        continue;
+    const owners = batch.map((c) => c.owner);
+    let readBlock: bigint | null = null;
+    for (let reads = 1; ; reads += 1) {
+      // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze portie.
+      const after = readBlock !== null && (lastRunBlock === null || readBlock > lastRunBlock) ? readBlock : lastRunBlock;
+      if (!(await waitForBlockAfter(after))) break;
+      let fresh: Address[];
+      try {
+        const latest = await publicClient.getBlock();
+        readBlock = latest.number;
+        fresh = newOwners(await dueAmong(owners, atLatest(latest)), handled);
+      } catch (error) {
+        console.warn(`isDue voor ${owners.length} kandidaten niet te lezen (${describeError(error)}); portie overgeslagen`);
+        break;
       }
-      count(owner, await attemptOwner(owner, null, false));
+
+      for (const owner of fresh) {
+        handled.add(owner.toLowerCase());
+        if (isCoolingDown(cooldowns, owner, nowSeconds)) {
+          console.log(`${owner}: overgeslagen, cool-down tot ${new Date((cooldownUntil(cooldowns, owner) ?? 0) * 1000).toISOString()}`);
+          skipped += 1;
+          continue;
+        }
+        count(owner, await attemptOwner(owner, null, false));
+      }
+      if (!shouldReadPageAgain(fresh.length, reads, blockRetries + 1, readsNextBlock)) break;
     }
-    if (!shouldReadPageAgain(fresh.length, reads, blockRetries + 1, readsNextBlock)) break;
   }
-}
 
-// Tijdelijk geblokkeerde owners om de beurt, elk in een nieuw blok, tot ze lukken of het retry-budget op is.
-while (retryQueue.length > 0) {
-  const next = retryQueue.shift();
-  if (next === undefined) break;
-  count(next.owner, await attemptOwner(next.owner, next.block, true));
-}
+  // Tijdelijk geblokkeerde owners om de beurt, elk in een nieuw blok, tot ze lukken of het retry-budget op is.
+  while (retryQueue.length > 0) {
+    const next = retryQueue.shift();
+    if (next === undefined) break;
+    count(next.owner, await attemptOwner(next.owner, next.block, true));
+  }
 
-saveCooldowns();
-if (ctx !== undefined) {
-  const nextOffset = nextScanOffset(scannedTo, firstUnprocessed, checked);
-  writeFileSync(scanStateFile, `${JSON.stringify({ nextOffset: nextOffset.toString() }, null, 2)}\n`);
+  saveCooldowns();
+  if (ctx !== undefined) {
+    const nextOffset = nextScanOffset(scannedTo, firstUnprocessed, checked);
+    writeFileSync(scanStateFile, `${JSON.stringify({ nextOffset: nextOffset.toString() }, null, 2)}\n`);
+  }
+  // Eindreview F-1: een run zonder blokkade en zonder eigen transactie laat de tip ook zakken.
+  if (!blockadeThisRun && !sentThisRun && !dryRun) lowerFee();
+  console.log(`Klaar: ${checked} owners geregistreerd, ${executed} uitgevoerd, ${skipped} overgeslagen${dryRun ? " (dry-run)" : ""}.`);
+} catch (error) {
+  const full = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  console.error(`run afgebroken: ${redactRpcUrl(full, rpcUrl)}`);
+  process.exitCode = 1;
 }
-// Eindreview F-1: een run zonder blokkade en zonder eigen transactie laat de tip ook zakken.
-if (!blockadeThisRun && !sentThisRun && !dryRun) lowerFee();
-console.log(`Klaar: ${checked} owners geregistreerd, ${executed} uitgevoerd, ${skipped} overgeslagen${dryRun ? " (dry-run)" : ""}.`);

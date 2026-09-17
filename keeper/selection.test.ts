@@ -31,6 +31,7 @@ import {
   lockWatchdogSeconds,
   maxFeePerGas,
   maxRunValues,
+  maskRpcUrl,
   minRunBaseUnits,
   newOwners,
   nextAttemptBlock,
@@ -50,6 +51,7 @@ import {
   parseScanState,
   pruneExpired,
   recordFailure,
+  redactRpcUrl,
   replacementFees,
   retryDeadline,
   rewardToError,
@@ -524,6 +526,46 @@ describe("register scan rotation (final review F-2)", () => {
     expect(() => parseOwnersFile(OWNER)).toThrow("ongeldige checksum");
     expect(parseOwnersFile("")).toEqual([]);
     expect(() => parseOwnersFile("0x123")).toThrow("geen geldig adres");
+  });
+});
+
+describe("RPC URL in logs (verification 579f763, info b)", () => {
+  const alchemy = "https://base-mainnet.g.alchemy.com/v2/not-a-real-key-111";
+  const query = "https://rpc.example.org/base?apikey=not-a-real-key-000";
+  const creds = "https://keeper:not-a-real-password@node.example.org:8545/";
+
+  test("maskRpcUrl keeps only scheme and host", () => {
+    expect(maskRpcUrl(alchemy)).toBe("https://base-mainnet.g.alchemy.com/***");
+    expect(maskRpcUrl(query)).toBe("https://rpc.example.org/***");
+    expect(maskRpcUrl(creds)).toBe("https://node.example.org:8545/***");
+    expect(maskRpcUrl("https://mainnet.base.org")).toBe("https://mainnet.base.org");
+    expect(maskRpcUrl("geen url")).toBe("***");
+  });
+
+  test("a viem error message loses the key in path, query and credentials, in every form", () => {
+    const viemLike = (url: string) => `HTTP request failed.\n\nStatus: 401\nURL: ${url}\nRequest body: {"method":"eth_call"}`;
+    expect(redactRpcUrl(viemLike(alchemy), alchemy)).toBe(viemLike("https://base-mainnet.g.alchemy.com/***"));
+    expect(redactRpcUrl(viemLike(query), query)).toBe(viemLike("https://rpc.example.org/***"));
+    // viem's getUrl strips the credentials but keeps the rest.
+    expect(redactRpcUrl(viemLike("https://node.example.org:8545/"), creds)).toBe(viemLike("https://node.example.org:8545/***"));
+    // Loose parts, e.g. an error body that repeats the key or a decoded query value.
+    const loose = redactRpcUrl("invalid key not-a-real-key-111 for /v2/not-a-real-key-111", alchemy);
+    expect(loose).not.toContain("not-a-real-key-111");
+    expect(redactRpcUrl("password not-a-real-password rejected", creds)).toBe("password *** rejected");
+    for (const url of [alchemy, query, creds]) {
+      const secret = new URL(url);
+      const out = redactRpcUrl(`${url} ${url.replace(/\/$/, "")} ${secret.href}`, url);
+      for (const part of [secret.pathname.slice(1), secret.searchParams.get("apikey") ?? "", secret.password]) {
+        if (part.length >= 8) expect(out).not.toContain(part);
+      }
+    }
+  });
+
+  test("short and ordinary text is left alone", () => {
+    expect(redactRpcUrl("HTTP request failed.", alchemy)).toBe("HTTP request failed.");
+    expect(redactRpcUrl("v2 / base", alchemy)).toBe("v2 / base");
+    expect(redactRpcUrl("URL: https://mainnet.base.org", "https://mainnet.base.org")).toBe("URL: https://mainnet.base.org");
+    expect(redactRpcUrl("tekst", "")).toBe("tekst");
   });
 });
 

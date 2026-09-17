@@ -750,6 +750,75 @@ export const isStuck = (sentAtBlock: bigint, latestBlock: bigint, waitBlocks: nu
   latestBlock >= sentAtBlock + BigInt(waitBlocks);
 
 
+// ─── Verificatie 579f763 (info b): RPC-URL niet in de log ────────────────────────────────────────────────────────
+
+/**
+ * De RPC-URL zonder wat een API-sleutel kan bevatten: alleen schema en host. Pad, query, fragment en inloggegevens worden
+ * `/***` (Alchemy en Infura zetten de sleutel in het pad, andere aanbieders in de query). Een ongeldige URL wordt `***`.
+ */
+export const maskRpcUrl = (url: string): string => {
+  try {
+    const u = new URL(url);
+    const hidden = u.username !== "" || u.password !== "" || u.pathname !== "/" || u.search !== "" || u.hash !== "";
+    return `${u.protocol}//${u.host}${hidden ? "/***" : ""}`;
+  } catch {
+    return "***";
+  }
+};
+
+/**
+ * Haal de RPC-URL uit een tekst (een foutmelding van viem of Bun). viem zet `URL: …` in zijn meldingen en haalt daar
+ * alleen gebruikersnaam en wachtwoord uit (`getUrl`, viem 2.56.3 errors/utils.ts), niet een sleutel in pad of query.
+ * - De hele URL, zoals opgegeven, zoals `URL` hem schrijft en zonder inloggegevens, wordt `maskRpcUrl(url)`;
+ * - daarna elk los deel dat een sleutel kan zijn (pad plus query, pad, query, padsegmenten, queryparameterwaarden,
+ *   gebruikersnaam en wachtwoord, ook URL-gedecodeerd) van minstens 8 tekens, wordt `***`. Kortere delen ("v2", "/")
+ *   blijven staan: die zijn geen sleutel en zouden gewone tekst verminken.
+ */
+export const redactRpcUrl = (text: string, url: string): string => {
+  if (url === "") return text;
+  // In één doorgang, langste eerst: wat al vervangen is, wordt niet nog eens vervangen.
+  const replace = (input: string, secrets: readonly string[], by: string): string => {
+    const list = [...new Set(secrets)].filter((s) => s.length > 0).sort((a, b) => b.length - a.length);
+    if (list.length === 0) return input;
+    const pattern = new RegExp(list.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+    return input.replace(pattern, () => by);
+  };
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return replace(text, [url], "***");
+  }
+  const bare = new URL(url);
+  bare.username = "";
+  bare.password = "";
+  const fulls = [url, u.href, bare.href, bare.href.replace(/\/$/, ""), url.replace(/\/$/, "")];
+  const masked = maskRpcUrl(url);
+  const decode = (s: string): string => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
+  const parts = [
+    `${u.pathname}${u.search}${u.hash}`,
+    `${u.pathname}${u.search}`,
+    u.pathname,
+    u.search,
+    u.hash,
+    u.username,
+    u.password,
+    ...u.pathname.split("/"),
+    ...[...u.searchParams.values()],
+  ].flatMap((p) => [p, decode(p)]);
+  return replace(
+    replace(text, fulls, masked),
+    parts.filter((p) => p.length >= 8),
+    "***",
+  );
+};
+
 // ─── Eindreview I-8: REWARD_TO ─────────────────────────────────────────────────────────────────────────────────
 
 /**
