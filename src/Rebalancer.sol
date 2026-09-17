@@ -127,6 +127,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///         De constructor dwingt het af; `_maxInput` rekent erop.
     int24 public constant TICK_SPACING = 10;
     uint16 public constant FEE_BPS = 25;
+    /// @notice Beloning voor de aanroeper, hooguit de helft van de fee van de run (zelf-audit 2026-09-17, L-D): zo houdt
+    ///         de treasury van elke run minstens de helft, ook als de aanroeper de owner zelf is.
     uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0,05 EURC
     uint16 public constant MAX_SLIPPAGE_BPS = 100;
     /// @notice Ondergrens voor `maxSlippageBps`: MAX_SPOT_DEVIATION_BPS + 2 × 5 bps poolfee. `amountOutMinimum`
@@ -136,11 +138,11 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint16 public constant MIN_SLIPPAGE_BPS = 60;
     uint16 public constant MAX_SPOT_DEVIATION_BPS = 50;
     /// @notice Ondergrens voor `minTradeEurc` (20 EURC) en voor elke run, ook elk deel van een ronde. Bij
-    ///         FEE_BPS = 25 is de fee van de kleinste run dan precies KEEPER_REWARD_EURC, zodat elke run de
-    ///         volledige keeperbeloning dekt en een dust-owner de wekkers niet gratis bezig kan houden. Dat geldt
-    ///         voor kopen én verkopen: bij een koop is de fee-grondslag het bruto inputbedrag, bij een verkoop
-    ///         max(ontvangen, verwachte opbrengst), waarbij de verwachte opbrengst dezelfde oraclewaarde is waarop
-    ///         de ondergrens is gecontroleerd (audit L-B). Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
+    ///         FEE_BPS = 25 is de fee van de kleinste run dan 0,05 EURC, zodat een dust-owner de wekkers niet gratis
+    ///         bezig kan houden: de beloning is dan 0,025 EURC (de helft van de fee, zie KEEPER_REWARD_EURC) en de
+    ///         treasury krijgt de andere helft. Dat geldt voor kopen én verkopen: bij een koop is de fee-grondslag
+    ///         het bruto inputbedrag, bij een verkoop max(ontvangen, verwachte opbrengst), waarbij de verwachte
+    ///         opbrengst dezelfde oraclewaarde is waarop de ondergrens is gecontroleerd (audit L-B). Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
     ///         sats bij 80.000 EURC/cbBTC, waardoor de afronding in `amountOutMinimum` onder 1 bp blijft.
     uint64 public constant MIN_TRADE_FLOOR = 20e6;
     /// @notice Hoever de koers van elke pool binnen één blok van de koers aan het begin van dat blok mag
@@ -1010,7 +1012,10 @@ contract Rebalancer is ReentrancyGuardTransient {
 
     /// @dev Fee in EURC: FEE_BPS over `feeBase`, begrensd op `maxFee` (het EURC-bedrag waar de fee uit komt).
     ///      Bij een koop zijn beide het bruto inputbedrag; bij een verkoop is `feeBase` max(ontvangen,
-    ///      expectedOut) en `maxFee` het ontvangen bedrag. Beloning eruit naar rewardTo, rest naar de treasury.
+    ///      expectedOut) en `maxFee` het ontvangen bedrag. Beloning eruit naar rewardTo, hooguit
+    ///      min(KEEPER_REWARD_EURC, fee / 2), rest naar de treasury. De helft als grens, zodat een run op de vloer de
+    ///      treasury niet leeg laat en een owner die `rewardTo` naar zichzelf zet niet zonder fee handelt (zelf-audit
+    ///      2026-09-17, L-D).
     ///      Beide transfers zijn niet-reverterend (`trySafeTransfer`), zodat de run nooit stukloopt op de ontvanger van de fee:
     ///      - faalt de beloning (bijv. geblacklist rewardTo), dan is `reward` 0 en gaat de hele fee naar de
     ///        treasury;
@@ -1023,7 +1028,7 @@ contract Rebalancer is ReentrancyGuardTransient {
     {
         fee = Math.min(Math.mulDiv(feeBase, FEE_BPS, BPS), maxFee);
         if (rewardTo != address(0)) {
-            reward = Math.min(KEEPER_REWARD_EURC, fee);
+            reward = Math.min(KEEPER_REWARD_EURC, fee / 2);
             if (reward > 0 && !EURC.trySafeTransfer(rewardTo, reward)) reward = 0;
         }
         uint256 toTreasury = fee - reward;
