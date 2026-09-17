@@ -57,7 +57,7 @@ import {
   servedBefore,
   shouldReadPageAgain,
 } from "./selection";
-import { toFunctionSelector } from "viem";
+import { encodeFunctionData, getAddress, parseAbi, toFunctionSelector } from "viem";
 
 const OWNER = "0xAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
 const OTHER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
@@ -488,7 +488,9 @@ describe("register scan rotation (final review F-2)", () => {
 
   test("parseOwnersFile: addresses separated by lines, spaces or commas, comments, deduplicated", () => {
     const text = `# eigen gebruikers\n${OWNER}\n${OTHER}, ${OWNER.toLowerCase()}  # dubbel\n\n`;
-    expect(parseOwnersFile(text)).toEqual([OWNER, OTHER]);
+    expect(parseOwnersFile(text.replace(OWNER, getAddress(OWNER)))).toEqual([getAddress(OWNER), OTHER]);
+    // Verificatie 579f763 (K-1): een foute checksum komt er niet door; viem zou elke lezing voor die portie laten falen.
+    expect(() => parseOwnersFile(OWNER)).toThrow("ongeldige checksum");
     expect(parseOwnersFile("")).toEqual([]);
     expect(() => parseOwnersFile("0x123")).toThrow("geen geldig adres");
   });
@@ -705,7 +707,7 @@ describe("REWARD_TO (final review I-8)", () => {
   const REBALANCER = "0x68B1D87F95878fE05B998F19b66F4baba5De1aed";
 
   test("a valid address, also the zero address (no reward), passes", () => {
-    expect(rewardToError(OWNER, REBALANCER)).toBeNull();
+    expect(rewardToError(getAddress(OWNER), REBALANCER)).toBeNull();
     expect(rewardToError(OWNER.toLowerCase(), REBALANCER)).toBeNull();
     expect(rewardToError("0x0000000000000000000000000000000000000000", REBALANCER)).toBeNull();
   });
@@ -714,6 +716,24 @@ describe("REWARD_TO (final review I-8)", () => {
     expect(rewardToError("0x123", REBALANCER)).toBe("REWARD_TO is geen geldig adres: 0x123");
     expect(rewardToError("", REBALANCER)).toContain("geen geldig adres");
     expect(rewardToError("mijn-wallet.eth", REBALANCER)).toContain("geen geldig adres");
+  });
+
+  test("verification 579f763 (K-1): a wrong checksum is refused, and every address that passes, viem can encode", () => {
+    const bad = "0xAbCdEf0000000000000000000000000000000001"; // mixed case, wrong checksum (the PoC)
+    expect(rewardToError(bad, REBALANCER)).toContain("ongeldige checksum");
+    expect(rewardToError(OWNER, REBALANCER)).toContain("ongeldige checksum");
+    const encode = (rewardTo: string) =>
+      encodeFunctionData({
+        abi: parseAbi(["function execute(address owner, address rewardTo)"]),
+        functionName: "execute",
+        args: ["0x0000000000000000000000000000000000000003", rewardTo as Address],
+      });
+    expect(() => encode(bad)).toThrow("is invalid");
+    const accepted = [bad.toLowerCase(), getAddress(bad), getAddress(OWNER), OWNER.toLowerCase(), "0x0000000000000000000000000000000000000000"];
+    for (const good of accepted) {
+      expect(rewardToError(good, REBALANCER)).toBeNull();
+      expect(() => encode(good)).not.toThrow();
+    }
   });
 
   test("the Rebalancer itself is refused, whatever the case", () => {

@@ -517,6 +517,8 @@ export const parseOwnersFile = (text: string): Address[] => {
     for (const token of line.replace(/#.*$/, "").split(/[\s,]+/)) {
       if (token === "") continue;
       if (!isAddress(token, { strict: false })) throw new Error(`OWNERS_FILE: geen geldig adres: ${token}`);
+      // Verificatie 579f763 (K-1): viem codeert adressen strikt; een foute checksum gaf bij elke lezing een encodefout.
+      if (!isAddress(token)) throw new Error(`OWNERS_FILE: ongeldige checksum (EIP-55): ${token}`);
       if (seen.has(token.toLowerCase())) continue;
       seen.add(token.toLowerCase());
       out.push(token as Address);
@@ -715,9 +717,17 @@ export const isStuck = (sentAtBlock: bigint, latestBlock: bigint, waitBlocks: nu
  * Eindreview I-8: REWARD_TO moet een geldig adres zijn en niet de Rebalancer zelf (het contract zou de beloning dan
  * vervangen door address(0), dus de hele fee naar de treasury, en dat is vrijwel zeker een configuratiefout).
  * address(0) mag: bewust geen beloning. Geeft de foutmelding, of null als het goed is.
+ *
+ * Verificatie 579f763 (K-1): strikt, zoals viem bij het coderen. Een adres met hoofdletters moet een geldige EIP-55-
+ * checksum hebben; alleen kleine letters mag ook. Niet stil normaliseren: een foute checksum wijst meestal op een
+ * tikfout, en dan zou de beloning naar een verkeerd adres gaan. Vroeger kwam zo'n adres door de controle en liet het
+ * elke simulatie falen met een encodefout, die als fout van de node gold (I-8 opnieuw).
  */
 export const rewardToError = (value: string, rebalancer: string): string | null => {
   if (!isAddress(value, { strict: false })) return `REWARD_TO is geen geldig adres: ${value}`;
+  if (!isAddress(value)) {
+    return `REWARD_TO heeft een ongeldige checksum (EIP-55): ${value}; controleer het adres, of schrijf het in kleine letters`;
+  }
   if (value.toLowerCase() === rebalancer.toLowerCase()) return "REWARD_TO mag niet het Rebalancer-contract zelf zijn";
   return null;
 };
