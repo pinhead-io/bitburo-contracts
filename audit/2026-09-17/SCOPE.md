@@ -2,7 +2,7 @@
 
 Prepared 17 September 2026. Companion file: [`FINDINGS-STATUS.md`](FINDINGS-STATUS.md) lists every finding from the internal reviews and its status.
 
-Internal reports referenced below are in Dutch: `audit/2026-09-15/RAPPORT.md` (+ `details/`), `audit/2026-09-16/ai-audit.md`, the self-audit `audit/2026-09-17-self/ai-audit.md`, the description of PR #18, and the `README.md`. Code comments (NatSpec) in `src/` are also in Dutch. Everything a reviewer needs to reason about the contract is summarised here in English; where a number comes from a measurement that is not reproducible from this repository, this is stated.
+Internal reports referenced below: `audit/2026-09-15/RAPPORT.md` (+ `details/`), `audit/2026-09-16/ai-audit.md`, the self-audit `audit/2026-09-17-self/ai-audit.md`, the description of PR #18, and the `README.md`. All of them, and all code comments (NatSpec) in `src/`, are in English (translated from Dutch on 17 Sept 2026 without changing content); only the pull request descriptions on GitHub remain in Dutch. Everything a reviewer needs to reason about the contract is also summarised here; where a number comes from a measurement that is not reproducible from this repository, this is stated.
 
 ---
 
@@ -13,9 +13,9 @@ Internal reports referenced below are in Dutch: `audit/2026-09-15/RAPPORT.md` (+
 | | |
 |---|---|
 | Repository | `pinheadio/bitburo-contracts` |
-| Branch | `fix/fee-floor-round-budget-sequencer` (after PR #18 and the self-audit PRs #19, #20 on `development`) |
-| **Commit of the audited code** | **`7ad8a812080ad3f90b2e0009f9a54839f75bd2da`** (`7ad8a81`) |
-| Note | The package was first prepared for `579f763` and then for `05ed03c` (PR #18). The self-audit of 17 Sept 2026 on `development` (`audit/2026-09-17-self/ai-audit.md`) led to three contract changes on top of `05ed03c`, rows `09-17-self/*` in `FINDINGS-STATUS.md`: the keeper reward is at most half the fee (L-D, `a10271f`), a chunk never exceeds the budget of the current wallet value (lead 11, `3ea8787`), and a sequencer `startedAt` in the future gives `SequencerDown` (Info-G, `b23d422`); plus NatSpec, README and keeper comments (`36bb2e5`, `f392f3c`). After the owner's decisions a constructor check `MAX_BLOCK_MOVE_BPS < TICK_SPACING` was added (lead 13, `2f88af6`) and review comments fixed (`7ad8a81`). All `file:line` references in this package were re-mapped to `7ad8a81`. Later commits on the branch change `audit/` only. |
+| Branch | `docs/translate-to-english` (on `development` after PRs #18–#22) |
+| **Commit of the audited code** | **`d6fbfb1a7a013f5e2b286d891fc9690df858adb1`** (`d6fbfb1`) |
+| Note | The package was first prepared for `579f763` and then for `05ed03c` (PR #18). The self-audit of 17 Sept 2026 on `development` (`audit/2026-09-17-self/ai-audit.md`) led to three contract changes on top of `05ed03c`, rows `09-17-self/*` in `FINDINGS-STATUS.md`: the keeper reward is at most half the fee (L-D, `a10271f`), a chunk never exceeds the budget of the current wallet value (lead 11, `3ea8787`), and a sequencer `startedAt` in the future gives `SequencerDown` (Info-G, `b23d422`); plus NatSpec, README and keeper comments (`36bb2e5`, `f392f3c`). After the owner's decisions a constructor check `MAX_BLOCK_MOVE_BPS < TICK_SPACING` was added (lead 13, `2f88af6`) and review comments fixed (`7ad8a81`). All `file:line` references in this package were re-mapped to `7ad8a81`. The measurements of leads 17 and 18 (PR #22) changed `audit/` and `README.md` only. Finally all comments, NatSpec, messages and documents were translated to English (`7cce352` … `d6fbfb1`): every source line kept its line number, so all references stay valid, and the runtime bytecode of `Rebalancer` is identical to `7ad8a81` apart from the metadata hash (compared with `forge inspect … deployedBytecode`, CBOR metadata stripped). Later commits on the branch change `README.md`, `deploy-mainnet.sh` and `audit/` only. |
 
 ### 1.2 Files and size
 
@@ -238,11 +238,11 @@ Each item was accepted by the project owner. "README" refers to `README.md` at t
 - **Defence in the keepers.** Read `isDue` and simulate `execute` with block overrides for the next block (number + 1, timestamp + 2 s) after a probe that the node applies them; retry every block for the whole budget (`RETRY_SECONDS` 540 s); send from an own key with an explicit priority fee (0.05 gwei) that at least doubles after a blockade, ≥ 110 % of the blocker's tip, up to 3 gwei and capped by what a run yields (`TIP_BUDGET_ETH`); random 1–59 blocks before the next send. Base orders transactions by priority fee within each 200 ms Flashblock, so the attacker must outbid in every block, the keeper only per attempt. Estimated from measured gas at 3 gwei: attacker ~1,050 EURC/hour, keeper ~15 EURC/hour extra.
 - **Criterion ("L-3 is solved when…").** Measured on a Base fork at current prices, against the keeper as run in production: (1) blocking all runs for an hour costs the attacker ≥ 1,000 EURC; (2) Bitburo pays ≤ 2 % of that extra (≤ 20 EURC/hour) and nothing without an attack; (3) blocking yields no sandwich profit above §3.3; (4) honest failure rate without an attacker does not increase; (5) every due owner runs within 5 minutes after the attack. The open `keeper/` script meets this by estimate, relying on Base's sequencer ordering, which cannot be verified for production.
 - **The app keeper cannot set a priority fee.** It sends through a sponsored Privy transaction (the bundler picks the fee; Privy documents no setting) and runs hourly. It does not meet criteria 1 and 5; only the open script (or an own keeper wallet) does. The next-block reading for the app keeper is in `pinheadio/bitburo` PR #149 (merged into the app's `development` on 17 Sept 2026, not verified in production).
-- Documented: README "Runs tegenhouden (audit L-3)", `src/Rebalancer.sol:96-101`, `keeper/keeper.ts` header.
+- Documented: README "Blocking runs (audit L-3)", `src/Rebalancer.sol:96-101`, `keeper/keeper.ts` header.
 
 ### 5.2 JIT out of range can enlarge a chunk up to the in-range bound
 
-Minting just outside the range in the swap direction writes no observation. Such liquidity can lift a liquidity cliff and make a chunk larger than without it, but never larger than the in-range liquidity at block start allows, and without profit. Measured extra profit: −0.30 bp (current protocol fee) and −7.51 bp (protocol fee 0) at block 51,390,800; −0.21 bp at 51,402,700. Tests assert per run that the run stays below the in-range bound (computed with `RebalancerInRangeSizing`) and the LP bounds of §3.3: `test_scenario_jitOutOfRange_currentProtocolFee`, `test_scenario_jitOutOfRange_protocolFeeOff`. A fix that excludes this and still handles the cliff would need visibility of in-block tick changes. The same holds for the boundary edge case of §3.3 point 1 (self-audit L-E): with the price exactly on a tick boundary the JIT position trades from the first unit; it earns pool fees (+3.72 bp of the run, from other LPs), not a loss for the victim. Accepted by the project owner on 17 Sept 2026. Documented: README "JIT buiten de range", `src/Rebalancer.sol:72-73`.
+Minting just outside the range in the swap direction writes no observation. Such liquidity can lift a liquidity cliff and make a chunk larger than without it, but never larger than the in-range liquidity at block start allows, and without profit. Measured extra profit: −0.30 bp (current protocol fee) and −7.51 bp (protocol fee 0) at block 51,390,800; −0.21 bp at 51,402,700. Tests assert per run that the run stays below the in-range bound (computed with `RebalancerInRangeSizing`) and the LP bounds of §3.3: `test_scenario_jitOutOfRange_currentProtocolFee`, `test_scenario_jitOutOfRange_protocolFeeOff`. A fix that excludes this and still handles the cliff would need visibility of in-block tick changes. The same holds for the boundary edge case of §3.3 point 1 (self-audit L-E): with the price exactly on a tick boundary the JIT position trades from the first unit; it earns pool fees (+3.72 bp of the run, from other LPs), not a loss for the victim. Accepted by the project owner on 17 Sept 2026. Documented: README "JIT outside the range", `src/Rebalancer.sol:72-73`.
 
 ### 5.3 Push at the end of the previous block
 
@@ -252,7 +252,7 @@ The block check does not see a push in block N−1 followed by `execute` in bloc
 
 **Other pools, larger runs and in-tick pushes (self-audit leads 17, 18).** Measured on `39dcddf` at block 51,425,248 (`audit/2026-09-17-self/poc/Leads17And18Fork.t.sol`, output `output-leads-17-18.txt`, same setup, 10,000 to 100,000 EURC corrections): the EURC/USDC-only push stays the worst case, up to +88.1 bp at 50,000 EURC. A push in the much deeper USDC/cbBTC pool, or split over both pools, pays a fixed amount of pool fee to the existing LPs (~300 USDC for 90 bp at this block, independent of the attacker's LP share) and only becomes profitable for large runs (+50.7 / +63.7 bp at 100,000 EURC). In every case the attacker's extra profit stays below the victim's extra loss (max 90.6 bp; victim ≤ 124.1 bp below the true price including the fee). An in-tick push in the run's block adds ≤ 1.26 bp to the victim and nothing to the attacker (≤ −0.08 bp), with or without lag. Without LP or at the current protocol fee the attacker always loses. Accepted by the project owner on 17 Sept 2026.
 
-Documented: `src/Rebalancer.sol:64-67`, README "Niet gedekt".
+Documented: `src/Rebalancer.sol:64-67`, README "Not covered".
 
 ### 5.4 LP with a large share when protocol fee is 0
 
@@ -272,13 +272,13 @@ The first five blocks were measured before the decision below; the last row is t
 - **Asserted:** victim < 2.05 bp at every protocol fee; attacker < 0.5 bp at the current `feeProtocol` 68.
 - **Accepted risk, not asserted:** the attacker's extra profit at protocol fee 0. It is block-dependent (from +1.93 to +4.07 bp at 99.9 % within ~400 blocks). The highest point is a sell pushed to the tick edge at block 51,407,293: run with push 505,346 EURC, without push 606,491 EURC, ≈ +206 EURC for the attacker. The surplus over the victim's ~1 tick per pushed pool comes from the volume that drops out of the smaller run, on which the attacker as LP would otherwise lose his margin; it is not extra loss for the victim.
 - **Preconditions:** Uniswap governance sets the protocol fee of both pools to 0 (hypothetical; now `feeProtocol` 68, read on-chain §1.5), and one party holds ~99 % or more of active liquidity in both pools (100–1,000× current liquidity).
-- Making the in-tick push harmless would cost honest runs up to ~1 bp. Documented: `src/Rebalancer.sol:49-63`, README "Restrisico: LP met een groot aandeel" and "Runs rond de capaciteit". Question to auditors: §6 Q2.
+- Making the in-tick push harmless would cost honest runs up to ~1 bp. Documented: `src/Rebalancer.sol:49-63`, README "Residual risk: LP with a large share" and "Runs rond de capaciteit". Question to auditors: §6 Q2.
 
 ### 5.5 Failure rates without an attacker
 
 - Block check: measured over 2,000 blocks around 51,390,800 (logs of both pools, 80-block sample checked against `observations`): 0 % of attempts fail when the transaction is at the top of the block, 4.3 % in the middle, 7–11 % at the bottom. A keeper that simulates first pays no gas and retries next block. An `eth_call` on the latest block sees any activity in that block as a touch (363 of 2,000 blocks had activity).
 - Spot check after the swap (lead 4): the run's own impact moves the combined spot by up to ~12 bp, so an honest run can fail after the swap only if the spot was already > ~38 bp off in the run's direction. 720 hourly samples over 30 days: > 38 bp in 0.69 %, > 50 bp (not due at all) in 0.14 %, peak 181 bp during a fast BTC move on 19 Aug 2026 (longest streak > 50 bp ~60 s).
-- Documented: `src/Rebalancer.sol:77-81`, `:90-94`, README "Uitval".
+- Documented: `src/Rebalancer.sol:77-81`, `:90-94`, README "Failure rate".
 
 ### 5.6 Leads 4–7 and 9 from the 16 Sept self-audit
 
@@ -298,7 +298,7 @@ EURC is the numeraire. The EURC/USD feed tracks EURC's market price, not EUR fia
 
 ### 5.9 Oracle `dex_state_price` and SVR
 
-Chainlink's Reference Data Directory labels both cbBTC/USD and EURC/USD on Base as `dex_state_price` (end-of-block DEX state, weighted by volume and liquidity, with outlier and time-lag filters). Which pools and weights are used is not published, so the pools that layer 3 guards may partly be inside the feed (partial circularity). Holding such a pool off-market over several blocks would move the feed along; the spot check then sees less than the real deviation and `amountOutMinimum` follows the tainted feed. The loss bound stays `FEE_BPS + maxSlippageBps` versus the feed, not necessarily versus the market. This needs a multi-block manipulation against arbitrage, while a run is limited to a few hundred EURC by the window, so no second price source was added. EURC/USD is an SVR feed: the contract reads the **Standard** proxy `0x9867…01e0`, not the SVR proxy `0x8a55…E287`, so the MEV-Share delay does not apply; both proxies point to aggregator `0x042f…8994` (verified §1.5). Residual: in a block where the SVR private route updates the round, the Standard proxy sees it one block later (bounded by the 0.1 % EURC threshold). `src/Rebalancer.sol:82-83`, `:118-120`; README "Herkomst van de feeds (audit lead 5)".
+Chainlink's Reference Data Directory labels both cbBTC/USD and EURC/USD on Base as `dex_state_price` (end-of-block DEX state, weighted by volume and liquidity, with outlier and time-lag filters). Which pools and weights are used is not published, so the pools that layer 3 guards may partly be inside the feed (partial circularity). Holding such a pool off-market over several blocks would move the feed along; the spot check then sees less than the real deviation and `amountOutMinimum` follows the tainted feed. The loss bound stays `FEE_BPS + maxSlippageBps` versus the feed, not necessarily versus the market. This needs a multi-block manipulation against arbitrage, while a run is limited to a few hundred EURC by the window, so no second price source was added. EURC/USD is an SVR feed: the contract reads the **Standard** proxy `0x9867…01e0`, not the SVR proxy `0x8a55…E287`, so the MEV-Share delay does not apply; both proxies point to aggregator `0x042f…8994` (verified §1.5). Residual: in a block where the SVR private route updates the round, the Standard proxy sees it one block later (bounded by the 0.1 % EURC threshold). `src/Rebalancer.sol:82-83`, `:118-120`; README "Origin of the feeds (audit lead 5)".
 
 ---
 
@@ -320,7 +320,7 @@ Chainlink's Reference Data Directory labels both cbBTC/USD and EURC/USD on Base 
 
 ```bash
 git clone https://github.com/pinheadio/bitburo-contracts && cd bitburo-contracts
-git checkout f392f3c22dbb3cecf03dde8a9f5ca0bc4fede20a
+git checkout d6fbfb1a7a013f5e2b286d891fc9690df858adb1
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ```
@@ -329,7 +329,7 @@ Fork tests read `BASE_RPC_URL` (default `https://mainnet.base.org`, rate-limited
 
 ### 7.2 Commands and actual results
 
-All results below were produced on 17 Sept 2026 on commit `7ad8a81`.
+All results below were produced on 17 Sept 2026 on commit `7ad8a81`; after the translation (`d6fbfb1`) the full suite was re-run with identical results (`FORK_BLOCK=51425248`: 215 passed; `RUN_FORK=false`: 167 passed, 8 skipped; keeper 97 pass).
 
 ```bash
 ~/.foundry/bin/forge fmt --check
