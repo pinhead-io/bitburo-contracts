@@ -2,7 +2,7 @@
 
 Prepared 17 September 2026 for the external audit. Scope and audit commit: [`SCOPE.md`](SCOPE.md).
 
-**Code version.** All `file:line` references and test names below refer to commit **`d6fbfb1`** (`d6fbfb1a7a013f5e2b286d891fc9690df858adb1`; line-for-line identical in `src/`, `test/`, `keeper/` and `script/` to `7ad8a81`, only translated to English), the audit version in [`SCOPE.md`](SCOPE.md) §1.1 (the package was first written for `579f763`, then `05ed03c`; after the fixes of the 17 Sept self-audit every reference was re-mapped with a per-file diff from `05ed03c` and checked for identical content). Commit hashes in the Evidence column are the commits that introduced the fix.
+**Code version.** All `file:line` references and test names below refer to `development` as of 17 Sept 2026, the audit version in [`SCOPE.md`](SCOPE.md) §1.1. Commit hashes in the Evidence column are the commits that introduced the fix.
 
 **Sources** (all internal reports are in English; they were written in Dutch and translated on 17 Sept 2026 without changing content):
 
