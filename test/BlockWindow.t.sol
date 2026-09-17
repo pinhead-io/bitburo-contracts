@@ -17,6 +17,10 @@ contract RebalancerWindowHarness is Rebalancer {
         return _window(pool);
     }
 
+    function windowFitsTickSpacing(uint16 moveBps, int24 spacing) external pure returns (bool) {
+        return _windowFitsTickSpacing(moveBps, spacing);
+    }
+
     function maxRunEurc(bool isBuy, uint256 price) external view returns (uint256 eurc, address binding) {
         (, Window memory w1, Window memory w2) = _windows();
         return _maxRunEurc(isBuy, price, w1, w2);
@@ -758,6 +762,44 @@ contract BlockWindowTest is RebalancerTestBase {
         assertFalse(due);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
         r.execute(alice, keeper);
+    }
+
+    /// @notice Zelf-audit 2026-09-17, lead 13: de constructor weigert een venster dat niet ruim binnen de tick-afstand
+    ///         past. Met de constanten van dit contract (6 bp, spacing 10) klopt het; 10 of meer bij spacing 10 niet.
+    function test_constructor_windowFitsTickSpacing() public view {
+        assertTrue(h.windowFitsTickSpacing(r.MAX_BLOCK_MOVE_BPS(), r.TICK_SPACING()), "constanten van dit contract");
+        assertTrue(h.windowFitsTickSpacing(9, 10));
+        assertFalse(h.windowFitsTickSpacing(10, 10), "venster even breed als de tick-afstand");
+        assertFalse(h.windowFitsTickSpacing(60, 10));
+        assertFalse(h.windowFitsTickSpacing(6, 0), "spacing 0");
+    }
+
+    /// @notice Zelf-audit 2026-09-17, lead 11: krimpt de wallet tijdens een ronde (opnemen of een koersdaling), dan is
+    ///         een deel nooit groter dan `maxCorrectionBps` van de waarde van dat moment. Vroeger gold het budget van
+    ///         de eerste run, zodat een deel hier 375 EURC op een wallet van 3.000 EURC kon zijn.
+    function test_chunk_budgetShrinksWithWallet() public {
+        poolEurcUsdc.setLiquidity(2e12);
+        _setUser(alice, 20_000e6, 0, _params(1000, 20e6)); // budget 2.000
+        r.execute(alice, keeper);
+        (, uint256 remaining) = _round(alice);
+        assertGt(remaining, 0, "opzet: de liquiditeit begrensde de eerste run, ronde open");
+        uint256 cap = _expectedMaxBuy(2e12);
+        assertGt(cap, 300e6, "opzet: de liquiditeit laat meer dan 10% van de gekrompen wallet toe");
+
+        // De owner neemt op tot een wallet van ~3.000 EURC; hij ligt nog ver onder zijn doel van 80% cbBTC.
+        uint256 btcValue = Math.mulDiv(cbbtc.balanceOf(alice), PRICE, 1e8);
+        uint256 withdraw = eurc.balanceOf(alice) - (3_000e6 - btcValue);
+        vm.prank(alice);
+        eurc.transfer(bob, withdraw);
+        _warp(10 minutes);
+
+        (bool due, int256 delta) = r.isDue(alice);
+        assertTrue(due, "deel is due");
+        uint256 total = eurc.balanceOf(alice) + Math.mulDiv(cbbtc.balanceOf(alice), PRICE, 1e8);
+        assertLe(uint256(delta), total * 1000 / BPS, "deel groter dan maxCorrectionBps van de huidige waarde");
+        r.execute(alice, keeper);
+        (, remaining) = _round(alice);
+        assertLe(remaining, total * 1000 / BPS, "restbudget boven het budget van de huidige waarde");
     }
 
     /// @notice Lead 3: een donatie tijdens een ronde vergroot het budget niet.

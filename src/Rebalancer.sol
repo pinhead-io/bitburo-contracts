@@ -40,7 +40,11 @@ import {TickMath} from "./libraries/TickMath.sol";
  *         Hooguit één per blok (Oracle.sol:90). Een swap binnen de tick, een mint of burn buiten de range, een
  *         burn van 0, `collect` en `flash` schrijven niets. Is er in dit blok geen observatie, dan staan tick en
  *         in-range liquiditeit nog zoals aan het begin van het blok: een aanvaller kan in dit blok hooguit binnen
- *         de begintick duwen (≤ 1 tick ≈ 1 bp per pool) en geen JIT-liquiditeit in de range zetten. Vóór én na de
+ *         de begintick duwen (≤ 1 tick ≈ 1 bp per pool) en geen JIT-liquiditeit in de range zetten. Uitzondering
+ *         (zelf-audit 2026-09-17, L-E): staat de koers precies op een tickgrens b, dan telt een positie met b als
+ *         grens in de swaprichting voor Uniswap als buiten de range; een mint schrijft niets, maar de run kruist b
+ *         meteen en handelt ertegen. Dat maakt de run niet groter dan de in-range bovengrens en geeft het
+ *         slachtoffer een betere koers; de JIT-positie int alleen poolfee, ten koste van andere LP's. Vóór én na de
  *         swap moet de koers bovendien binnen MAX_BLOCK_MOVE_BPS van die begintick liggen, inclusief de eigen
  *         swap. Restrisico (review F-4): een push binnen de begintick schrijft niets en is zonder observatie niet
  *         te zien, dus het slachtoffer kan tot ~1 tick per geduwde pool slechter handelen (tick-granulariteit). Een
@@ -58,7 +62,9 @@ import {TickMath} from "./libraries/TickMath.sol";
  *           als LP ook niet aan de marge op dat volume. Het slachtoffer verliest niet meer dan ~1 tick per
  *           geduwde pool. Geaccepteerd risico; zie README.
  *         Niet gezien wordt duwen aan het eind van het vorige blok (review I-4; niet atomair, laag 3 en arbitrage
- *         begrenzen het).
+ *         begrenzen het). Laag 3 meet tegen Chainlink, niet tegen de markt: loopt een feed binnen zijn
+ *         deviation-drempel achter in het voordeel van de aanvaller (cbBTC/USD 0,3%, EURC/USD 0,1%), dan mag die push
+ *         groter zijn (zelf-audit 2026-09-17, L-F; zie README).
  *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick
  *         verandert; daarna is de pool in dit blok aangeraakt.
  *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers op SIZING_BPS van
@@ -78,8 +84,8 @@ import {TickMath} from "./libraries/TickMath.sol";
  *
  *      Delen: een run die door de liquiditeit is begrensd, opent een ronde. Het volgende deel in dezelfde
  *      richting mag al na CHUNK_INTERVAL in plaats van na `interval`, tot de afwijking binnen de band is of het
- *      budget van de ronde (maxCorrectionBps van de waarde bij de eerste run) op is. Elk deel is een gewone run
- *      met fee en keeperbeloning.
+ *      budget van de ronde (maxCorrectionBps van de waarde bij de eerste run, en per deel nooit meer dan
+ *      maxCorrectionBps van de huidige waarde) op is. Elk deel is een gewone run met fee en keeperbeloning.
  *
  *      Uitval: een run revert vóór de swap met `PoolTouchedThisBlock` als een pool in dit blok al een observatie
  *      schreef (door anderen of door een eerdere run), en met `BlockMoveExceeded` als er te weinig ruimte of
@@ -127,6 +133,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///         De constructor dwingt het af; `_maxInput` rekent erop.
     int24 public constant TICK_SPACING = 10;
     uint16 public constant FEE_BPS = 25;
+    /// @notice Beloning voor de aanroeper, hooguit de helft van de fee van de run (zelf-audit 2026-09-17, L-D): zo
+    ///         houdt de treasury van elke run minstens de helft, ook als de aanroeper de owner zelf is.
     uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0,05 EURC
     uint16 public constant MAX_SLIPPAGE_BPS = 100;
     /// @notice Ondergrens voor `maxSlippageBps`: MAX_SPOT_DEVIATION_BPS + 2 × 5 bps poolfee. `amountOutMinimum`
@@ -136,12 +144,13 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint16 public constant MIN_SLIPPAGE_BPS = 60;
     uint16 public constant MAX_SPOT_DEVIATION_BPS = 50;
     /// @notice Ondergrens voor `minTradeEurc` (20 EURC) en voor elke run, ook elk deel van een ronde. Bij
-    ///         FEE_BPS = 25 is de fee van de kleinste run dan precies KEEPER_REWARD_EURC, zodat elke run de
-    ///         volledige keeperbeloning dekt en een dust-owner de wekkers niet gratis bezig kan houden. Dat geldt
-    ///         voor kopen én verkopen: bij een koop is de fee-grondslag het bruto inputbedrag, bij een verkoop
-    ///         max(ontvangen, verwachte opbrengst), waarbij de verwachte opbrengst dezelfde oraclewaarde is waarop
-    ///         de ondergrens is gecontroleerd (audit L-B). Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
-    ///         sats bij 80.000 EURC/cbBTC, waardoor de afronding in `amountOutMinimum` onder 1 bp blijft.
+    ///         FEE_BPS = 25 is de fee van de kleinste run dan 0,05 EURC, zodat een dust-owner de wekkers niet gratis
+    ///         bezig kan houden: de beloning is dan 0,025 EURC (de helft van de fee, zie KEEPER_REWARD_EURC) en de
+    ///         treasury krijgt de andere helft. Dat geldt voor kopen én verkopen: bij een koop is de fee-grondslag
+    ///         het bruto inputbedrag, bij een verkoop max(ontvangen, verwachte opbrengst), waarbij de verwachte
+    ///         opbrengst dezelfde oraclewaarde is waarop de ondergrens is gecontroleerd (audit L-B). Bovendien is
+    ///         `expectedOut` bij een koop dan ≥ ~25.000 sats bij 80.000 EURC/cbBTC, waardoor de afronding in
+    ///         `amountOutMinimum` onder 1 bp blijft.
     uint64 public constant MIN_TRADE_FLOOR = 20e6;
     /// @notice Hoever de koers van elke pool binnen één blok van de koers aan het begin van dat blok mag
     ///         afliggen, inclusief de eigen swap (audit M-1). Onder de poolfee heen en terug (2 × 5 bp), zodat
@@ -266,6 +275,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     error UnexpectedFeedDecimals(address feed);
     /// @notice `token` heeft niet de decimalen waar het contract op rekent (EURC 6, cbBTC 8, USDC 6).
     error UnexpectedTokenDecimals(address token);
+    /// @notice MAX_BLOCK_MOVE_BPS past niet ruim binnen TICK_SPACING; `_maxInput` zou dan grenzen missen.
+    error WindowExceedsTickSpacing();
     error NoOutput();
     /// @notice Het contract is buiten gebruik gesteld; alleen `setParams` met `active = false` en `sweep` kunnen nog.
     error ContractRetired();
@@ -330,6 +341,17 @@ contract Rebalancer is ReentrancyGuardTransient {
         _requireDecimals(d.eurc, EURC_DECIMALS);
         _requireDecimals(d.cbbtc, CBBTC_DECIMALS);
         _requireDecimals(d.usdc, USDC_DECIMALS);
+
+        // `_maxInput` kijkt naar hooguit één initialiseerbare tickgrens in het venster; dat klopt alleen zolang het
+        // venster (1 tick ≈ 1 bp) minder ticks beslaat dan TICK_SPACING (zelf-audit 2026-09-17, lead 13).
+        if (!_windowFitsTickSpacing(MAX_BLOCK_MOVE_BPS, TICK_SPACING)) revert WindowExceedsTickSpacing();
+    }
+
+    /// @dev Per richting kruist een swap binnen het venster hooguit `moveBps` opeenvolgende ticks (omlaag t tot en
+    ///      met t − moveBps + 1, omhoog t + 1 tot en met t + moveBps − 1). Minder dan `spacing` opeenvolgende ticks
+    ///      bevatten hooguit één veelvoud van `spacing`.
+    function _windowFitsTickSpacing(uint16 moveBps, int24 spacing) internal pure returns (bool) {
+        return spacing > 0 && int256(uint256(moveBps)) < int256(spacing);
     }
 
     function _requireDecimals(address token, uint8 expected) private view {
@@ -599,7 +621,11 @@ contract Rebalancer is ReentrancyGuardTransient {
     function _quote() internal view returns (uint256 price) {
         (, int256 seqAnswer, uint256 seqStartedAt,,) = SEQUENCER_FEED.latestRoundData();
         // startedAt == 0 is een niet-geïnitialiseerde ronde van de uptime-feed en telt als "onbekend", niet als up.
-        if (seqAnswer != 0 || seqStartedAt == 0 || block.timestamp - seqStartedAt < GRACE_PERIOD) {
+        // Een startedAt in de toekomst ook: SequencerDown in plaats van een Panic (zelf-audit 2026-09-17, Info-G).
+        if (
+            seqAnswer != 0 || seqStartedAt == 0 || seqStartedAt > block.timestamp
+                || block.timestamp - seqStartedAt < GRACE_PERIOD
+        ) {
             revert SequencerDown();
         }
 
@@ -858,7 +884,9 @@ contract Rebalancer is ReentrancyGuardTransient {
      * @dev Rekenregel per run.
      *      1. Correctie zoals in de app: |drift| × total, alleen buiten de band.
      *      2. Budget: bij een nieuwe ronde max(total × maxCorrectionBps, minTradeEurc); bij een deel wat er van de
-     *         ronde over is. Een deel in de andere richting dan de ronde gebeurt niet (geen ping-pong).
+     *         ronde over is, maar nooit meer dan dat budget van de huidige waarde (zelf-audit lead 11). Het
+     *         restant wordt dan van dat kleinere budget gerekend en blijft laag, ook als de waarde later herstelt. Een
+     *         deel in de andere richting dan de ronde gebeurt niet (geen ping-pong).
      *      3. correctie = min(correctie, budget); onder minTradeEurc -> niets (ook: de ronde is klaar).
      *      4. run = min(correctie, `_maxRunEurc`). Onder MIN_TRADE_FLOOR -> `blockedBy`: de correctie wacht op
      *         ruimte in een volgend blok; een lopende ronde blijft staan tot er weer ruimte is of `interval` na de
@@ -896,13 +924,13 @@ contract Rebalancer is ReentrancyGuardTransient {
             return pl;
         }
 
-        uint256 budget;
+        uint256 budget = Math.max(Math.mulDiv(pl.total, p.maxCorrectionBps, BPS), p.minTradeEurc);
         if (chunk) {
             Round memory rd = rounds[owner];
             if (rd.isBuy != pl.isBuy) return pl;
-            budget = rd.remainingEurc;
-        } else {
-            budget = Math.max(Math.mulDiv(pl.total, p.maxCorrectionBps, BPS), p.minTradeEurc);
+            // Nooit meer dan het budget van de huidige waarde: krimpt de wallet tijdens de ronde (opnemen of een
+            // koersdaling), dan krimpt het budget mee (zelf-audit 2026-09-17, lead 11).
+            budget = Math.min(rd.remainingEurc, budget);
         }
         uint256 correction = Math.min(Math.mulDiv(driftWad, pl.total, WAD), budget);
         if (correction < p.minTradeEurc) {
@@ -1010,7 +1038,10 @@ contract Rebalancer is ReentrancyGuardTransient {
 
     /// @dev Fee in EURC: FEE_BPS over `feeBase`, begrensd op `maxFee` (het EURC-bedrag waar de fee uit komt).
     ///      Bij een koop zijn beide het bruto inputbedrag; bij een verkoop is `feeBase` max(ontvangen,
-    ///      expectedOut) en `maxFee` het ontvangen bedrag. Beloning eruit naar rewardTo, rest naar de treasury.
+    ///      expectedOut) en `maxFee` het ontvangen bedrag. Beloning eruit naar rewardTo, hooguit
+    ///      min(KEEPER_REWARD_EURC, fee / 2), rest naar de treasury. De helft als grens, zodat een run op de vloer de
+    ///      treasury niet leeg laat en een owner die `rewardTo` naar zichzelf zet niet zonder fee handelt (zelf-audit
+    ///      2026-09-17, L-D).
     ///      Beide transfers zijn niet-reverterend (`trySafeTransfer`), zodat de run nooit stukloopt op de ontvanger van de fee:
     ///      - faalt de beloning (bijv. geblacklist rewardTo), dan is `reward` 0 en gaat de hele fee naar de
     ///        treasury;
@@ -1023,7 +1054,7 @@ contract Rebalancer is ReentrancyGuardTransient {
     {
         fee = Math.min(Math.mulDiv(feeBase, FEE_BPS, BPS), maxFee);
         if (rewardTo != address(0)) {
-            reward = Math.min(KEEPER_REWARD_EURC, fee);
+            reward = Math.min(KEEPER_REWARD_EURC, fee / 2);
             if (reward > 0 && !EURC.trySafeTransfer(rewardTo, reward)) reward = 0;
         }
         uint256 toTreasury = fee - reward;

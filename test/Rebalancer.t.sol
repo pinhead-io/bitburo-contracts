@@ -243,7 +243,7 @@ contract RebalancerTest is RebalancerTestBase {
         _expectInvalid(p);
         assertEq(r.MIN_TRADE_FLOOR(), 20e6);
         assertEq(r.MIN_CORRECTION_BPS(), 10);
-        // De kleinste toegestane run dekt precies de keeperbeloning.
+        // De fee van de kleinste toegestane run is 0,05 EURC; de beloning is daarvan hooguit de helft (zelf-audit L-D).
         assertEq(uint256(r.MIN_TRADE_FLOOR()) * r.FEE_BPS() / BPS, r.KEEPER_REWARD_EURC());
     }
 
@@ -404,14 +404,15 @@ contract RebalancerTest is RebalancerTestBase {
     function test_execute_rewardCappedByFee() public {
         // Vroeger kon verkoop-slippage de fee onder de beloning duwen: 150 EURC in cbBTC, cap 10% = 15 < vloer 20
         // -> verkoop 25_000 sats (20 EURC); router levert 1% minder (19,8 EURC), fee was 49_500. Sinds L-B telt
-        // de fee over max(ontvangen, verwacht) = 20 EURC -> 50_000, precies de beloning. Een fee onder de beloning
-        // is via `execute` dus niet meer te bereiken; de begrenzing zelf staat in test_takeFee_cappedAtMaxFee.
+        // de fee over max(ontvangen, verwacht) = 20 EURC -> 50_000. Sinds zelf-audit L-D is de beloning hooguit de
+        // helft van de fee: 25_000 naar de keeper, 25_000 naar de treasury. De begrenzing zelf staat in
+        // test_takeFee_cappedAtMaxFee.
         _setUser(alice, 0, 187_500, _defaultParams());
         router.setSlippageBps(100);
         r.execute(alice, keeper);
         assertEq(cbbtc.balanceOf(alice), 187_500 - 25_000);
-        assertEq(eurc.balanceOf(keeper), 50_000);
-        assertEq(eurc.balanceOf(treasury), 0);
+        assertEq(eurc.balanceOf(keeper), 25_000);
+        assertEq(eurc.balanceOf(treasury), 25_000);
         assertEq(eurc.balanceOf(alice), 19_800_000 - 50_000);
     }
 
@@ -571,6 +572,18 @@ contract RebalancerTest is RebalancerTestBase {
         sequencer.set(1, START - 1 days, START - 1 days);
         vm.expectRevert(Rebalancer.SequencerDown.selector);
         r.execute(alice, keeper);
+    }
+
+    /// @notice Zelf-audit 2026-09-17, Info-G: een `startedAt` in de toekomst geeft `SequencerDown`, geen Panic.
+    function test_execute_revertsSequencerDownWhenStartedAtInFuture() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        sequencer.set(0, vm.getBlockTimestamp() + 1, vm.getBlockTimestamp() + 1);
+        vm.expectRevert(Rebalancer.SequencerDown.selector);
+        r.execute(alice, keeper);
+        vm.expectRevert(Rebalancer.SequencerDown.selector);
+        r.quote();
+        (bool due,) = r.isDue(alice);
+        assertFalse(due);
     }
 
     /// @dev L-9: een niet-geïnitialiseerde ronde (startedAt == 0) van de uptime-feed telt niet als "up".
@@ -995,6 +1008,30 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(alice), 900e6);
     }
 
+    /// @notice Zelf-audit 2026-09-17, L-D: een owner die `execute` voor zichzelf aanroept met `rewardTo` = zichzelf
+    ///         en alleen runs op de vloer doet (`maxCorrectionBps` 10, `minTradeEurc` 20 EURC, wallet 20.000 EURC),
+    ///         betaalt toch de helft van de fee aan de treasury. Vroeger ging de hele fee terug naar de owner.
+    function test_execute_selfRewardAtFloorStillPaysTreasuryHalf() public {
+        Rebalancer.Params memory p = _defaultParams();
+        p.maxCorrectionBps = 10;
+        p.interval = 1 hours;
+        _setUser(alice, 20_000e6, 0, p);
+        uint256 runs = 24;
+        for (uint256 i; i < runs; i++) {
+            if (i > 0) {
+                vm.warp(vm.getBlockTimestamp() + 1 hours);
+                vm.roll(block.number + 1);
+                _setPrice(PRICE);
+            }
+            (, int256 delta) = r.isDue(alice);
+            assertEq(delta, int256(20e6), "run op de vloer");
+            vm.prank(alice);
+            r.execute(alice, alice);
+        }
+        assertEq(eurc.balanceOf(treasury), runs * 25_000, "treasury krijgt per run de helft van 0,05 EURC");
+        assertEq(20_000e6 - eurc.balanceOf(alice), runs * (20e6 - 25_000), "owner betaalt netto de helft van de fee");
+    }
+
     function test_execute_rewardToSelfGoesToTreasury() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         vm.expectEmit(true, false, false, true, address(r));
@@ -1072,16 +1109,16 @@ contract RebalancerTest is RebalancerTestBase {
     ///      MIN_TRADE_FLOOR belooft. Iets boven de vloer (20,01 EURC) krijgt de treasury ook iets; vroeger niet.
     function test_execute_sellFeeFloorUsesExpectedOut() public {
         _sellAtValue(alice, 80_000_640_000, keeper); // 25.000 sats × 80.000,64 = 20,000160 EURC
-        assertEq(eurc.balanceOf(keeper), 50_000, "beloning volledig");
-        assertEq(eurc.balanceOf(treasury), 0, "fee is precies de beloning");
+        assertEq(eurc.balanceOf(keeper), 25_000, "beloning is de helft van de fee (L-D)");
+        assertEq(eurc.balanceOf(treasury), 25_000, "treasury krijgt de andere helft");
         assertEq(eurc.balanceOf(alice), 19_980_159 - 50_000);
         assertGt(19_980_159 * 25 / BPS, 0);
         assertLt(19_980_159 * 25 / BPS, 50_000, "opzet: oude fee lag onder de beloning");
 
         address keeper2 = makeAddr("keeper2");
         _sellAtValue(bob, 80_040_000_000, keeper2); // 25.000 sats × 80.040 = 20,010000 EURC, ontvangen 19,989990
-        assertEq(eurc.balanceOf(keeper2), 50_000);
-        assertEq(eurc.balanceOf(treasury), 25, "treasury krijgt > 0 (fee 50.025)");
+        assertEq(eurc.balanceOf(keeper2), 25_012, "beloning = fee / 2 (fee 50.025)");
+        assertEq(eurc.balanceOf(treasury), 25_000 + 25_013);
         assertLe(19_989_990 * 25 / BPS, 50_000, "opzet: oude fee gaf de treasury 0");
     }
 
@@ -1104,12 +1141,12 @@ contract RebalancerTest is RebalancerTestBase {
         eurc.mint(address(h), 1_000e6);
         (uint256 fee, uint256 reward) = h.takeFee(1_000e6, 1_000, keeper);
         assertEq(fee, 1_000, "begrensd op maxFee");
-        assertEq(reward, 1_000, "beloning begrensd op de fee");
-        assertEq(eurc.balanceOf(keeper), 1_000);
+        assertEq(reward, 500, "beloning begrensd op de helft van de fee");
+        assertEq(eurc.balanceOf(keeper), 500);
         (fee, reward) = h.takeFee(1_000e6, type(uint256).max, address(0));
         assertEq(fee, 2_500_000);
         assertEq(reward, 0);
-        assertEq(eurc.balanceOf(treasury), 2_500_000);
+        assertEq(eurc.balanceOf(treasury), 500 + 2_500_000, "helft van de eerste fee plus de hele tweede");
     }
 
     function test_execute_revertsWhenTokenPaused() public {
@@ -1769,7 +1806,7 @@ contract RebalancerTest is RebalancerTestBase {
             assertEq(feePaid, fee, "fee != reward + treasury");
             assertEq(eurc.balanceOf(address(router)), amountIn - fee, "swapIn + fee != amountIn");
             assertEq(cbbtc.balanceOf(alice) - btc, Math.mulDiv(amountIn - fee, 1e8, PRICE), "output naar owner");
-            if (withReward) assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, fee));
+            if (withReward) assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, fee / 2));
             else assertEq(eurc.balanceOf(keeper), keeperBefore);
         } else {
             uint256 btcIn = btc - cbbtc.balanceOf(alice);
@@ -1784,7 +1821,7 @@ contract RebalancerTest is RebalancerTestBase {
             assertEq(feePaid, fee, "fee != reward + treasury");
             assertEq(eurc.balanceOf(alice) - cash, valueIn - fee, "output naar owner");
             assertEq(cbbtc.balanceOf(address(router)), btcIn);
-            if (withReward) assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, fee));
+            if (withReward) assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, fee / 2));
             else assertEq(eurc.balanceOf(keeper), keeperBefore);
         }
     }

@@ -122,7 +122,7 @@ contract AuditMathTest is RebalancerTestBase {
         assertEq(absDelta, amountInEurcValue, "isDue-delta != werkelijk verhandeld bedrag (L-C)");
         assertEq(feePaid, Math.mulDiv(feeBase, 25, BPS), "fee != 25 bps");
         assertLe(feePaid, feeBase * 25 / BPS, "fee naar boven afgerond");
-        assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, feePaid), "reward != min(0,05, fee)");
+        assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, feePaid / 2), "reward != min(0,05, fee / 2)");
 
         // (a) corridor of cap
         (uint256 fracAfter, uint256 totalAfter) = _fraction(alice, price);
