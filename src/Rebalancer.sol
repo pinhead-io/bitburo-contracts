@@ -51,11 +51,12 @@ import {TickMath} from "./libraries/TickMath.sol";
  *           per geduwde pool, los van de protocolfee (gemeten +1,99 bp);
  *         - extra winst van de aanvaller (met push tegen zonder push, bij dezelfde correctie, elk bij zijn eigen
  *           run): < 0,5 bp bij de huidige protocolfee (gemeten tot +0,18 bp; rond de capaciteit van het venster
- *           ≤ −1,68 bp), en < 2,5 bp als Uniswap de protocolfee op 0 zet (gemeten tot +2,22 bp, blok 51.404.940,
- *           aandeel 99,9% van beide pools, een run vlak onder de capaciteit). Die winst kan boven het verlies van
- *           het slachtoffer liggen: maakt de push de run kleiner, dan verliest de aanvaller als LP ook niet aan
- *           de marge op het volume dat wegvalt. Dat deel komt niet van het slachtoffer. De uitkomst schuift per
- *           blok met de poolstand; zie README.
+ *           ≤ −1,68 bp). Zet Uniswap de protocolfee op 0 (hypothetisch), dan is die winst blokafhankelijk en
+ *           zonder vaste grens: gemeten +1,39 tot +4,07 bp over vijf blokken (aandeel 99% of 99,9% van beide
+ *           pools, een run vlak onder de capaciteit; hoogste op blok 51.407.293). Het surplus boven het verlies van het
+ *           slachtoffer komt uit het volume dat wegvalt: maakt de push de run kleiner, dan verliest de aanvaller
+ *           als LP ook niet aan de marge op dat volume. Het slachtoffer verliest niet meer dan ~1 tick per
+ *           geduwde pool. Geaccepteerd risico; zie README.
  *         Niet gezien wordt duwen aan het eind van het vorige blok (review I-4; niet atomair, laag 3 en arbitrage
  *         begrenzen het).
  *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick
