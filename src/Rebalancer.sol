@@ -46,10 +46,16 @@ import {TickMath} from "./libraries/TickMath.sol";
  *         te zien, dus het slachtoffer kan tot ~1 tick per geduwde pool slechter handelen (tick-granulariteit). Een
  *         LP met een groot aandeel die in een eerder blok minde, krijgt de poolfee van die push grotendeels terug;
  *         wat hem rest, is het protocolfee-deel. Dat is een governance-instelling van Uniswap (`feeProtocol` nu 68,
- *         1/4 op beide pools). Grens voor de extra winst: < 0,5 bp van de run bij de huidige protocolfee (gemeten
- *         tot +0,18 bp), en ~1 tick per pool, samen < ~2 bp, als Uniswap de protocolfee op 0 zet (gemeten tot
- *         +1,95 bp bij runs vlak onder de capaciteit van het venster, aandeel 99,9% van beide pools). De uitkomst
- *         schuift per blok met de poolstand; zie README.
+ *         1/4 op beide pools). Twee maten, elk in bp van de run:
+ *         - extra verlies van het slachtoffer (met push tegen zonder push, bij gelijke run): < 2,05 bp, ~1 tick
+ *           per geduwde pool, los van de protocolfee (gemeten +1,99 bp);
+ *         - extra winst van de aanvaller (met push tegen zonder push, bij dezelfde correctie, elk bij zijn eigen
+ *           run): < 0,5 bp bij de huidige protocolfee (gemeten tot +0,18 bp; rond de capaciteit van het venster
+ *           ≤ −1,68 bp), en < 2,5 bp als Uniswap de protocolfee op 0 zet (gemeten tot +2,22 bp, blok 51.404.940,
+ *           aandeel 99,9% van beide pools, een run vlak onder de capaciteit). Die winst kan boven het verlies van
+ *           het slachtoffer liggen: maakt de push de run kleiner, dan verliest de aanvaller als LP ook niet aan
+ *           de marge op het volume dat wegvalt. Dat deel komt niet van het slachtoffer. De uitkomst schuift per
+ *           blok met de poolstand; zie README.
  *         Niet gezien wordt duwen aan het eind van het vorige blok (review I-4; niet atomair, laag 3 en arbitrage
  *         begrenzen het).
  *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick

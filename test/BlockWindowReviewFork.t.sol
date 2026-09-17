@@ -741,14 +741,35 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
         vm.revertToState(snap);
     }
 
+    /// @dev Hoogste waarden over een raster rond de capaciteit, in bp x100 van de run met push.
+    struct CapacityWorst {
+        int256 victimBpX100; // extra verlies van het slachtoffer door de push, bij gelijke run
+        int256 attackerBpX100; // extra winst van de aanvaller door de push, bij dezelfde correctie
+        uint256 compared;
+    }
+
+    /// @dev Waarde die het slachtoffer (owner 0) sinds `_victims` kwijt is, in EURC tegen de feedkoers.
+    function _victimLoss() internal view returns (int256) {
+        uint256 price = r.quote();
+        uint256 before = e0[0] + Math.mulDiv(b0[0], price, 1e8);
+        uint256 afterRun = EURC.balanceOf(victim) + Math.mulDiv(CBBTC.balanceOf(victim), price, 1e8);
+        return int256(before) - int256(afterRun);
+    }
+
     /// @dev Raster rond de capaciteit: LP uit een eerder blok (aandeel `phi` promille) en push in beide pools, koers in
     ///      het vorige blok op de voor de aanvaller gunstigste plek in de tick, correcties van 50% tot 102% van de
-    ///      capaciteit na de push plus de capaciteit zonder push, pushes tot de tickrand en 0,125 / 0,25 / 0,5 bp vanaf
-    ///      de koers. Geeft de hoogste extra winst in bp x100 van de run.
-    function _capacityGrid(bool feeOff, uint256 phi) internal returns (int256 worst) {
-        worst = type(int256).min;
+    ///      capaciteit na de push plus de capaciteit zonder push, pushes tot de tickrand en koersbewegingen van
+    ///      0,25 / 0,5 / 1 bp vanaf de koers (`limit = s·(2e6−k)/2e6`, k = 25 / 50 / 100). Per geval twee maten
+    ///      (verificatie 579f763):
+    ///      - slachtoffer: verlies met push − verlies zonder push bij dezelfde run (dezelfde opzet, correctie = de run
+    ///        met push). Dat is wat de push het slachtoffer kost: ~1 tick per geduwde pool;
+    ///      - aanvaller: PnL met push − PnL van dezelfde opzet zonder push bij dezelfde correctie, elk bij zijn eigen
+    ///        run. Dat is de beslissing van de aanvaller: maakt de push de run kleiner, dan vermijdt hij ook wat hij als
+    ///        LP op het extra volume zou verliezen, en ook dat is winst uit de push.
+    function _capacityGrid(bool feeOff, uint256 phi) internal returns (CapacityWorst memory w) {
+        w.victimBpX100 = type(int256).min;
+        w.attackerBpX100 = type(int256).min;
         uint256 snap0 = vm.snapshotState();
-        uint256 compared;
         for (uint256 d; d < 2; d++) {
             bool isBuy = d == 0;
             vm.revertToState(snap0);
@@ -783,38 +804,33 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
                         continue;
                     }
                     if (a.okCount == 0 || base.okCount == 0 || a.run == 0) continue;
-                    compared++;
-                    int256 extra = a.pnl - base.pnl;
-                    // Maakt de push het venster kleiner, dan is de run met push kleiner dan zonder. Het verschil in PnL
-                    // bevat dan ook wat de LP op het extra volume van de grotere run verdient of verliest, en dat heeft
-                    // met de push niets te maken. Vergelijk daarom met dezelfde opzet zonder push bij dezelfde run.
-                    if (base.run > a.run + a.run / 10_000) {
-                        _logUnequal(feeOff, isBuy, base.run, a.run, extra);
-                        vm.revertToState(snap);
-                        Res memory same = _one(isBuy, a.run, false, 0, 0);
-                        assertEq(same.okCount, 1, "vergelijkingsrun zonder push faalde");
-                        assertApproxEqRel(same.run, a.run, 0.0001e18, "vergelijkingsrun niet even groot");
-                        extra = a.pnl - same.pnl;
-                    }
-                    int256 bp = extra * 1_000_000 / int256(a.run);
-                    if (bp > worst) worst = bp;
-                    _logCapacity(feeOff, isBuy, corrs[c], capPushed, j, a.run, extra, bp);
+                    int256 lossPushed = _victimLoss();
+                    vm.revertToState(snap);
+                    Res memory same = _one(isBuy, a.run, false, 0, 0);
+                    assertEq(same.okCount, 1, "vergelijkingsrun zonder push faalde");
+                    assertApproxEqRel(same.run, a.run, 0.0001e18, "vergelijkingsrun niet even groot");
+                    int256 victimBp = (lossPushed - _victimLoss()) * 1_000_000 / int256(a.run);
+                    int256 attackerBp = (a.pnl - base.pnl) * 1_000_000 / int256(a.run);
+                    w.compared++;
+                    if (victimBp > w.victimBpX100) w.victimBpX100 = victimBp;
+                    if (attackerBp > w.attackerBpX100) w.attackerBpX100 = attackerBp;
+                    _logCapacity(feeOff, isBuy, corrs[c], j, a.run, base.run, victimBp, attackerBp);
                 }
             }
         }
         vm.revertToState(snap0);
-        assertGt(compared, 0, "niets vergeleken: de test bewijst niets");
+        assertGt(w.compared, 0, "niets vergeleken: de test bewijst niets");
     }
 
     function _logCapacity(
         bool feeOff,
         bool isBuy,
         uint256 corr,
-        uint256 cap,
         uint256 push,
         uint256 run,
-        int256 extra,
-        int256 bp
+        uint256 runWithoutPush,
+        int256 victimBp,
+        int256 attackerBp
     ) internal view {
         console.log(
             string.concat(
@@ -826,71 +842,70 @@ contract BlockWindowReviewForkTest is BlockWindowForkTest {
                     isBuy ? ",koop" : ",verkoop",
                     ",corr=",
                     vm.toString(corr),
-                    ",capNaPush=",
-                    vm.toString(cap)
+                    ",push=",
+                    vm.toString(push)
                 ),
                 string.concat(
-                    ",push=",
-                    vm.toString(push),
                     ",run=",
                     vm.toString(run),
-                    ",extra=",
-                    vm.toString(extra),
-                    ",bpx100=",
-                    vm.toString(bp)
+                    ",runZonderPush=",
+                    vm.toString(runWithoutPush),
+                    ",slachtofferBpx100=",
+                    vm.toString(victimBp),
+                    ",aanvallerBpx100=",
+                    vm.toString(attackerBp)
                 )
             )
         );
     }
 
-    function _logUnequal(bool feeOff, bool isBuy, uint256 baseRun, uint256 run, int256 extra) internal view {
+    function _reportCapacity(string memory label, CapacityWorst memory w) internal pure {
         console.log(
             string.concat(
-                "CAP_ONGELIJK,feeOff=",
-                feeOff ? "1" : "0",
-                ",phiPm=",
-                vm.toString(phiPm),
-                isBuy ? ",koop" : ",verkoop",
-                ",runZonderPush=",
-                vm.toString(baseRun),
-                ",runMetPush=",
-                vm.toString(run),
-                ",extraOngelijk=",
-                vm.toString(extra),
-                ",bpx100Ongelijk=",
-                vm.toString(extra * 1_000_000 / int256(run))
+                "F-4 MAX,",
+                label,
+                ",vergelijkingen=",
+                vm.toString(w.compared),
+                ",slachtofferBpx100=",
+                vm.toString(w.victimBpX100),
+                ",aanvallerBpx100=",
+                vm.toString(w.attackerBpX100)
             )
         );
     }
 
     /// @notice Review F-4, protocolfee 0: een LP met 99% of 99,9% van beide pools en runs rond de capaciteit van het
-    ///         venster. Een push binnen de tick is zonder observatie niet te zien, dus hooguit ~1 tick per geduwde pool
-    ///         verschuift de koers van het slachtoffer; eis < 2 bp van de run (gemeten tot +1,93 bp in de review).
-    function test_scenario_lpNearCapacity_protocolFeeOff_belowTwoBp() public {
-        int256 w990 = _capacityGrid(true, 990);
-        int256 w999 = _capacityGrid(true, 999);
-        console.log("F-4 hoogste extra winst, protocolfee 0 (bp x100 van de run), aandeel 99% en 99,9%:");
-        console.logInt(w990);
-        console.logInt(w999);
-        assertLt(w990, 200, "protocolfee 0, aandeel 99%: 2 bp of meer van de run");
-        assertLt(w999, 200, "protocolfee 0, aandeel 99,9%: 2 bp of meer van de run");
+    ///         venster. Een push binnen de tick is zonder observatie niet te zien. Eisen: het slachtoffer verliest door
+    ///         de push < 2,05 bp van de run (hooguit ~1 tick per geduwde pool), en de aanvaller wint door de push
+    ///         < 2,5 bp van de run (gemeten tot +2,22 bp op blok 51.404.940, verificatie 579f763).
+    function test_scenario_lpNearCapacity_protocolFeeOff_belowTwoHalfBp() public {
+        CapacityWorst memory w990 = _capacityGrid(true, 990);
+        CapacityWorst memory w999 = _capacityGrid(true, 999);
+        _reportCapacity("protocolfee 0,aandeel 99%", w990);
+        _reportCapacity("protocolfee 0,aandeel 99,9%", w999);
+        assertLt(w990.victimBpX100, 205, "protocolfee 0, aandeel 99%: slachtoffer verliest 2,05 bp of meer");
+        assertLt(w999.victimBpX100, 205, "protocolfee 0, aandeel 99,9%: slachtoffer verliest 2,05 bp of meer");
+        assertLt(w990.attackerBpX100, 250, "protocolfee 0, aandeel 99%: aanvaller wint 2,5 bp of meer");
+        assertLt(w999.attackerBpX100, 250, "protocolfee 0, aandeel 99,9%: aanvaller wint 2,5 bp of meer");
     }
 
     /// @notice Review F-4, huidige protocolfee (`feeProtocol` 68 = 1/4 op beide pools, gelezen op de fork): dezelfde
-    ///         rasters rond de capaciteit, eis < 0,5 bp van de run.
+    ///         rasters rond de capaciteit. Eisen: slachtoffer < 2,05 bp (de push verschuift zijn koers los van de
+    ///         protocolfee), aanvaller < 0,5 bp van de run.
     function test_scenario_lpNearCapacity_currentProtocolFee_belowHalfBp() public {
         (,,,,, uint8 fp1,) = IUniswapV3Pool(P1).slot0();
         (,,,,, uint8 fp2,) = IUniswapV3Pool(P2).slot0();
         console.log("feeProtocol EURC/USDC en USDC/cbBTC:", fp1, fp2);
         assertGt(fp1, 0, "opzet: protocolfee staat al op 0");
         assertGt(fp2, 0, "opzet: protocolfee staat al op 0");
-        int256 w990 = _capacityGrid(false, 990);
-        int256 w999 = _capacityGrid(false, 999);
-        console.log("F-4 hoogste extra winst, huidige protocolfee (bp x100 van de run), aandeel 99% en 99,9%:");
-        console.logInt(w990);
-        console.logInt(w999);
-        assertLt(w990, 50, "huidige protocolfee, aandeel 99%: 0,5 bp of meer van de run");
-        assertLt(w999, 50, "huidige protocolfee, aandeel 99,9%: 0,5 bp of meer van de run");
+        CapacityWorst memory w990 = _capacityGrid(false, 990);
+        CapacityWorst memory w999 = _capacityGrid(false, 999);
+        _reportCapacity("huidige protocolfee,aandeel 99%", w990);
+        _reportCapacity("huidige protocolfee,aandeel 99,9%", w999);
+        assertLt(w990.victimBpX100, 205, "huidige protocolfee, aandeel 99%: slachtoffer verliest 2,05 bp of meer");
+        assertLt(w999.victimBpX100, 205, "huidige protocolfee, aandeel 99,9%: slachtoffer verliest 2,05 bp of meer");
+        assertLt(w990.attackerBpX100, 50, "huidige protocolfee, aandeel 99%: aanvaller wint 0,5 bp of meer");
+        assertLt(w999.attackerBpX100, 50, "huidige protocolfee, aandeel 99,9%: aanvaller wint 0,5 bp of meer");
     }
 
     /// @notice Twee owners in één blok met JIT in de range: beide geweigerd.
