@@ -424,6 +424,21 @@ export const nextSendBlock = (blockadeBlock: bigint, sendRetryBlocks: number, ra
   return blockadeBlock + 1n + BigInt(Math.max(offset, 0));
 };
 
+/**
+ * Verificatie 579f763 (info a, K-5): een eigen transactie die on-chain revertte door een tijdelijke oorzaak zonder
+ * blokkade, bijvoorbeeld een directe `execute` van een ander eerder in het blok (die telt bewust niet als blokkade, zie
+ * `blockingTransactions`). Daarvoor gold geen wachttijd: de keeper verstuurde elk blok opnieuw, met een gerevertte
+ * poging van ~40k gas per blok tot het retry-budget op was.
+ *
+ * Nu: de eerste zo'n revert in een run krijgt nog geen wachttijd (dat is meestal toeval), elke volgende wel. Vanaf
+ * `revertBlock` wacht de keeper 2, 4, 8, … blokken (2^(n−1) bij de n-de opeenvolgende revert), hooguit `maxBlocks`
+ * (SEND_RETRY_BLOCKS, standaard 30). De tip gaat niet omhoog. Geeft het vroegste blok voor een nieuwe send, of null.
+ */
+export const quietRevertSendBlock = (revertBlock: bigint, consecutiveReverts: number, maxBlocks: number): bigint | null => {
+  if (consecutiveReverts < 2) return null;
+  return revertBlock + BigInt(Math.min(2 ** (consecutiveReverts - 1), maxBlocks));
+};
+
 // ─── Audit lead 9: registratiespam ─────────────────────────────────────────────────────────────────────────────
 
 export const CBBTC_UNIT = 100_000_000n;

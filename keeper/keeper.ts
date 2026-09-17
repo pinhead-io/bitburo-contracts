@@ -36,6 +36,8 @@
  *   zolang de laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een revert telt alleen als
  *   blokkade als een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit) én een transactie vóór
  *   de eigen transactie een pool aanraakte (Swap, Mint of Burn) die zelf geen directe `execute` op de Rebalancer was.
+ *   Een tijdelijke revert zonder blokkade (bijvoorbeeld door een directe `execute` van een ander) verhoogt de tip niet;
+ *   vanaf de tweede in een run wacht het script 2, 4, … tot SEND_RETRY_BLOCKS blokken (verificatie 579f763, info a).
  * - Concurrerende keepers (eindreview F-1): staat vóór de eigen gerevertte transactie een `Executed` voor dezelfde
  *   owner (in dat blok, of in een blok tussen de simulatie en de eigen transactie: verificatie 579f763, K-2), dan is
  *   die owner bediend: geen blokkade, geen cool-down, geen hogere tip. Na een eigen transactie zonder
@@ -112,6 +114,7 @@ import {
   isBlockWindowRevert,
   isCoolingDown,
   isStuck,
+  isTemporaryFailure,
   lockWatchdogSeconds,
   maxFeePerGas,
   minRunBaseUnits,
@@ -120,6 +123,7 @@ import {
   nextScanOffset,
   nextBlockOverrides,
   nextSendBlock,
+  quietRevertSendBlock,
   onchainRevertVerdict,
   parseFeeState,
   nextPriorityFee,
@@ -438,6 +442,8 @@ const failed = (owner: Address, error: unknown) => {
 let lastRunBlock: bigint | null = null;
 /** Na een blokkade (eigen transactie on-chain gerevert door een tijdelijke oorzaak): vroegste blok voor een nieuwe send. */
 let sendFromBlock: bigint | null = null;
+/** Opeenvolgende eigen reverts zonder blokkade in deze run (`quietRevertSendBlock`); weer 0 na een geslaagde run. */
+let quietReverts = 0;
 /** Priority fee voor de volgende transactie; loopt op na een blokkade, tot MAX_PRIORITY_FEE_GWEI (`startPriorityFee`). */
 const readFeeState = (): FeeState | undefined => {
   try {
@@ -719,6 +725,7 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
       lastRunBlock = receipt.blockNumber;
       sentThisRun = true;
       if (receipt.status === "success") {
+        quietReverts = 0;
         cooldowns = clearFailure(cooldowns, owner);
         saveCooldowns();
         lowerFee();
@@ -755,6 +762,16 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
         );
       } else {
         lowerFee();
+        if (isTemporaryFailure(judged.failure)) {
+          // Verificatie 579f763 (info a): tijdelijk zonder blokkade (bijv. een directe execute van een ander). Na de eerste
+          // keer niet elk blok opnieuw versturen, maar 2, 4, … tot SEND_RETRY_BLOCKS blokken wachten; de tip blijft.
+          quietReverts += 1;
+          const from = quietRevertSendBlock(receipt.blockNumber, quietReverts, sendRetryBlocks);
+          if (from !== null && (sendFromBlock === null || from > sendFromBlock)) {
+            sendFromBlock = from;
+            console.log(`${owner}: ${quietReverts}e revert zonder blokkade in deze run; volgende transactie niet vóór blok ${from}`);
+          }
+        }
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes("run gestopt")) throw error;

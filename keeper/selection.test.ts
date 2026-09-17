@@ -37,6 +37,7 @@ import {
   nextBlockOverrides,
   nextScanOffset,
   nextSendBlock,
+  quietRevertSendBlock,
   onchainRevertVerdict,
   parseFeeState,
   startPriorityFee,
@@ -523,6 +524,44 @@ describe("register scan rotation (final review F-2)", () => {
     expect(() => parseOwnersFile(OWNER)).toThrow("ongeldige checksum");
     expect(parseOwnersFile("")).toEqual([]);
     expect(() => parseOwnersFile("0x123")).toThrow("geen geldig adres");
+  });
+});
+
+describe("quietRevertSendBlock (verification 579f763, info a)", () => {
+  test("the first revert without blockade retries in the next block; repeated ones wait 2, 4, 8, ... blocks, capped", () => {
+    expect(quietRevertSendBlock(1_000n, 0, 30)).toBeNull();
+    expect(quietRevertSendBlock(1_000n, 1, 30)).toBeNull();
+    expect([2, 3, 4, 5, 6, 7, 50, 2_000].map((n) => quietRevertSendBlock(1_000n, n, 30))).toEqual([
+      1_002n,
+      1_004n,
+      1_008n,
+      1_016n,
+      1_030n,
+      1_030n,
+      1_030n,
+      1_030n,
+    ]);
+    expect(quietRevertSendBlock(1_000n, 3, 1)).toBe(1_001n);
+  });
+
+  test("a direct execute of another party is no blockade, and with the wait the keeper no longer sends every block", () => {
+    // Elke poging revert on-chain; de hersimulatie slaagt en vóór ons stond alleen een directe execute (geen aanraker).
+    const verdict = onchainRevertVerdict({ kind: "passed" }, false, false);
+    expect(verdict.blockade).toBe(false);
+    expect(isTemporaryFailure(verdict.failure)).toBe(true);
+    // Simuleer 300 blokken (~10 minuten): hoeveel transacties verstuurt de keeper?
+    let sendFrom: bigint | null = null;
+    let reverts = 0;
+    let sent = 0;
+    for (let block = 1n; block <= 300n; block += 1n) {
+      if (sendFrom !== null && block < sendFrom) continue;
+      sent += 1;
+      reverts += 1;
+      const from = quietRevertSendBlock(block, reverts, 30);
+      if (from !== null && (sendFrom === null || from > sendFrom)) sendFrom = from;
+    }
+    // Vroeger 300 gerevertte transacties. Nu in de blokken 1, 2, 4, 12, 28 en daarna elke 30 blokken vanaf 44: 14.
+    expect(sent).toBe(14);
   });
 });
 
