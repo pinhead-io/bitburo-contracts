@@ -60,7 +60,7 @@ Method: the whole contract read line by line, Uniswap v3-core `d8b1c635` re-read
 | Keeper reward, `rewardTo` | Dropped. Gone with it: the L-D class, the tip cap based on the reward. |
 | Sell fee on max(received, expectedOut) | Dropped (A-7). |
 | Seven adjustable fields | Only `targetBps`. One minimum instead of two. Irreversible: another profile needs a new deployment. |
-| Registry, `owners`, `dueOwners`, cache | Dropped. The keeper serves the owners who appointed it; discovery goes through the `MandateSet` event. Registration spam (lead 9, final-review F-2) disappears with it. |
+| Registry, `owners`, `dueOwners`, cache | Dropped. The keeper serves the owners who appointed it; discovery goes through the `MandateSet` event. The on-chain registry and its spam (lead 9, final-review F-2) are gone; events naming a keeper can still be spammed, which the keeper script bounds by forgetting owners whose mandate does not name it. |
 | "Views never revert" | Dropped: `isDue` may revert when the feed fails; Multicall3 with `allowFailure` handles that. |
 | Fee straight to the treasury with try-transfer + `FeeRetained` | Replaced: the fee stays in the contract and `sweep(USDC)` collects it. |
 | Constructor with 10 error types | Decimals, a live `quote()` and a router with code; the deploy script asserts the rest. |
@@ -108,7 +108,17 @@ Outside the contract: users then hold dollars (exchange-rate risk for EUR users)
 
 **Why K.** The machinery protected an amount in the order of the contract's own fee against an attack that only exists because anyone may call. For that it cost: a mechanism without production precedent, a griefing vector the production keeper cannot counter, 21 accepted residual risks of which one turned out to be wrong (A-2), a functional bug (A-1) and a dependency on block timing that changes within a month. K trades that for one bounded, visible and stoppable point of trust, in less than a third of the code.
 
-## 5. How to reproduce
+## 5. As built
+
+The contract on this branch is route K with USDC, with these refinements over the sketch that was measured in §1:
+
+- Both directions swap into the contract and the output is measured as a balance difference; the contract itself requires it to lie within 55 bps of the Chainlink value in both directions (the router's `amountOutMinimum` is set as well, so too little fails early). The upper bound is what halts the contract during a USDC depeg or with a stuck feed.
+- `execute` returns the swap output, so a keeper simulates with `minAmountOut = 0` and then demands that amount minus a small tolerance.
+- The band comparison is exact, and a correction larger than the 10% cap is finished on the next days (`unfinished`), so the wallet reaches the target instead of stopping inside the band. Both came out of the independent review of the new code: [`REVIEW-NEW-CONTRACT.md`](REVIEW-NEW-CONTRACT.md).
+- Size: 215 nSLOC (was 613 + 44), runtime 6,583 bytes (was 17,544). Gas on the fork: buy ~198k, sell ~209k (was ~400k and ~425k). 84 tests; deep invariants 1000 x 100; Slither and Aderyn triage in [`static/triage.md`](static/triage.md).
+- Measured on a fork of block 51,425,248: the 10% run of a wallet of 1, 2 and 3 million USDC lands 0.20%, 0.35% and 0.49% below Chainlink; a 4 million wallet is refused by the bound.
+
+## 6. How to reproduce
 
 - A-1: check out `b3ca31a`, copy `poc/ChunkStopsAtBandEdge.t.sol` into `test/`, run `RUN_FORK=false ~/.foundry/bin/forge test --match-test test_poc_a1 -vv`.
 - A-2: check out `b3ca31a`, copy `poc/LargeRunsCurrentFeeFork.t.sol` and `audit/2026-09-17-self/poc/Leads17And18Fork.t.sol` into `test/`, run `FORK_BLOCK=51425248 ~/.foundry/bin/forge test --match-contract LargeRunsCurrentFeeForkPoC --match-test test_poc_a2 -vv`.

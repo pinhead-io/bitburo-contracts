@@ -1,0 +1,85 @@
+
+Detector: arbitrary-send-erc20
+Rebalancer.execute(address,uint256) (src/Rebalancer.sol#193-224) uses arbitrary from in transferFrom: USDC.safeTransferFrom(owner,address(this),amountIn) (src/Rebalancer.sol#210)
+Rebalancer.execute(address,uint256) (src/Rebalancer.sol#193-224) uses arbitrary from in transferFrom: CBBTC.safeTransferFrom(owner,address(this),amountIn) (src/Rebalancer.sol#217)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#arbitrary-from-in-transferfrom
+
+Detector: reentrancy-balance
+Reentrancy in Rebalancer._swap(IERC20,IERC20,uint256,uint256,uint256) (src/Rebalancer.sol#302-326):
+	External call allowing reentrancy:
+	- ROUTER.exactInputSingle(IV3SwapRouter.ExactInputSingleParams({tokenIn:address(tokenIn),tokenOut:address(tokenOut),fee:POOL_FEE,recipient:address(this),amountIn:amountIn,amountOutMinimum:minOut,sqrtPriceLimitX96:0})) (src/Rebalancer.sol#311-321)
+	Balance read before the call:
+	- balanceBefore = tokenOut.balanceOf(address(this)) (src/Rebalancer.sol#309)
+	Possible stale balance used after the call in a condition:
+	- received == 0 || received < minOut || received > expectedOut * (BPS + MAX_DEVIATION_BPS) / BPS (src/Rebalancer.sol#323)
+		- stale variable `received`
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities
+
+Detector: divide-before-multiply
+Rebalancer._plan(address,uint256,bool,uint256) (src/Rebalancer.sol#269-298) performs a multiplication on the result of a division:
+	- position = btc * price / CBBTC_UNIT (src/Rebalancer.sol#276)
+	- isBuy = position * BPS < total * targetBps (src/Rebalancer.sol#280)
+Rebalancer._plan(address,uint256,bool,uint256) (src/Rebalancer.sol#269-298) performs a multiplication on the result of a division:
+	- position = btc * price / CBBTC_UNIT (src/Rebalancer.sol#276)
+	- drift = position * BPS - total * targetBps (src/Rebalancer.sol#281)
+Rebalancer._plan(address,uint256,bool,uint256) (src/Rebalancer.sol#269-298) performs a multiplication on the result of a division:
+	- position = btc * price / CBBTC_UNIT (src/Rebalancer.sol#276)
+	- drift = total * targetBps - position * BPS (src/Rebalancer.sol#281)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#divide-before-multiply
+
+Detector: incorrect-equality
+Rebalancer._swap(IERC20,IERC20,uint256,uint256,uint256) (src/Rebalancer.sol#302-326) uses a dangerous strict equality:
+	- received == 0 || received < minOut || received > expectedOut * (BPS + MAX_DEVIATION_BPS) / BPS (src/Rebalancer.sol#323)
+Rebalancer.execute(address,uint256) (src/Rebalancer.sol#193-224) uses a dangerous strict equality:
+	- amountIn == 0 (src/Rebalancer.sol#203)
+Rebalancer.isDue(address) (src/Rebalancer.sol#169-179) uses a dangerous strict equality:
+	- retired || m.targetBps == 0 || block.timestamp < m.lastExecutedAt + INTERVAL (src/Rebalancer.sol#171)
+Rebalancer.isDue(address) (src/Rebalancer.sol#169-179) uses a dangerous strict equality:
+	- amountIn == 0 (src/Rebalancer.sol#174)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+
+Detector: unused-return
+Rebalancer._quote() (src/Rebalancer.sol#243-258) ignores return value by (None,sequencerAnswer,upSince,None,None) = SEQUENCER_FEED.latestRoundData() (src/Rebalancer.sol#244)
+Rebalancer._quote() (src/Rebalancer.sol#243-258) ignores return value by (None,answer,None,updatedAt,None) = FEED_CBBTC_USD.latestRoundData() (src/Rebalancer.sol#251)
+Rebalancer._swap(IERC20,IERC20,uint256,uint256,uint256) (src/Rebalancer.sol#302-326) ignores return value by ROUTER.exactInputSingle(IV3SwapRouter.ExactInputSingleParams({tokenIn:address(tokenIn),tokenOut:address(tokenOut),fee:POOL_FEE,recipient:address(this),amountIn:amountIn,amountOutMinimum:minOut,sqrtPriceLimitX96:0})) (src/Rebalancer.sol#311-321)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unused-return
+
+Detector: timestamp
+Rebalancer.isDue(address) (src/Rebalancer.sol#169-179) uses timestamp for comparisons
+	Dangerous comparisons:
+	- retired || m.targetBps == 0 || block.timestamp < m.lastExecutedAt + INTERVAL (src/Rebalancer.sol#171)
+	- amountIn == 0 (src/Rebalancer.sol#174)
+Rebalancer.execute(address,uint256) (src/Rebalancer.sol#193-224) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < m.lastExecutedAt + INTERVAL (src/Rebalancer.sol#199)
+	- amountIn == 0 (src/Rebalancer.sol#203)
+Rebalancer._quote() (src/Rebalancer.sol#243-258) uses timestamp for comparisons
+	Dangerous comparisons:
+	- sequencerAnswer != 0 || upSince == 0 || upSince > block.timestamp || block.timestamp - upSince < GRACE_PERIOD (src/Rebalancer.sol#247-248)
+	- updatedAt > block.timestamp || block.timestamp - updatedAt > MAX_FEED_AGE (src/Rebalancer.sol#253)
+Rebalancer._finishing(Rebalancer.Mandate) (src/Rebalancer.sol#262-264) uses timestamp for comparisons
+	Dangerous comparisons:
+	- m.unfinished && block.timestamp < m.lastExecutedAt + 2 * INTERVAL (src/Rebalancer.sol#263)
+Rebalancer._plan(address,uint256,bool,uint256) (src/Rebalancer.sol#269-298) uses timestamp for comparisons
+	Dangerous comparisons:
+	- isBuy = position * BPS < total * targetBps (src/Rebalancer.sol#280)
+	- ! finishing && drift <= total * BAND_BPS (src/Rebalancer.sol#282)
+	- value < MIN_TRADE_USDC (src/Rebalancer.sol#296)
+	- unfinished = drift >= value + MIN_TRADE_USDC (src/Rebalancer.sol#297)
+Rebalancer._swap(IERC20,IERC20,uint256,uint256,uint256) (src/Rebalancer.sol#302-326) uses timestamp for comparisons
+	Dangerous comparisons:
+	- received == 0 || received < minOut || received > expectedOut * (BPS + MAX_DEVIATION_BPS) / BPS (src/Rebalancer.sol#323)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+
+Detector: naming-convention
+Variable Rebalancer.USDC (src/Rebalancer.sol#45) is not in mixedCase
+Variable Rebalancer.CBBTC (src/Rebalancer.sol#46) is not in mixedCase
+Variable Rebalancer.ROUTER (src/Rebalancer.sol#47) is not in mixedCase
+Variable Rebalancer.FEED_CBBTC_USD (src/Rebalancer.sol#48) is not in mixedCase
+Variable Rebalancer.SEQUENCER_FEED (src/Rebalancer.sol#49) is not in mixedCase
+Variable Rebalancer.TREASURY (src/Rebalancer.sol#50) is not in mixedCase
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions
+. analyzed (13 contracts with 102 detectors), 25 result(s) found
+'forge clean' running (wd: /Users/arjan/Code/bitburo-contracts)
+'forge config --json' running
+'forge build --build-info --deny never --skip ./test/** ./script/** --force' running (wd: /Users/arjan/Code/bitburo-contracts)
