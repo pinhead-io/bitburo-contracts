@@ -21,7 +21,7 @@ interface ISwapRouter02 {
     function exactInputSingle(ExactInputSingleParams calldata p) external payable returns (uint256);
 }
 
-/// @dev Aanvaller: alles in één transactie (front-run, execute, back-run). Niets genest, dus nonReentrant helpt niet.
+/// @dev Attacker: all in one transaction (front-run, execute, back-run). Nothing nested, so nonReentrant does not help.
 contract Sandwicher {
     IERC20 constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 constant USDC = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
@@ -30,15 +30,15 @@ contract Sandwicher {
     function attack(Rebalancer r, address victim, uint256 pushEurc) external {
         EURC.approve(address(ROUTER), type(uint256).max);
         USDC.approve(address(ROUTER), type(uint256).max);
-        // 1. front-run: verkoop EURC voor USDC -> EURC goedkoper -> cbBTC duurder in EURC (spot omhoog)
+        // 1. front-run: sell EURC for USDC -> EURC cheaper -> cbBTC more expensive in EURC (spot up)
         if (pushEurc > 0) {
             ROUTER.exactInputSingle(
                 ISwapRouter02.ExactInputSingleParams(address(EURC), address(USDC), 500, address(this), pushEurc, 0, 0)
             );
         }
-        // 2. de run van het slachtoffer (koop: EURC -> USDC -> cbBTC) duwt EURC nog verder omlaag
+        // 2. the victim's run (buy: EURC -> USDC -> cbBTC) pushes EURC down even further
         r.execute(victim, address(this));
-        // 3. back-run: koop EURC terug met alle USDC
+        // 3. back-run: buy EURC back with all USDC
         if (pushEurc > 0) {
             ROUTER.exactInputSingle(
                 ISwapRouter02.ExactInputSingleParams(
@@ -48,9 +48,9 @@ contract Sandwicher {
         }
     }
 
-    /// @dev Verkooprichting: koop EURC met USDC (EURC duurder -> cbBTC goedkoper in EURC, spot omlaag),
-    ///      laat het slachtoffer cbBTC -> USDC -> EURC verkopen (duwt EURC verder omhoog), verkoop EURC terug.
-    ///      Alleen de EURC uit de push gaat terug naar USDC; de beloning blijft als EURC staan.
+    /// @dev Sell direction: buy EURC with USDC (EURC more expensive -> cbBTC cheaper in EURC, spot down),
+    ///      let the victim sell cbBTC -> USDC -> EURC (pushes EURC further up), sell EURC back.
+    ///      Only the EURC from the push goes back to USDC; the reward stays as EURC.
     function attackSell(Rebalancer r, address victim, uint256 pushUsdc) external {
         EURC.approve(address(ROUTER), type(uint256).max);
         USDC.approve(address(ROUTER), type(uint256).max);
@@ -83,9 +83,9 @@ contract Sandwicher {
     }
 }
 
-/// @notice Gedeelde fork-opzet voor de sandwich-tests: adressen, een vers Rebalancer-contract, de aanvaller en de
-///         helpers voor pushes en runs. Abstract en zonder tests, zodat `OracleSandwichTest` en
-///         `OracleLagSandwichTest` er elk alleen hun eigen tests bij zetten en niets dubbel draait.
+/// @notice Shared fork setup for the sandwich tests: addresses, a fresh Rebalancer contract, the attacker and the
+///         helpers for pushes and runs. Abstract and without tests, so that `OracleSandwichTest` and
+///         `OracleLagSandwichTest` each add only their own tests and nothing runs twice.
 abstract contract OracleSandwichBase is Test {
     IERC20 internal constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 internal constant CBBTC = IERC20(0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf);
@@ -107,7 +107,7 @@ abstract contract OracleSandwichBase is Test {
         if (!vm.envOr("RUN_FORK", true)) {
             vm.skip(true);
         }
-        // `FORK_BLOCK` pint een blok (review I-7), zodat de suite reproduceerbaar is; standaard het laatste.
+        // `FORK_BLOCK` pins a block (review I-7), so the suite is reproducible; defaults to the latest.
         string memory rpc = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
         uint256 forkBlock = vm.envOr("FORK_BLOCK", uint256(0));
         if (forkBlock == 0) vm.createSelectFork(rpc);
@@ -127,7 +127,7 @@ abstract contract OracleSandwichBase is Test {
             })
         );
         atk = new Sandwicher();
-        // Een vers blok: in het fork-blok zelf kan al een swap in de pools hebben gezeten.
+        // A fresh block: the fork block itself may already have contained a swap in the pools.
         _nextBlock();
     }
 
@@ -136,17 +136,17 @@ abstract contract OracleSandwichBase is Test {
         vm.warp(vm.getBlockTimestamp() + 2);
     }
 
-    /// @dev Kleine pushes (EURC verkocht in EURC/USDC): de pool beweegt gemeten ~1 bp per 200 EURC. Sinds de blokcheck
-    ///      slaagt een run alleen na een push die binnen de huidige tick blijft (anders PoolTouchedThisBlock). Hoeveel
-    ///      EURC dat is, hangt af van waar de koers in de tick staat; daarom is de laatste push berekend: half de ruimte
-    ///      tot de onderrand van de tick. (Was 900 EURC, ~4,5 bp: die gaat nu altijd over de tickgrens.) Zonder zo'n
-    ///      push zou elke aanval reverten en bewijst een test niets.
+    /// @dev Small pushes (EURC sold in EURC/USDC): the pool moves ~1 bp per 200 EURC (measured). Since the block check
+    ///      a run only succeeds after a push that stays within the current tick (else PoolTouchedThisBlock). How much
+    ///      EURC that is depends on where the price is in the tick; so the last push is computed: half the room
+    ///      to the lower edge of the tick. (Was 900 EURC, ~4.5 bp: that now always crosses the tick boundary.) Without
+    ///      such a push every attack would revert and a test would prove nothing.
     function _smallPushes() internal view returns (uint256[5] memory) {
         return [uint256(25e6), 100e6, 250e6, 500e6, _pushWithinTick(500_000)];
     }
 
-    /// @dev EURC-input die EURC/USDC `ppm` miljoenste van de ruimte tot P(tick) omlaag duwt, bij de in-range liquiditeit
-    ///      (binnen de tick is die constant): amount0 = L × 2^96 × (√P − √doel) / (√P × √doel), plus 0,05% poolfee.
+    /// @dev EURC input that pushes EURC/USDC down by `ppm` millionths of the room to P(tick), at the in-range liquidity
+    ///      (constant within the tick): amount0 = L × 2^96 × (√P − √target) / (√P × √target), plus 0.05% pool fee.
     function _pushWithinTick(uint256 ppm) internal view returns (uint256) {
         (uint160 s, int24 t,,,,,) = IUniswapV3Pool(POOL_EURC_USDC).slot0();
         uint160 edge = TickMath.getSqrtPriceAtTick(t);
@@ -157,8 +157,8 @@ abstract contract OracleSandwichBase is Test {
         return Math.max(net * 1e6 / (1e6 - 500), 1);
     }
 
-    /// @dev Idem voor de verkooprichting: USDC-input die EURC/USDC `ppm` van de ruimte tot P(tick + 1) omhoog duwt.
-    ///      amount1 = L × (√doel − √P) / 2^96, plus 0,05% poolfee. De laatste van de kleine USDC-pushes.
+    /// @dev Same for the sell direction: USDC input that pushes EURC/USDC up by `ppm` of the room to P(tick + 1).
+    ///      amount1 = L × (√target − √P) / 2^96, plus 0.05% pool fee. The last of the small USDC pushes.
     function _smallUsdcPushes() internal view returns (uint256[5] memory pushes) {
         pushes = [uint256(25e6), 100e6, 250e6, 500e6, 0];
         (uint160 s, int24 t,,,,,) = IUniswapV3Pool(POOL_EURC_USDC).slot0();
@@ -177,7 +177,7 @@ abstract contract OracleSandwichBase is Test {
         vm.startPrank(victim);
         EURC.approve(address(r), type(uint256).max);
         CBBTC.approve(address(r), type(uint256).max);
-        // maxCorrection 100% -> correctie = drift * total = 80% van het EURC-saldo (de run kan kleiner zijn)
+        // maxCorrection 100% -> correction = drift * total = 80% of the EURC balance (the run can be smaller)
         r.setParams(
             Rebalancer.Params({
                 active: true,
@@ -192,7 +192,7 @@ abstract contract OracleSandwichBase is Test {
         vm.stopPrank();
     }
 
-    /// @dev Grootste push (EURC verkocht in de EURC/USDC-pool) waarbij quoteChecked nog slaagt.
+    /// @dev Largest push (EURC sold in the EURC/USDC pool) at which quoteChecked still succeeds.
     function _maxPushWithinDeviation() internal returns (uint256 push) {
         uint256 lo = 0;
         uint256 hi = 200_000e6;
@@ -210,9 +210,9 @@ abstract contract OracleSandwichBase is Test {
         push = lo;
     }
 
-    /// @return ok          Of de aanval (push, execute, terugruil) slaagde.
-    /// @return attackerPnl EURC-resultaat van de aanvaller, inclusief de beloning.
-    /// @return victimBtc   cbBTC van het slachtoffer na afloop.
+    /// @return ok          Whether the attack (push, execute, swap back) succeeded.
+    /// @return attackerPnl EURC result of the attacker, including the reward.
+    /// @return victimBtc   cbBTC of the victim afterwards.
     function _run(uint256 victimEurc, uint16 slippageBps, uint256 push)
         internal
         returns (bool ok, int256 attackerPnl, uint256 victimBtc)
@@ -231,8 +231,8 @@ abstract contract OracleSandwichBase is Test {
         victimBtc = CBBTC.balanceOf(victim);
     }
 
-    /// @dev Pushes binnen het blokvenster: minstens één aanval moet slagen, en geen enkele levert de aanvaller meer
-    ///      op dan de beloning die een eerlijke aanroeper ook krijgt.
+    /// @dev Pushes within the block window: at least one attack must succeed, and none yields the attacker more
+    ///      than the reward that an honest caller also gets.
     function _assertSmallPushesUnprofitable(uint256 victimEurc, uint16 slippageBps) internal {
         uint256[5] memory pushes = _smallPushes();
         uint256 okCount;
@@ -240,19 +240,19 @@ abstract contract OracleSandwichBase is Test {
             uint256 snap = vm.snapshotState();
             (bool ok, int256 pnl,) = _run(victimEurc, slippageBps, pushes[i]);
             vm.revertToState(snap);
-            console.log("push binnen venster (EURC):", pushes[i], " geslaagd:", ok);
+            console.log("push within window (EURC):", pushes[i], " succeeded:", ok);
             console.logInt(pnl);
             if (!ok) continue;
             okCount++;
-            assertLe(pnl, int256(REWARD), "aanvaller verdient meer dan de beloning");
+            assertLe(pnl, int256(REWARD), "attacker earns more than the reward");
         }
-        assertGt(okCount, 0, "geen push binnen het venster geslaagd: de test bewijst dan niets");
+        assertGt(okCount, 0, "no push within the window succeeded: the test then proves nothing");
     }
 }
 
-/// @notice Fork-regressies voor audit M-1 (zelf-sandwich) en L-3 (DoS door de spot te duwen). Sinds het blokvenster
-///         (MAX_BLOCK_MOVE_BPS) reverten pushes tot de spotcheck vóór de swap; pushes binnen het venster slagen, maar
-///         leveren de aanvaller niet meer op dan de beloning die een eerlijke aanroeper ook krijgt. Overslaan met
+/// @notice Fork regressions for audit M-1 (self-sandwich) and L-3 (DoS by pushing the spot). Since the block window
+///         (MAX_BLOCK_MOVE_BPS) pushes up to the spot check revert before the swap; pushes within the window succeed,
+///         but yield the attacker no more than the reward that an honest caller also gets. Skip with
 ///         RUN_FORK=false.
 contract OracleSandwichTest is OracleSandwichBase {
     function test_poc_selfSandwich_10k_slippage100() public {
@@ -260,41 +260,41 @@ contract OracleSandwichTest is OracleSandwichBase {
         uint256 spot0 = r.spot();
         console.log("oracle EURC/cbBTC:", oracle, " spot:", spot0);
         uint256 push = _maxPushWithinDeviation();
-        console.log("max push binnen 50 bps (EURC):", push);
+        console.log("max push within 50 bps (EURC):", push);
 
-        // baseline zonder manipulatie
+        // baseline without manipulation
         uint256 snap = vm.snapshotState();
         (,, uint256 fairBtc) = _run(12_500e6, 100, 0);
         vm.revertToState(snap);
-        console.log("slachtoffer cbBTC zonder aanval:", fairBtc);
+        console.log("victim cbBTC without attack:", fairBtc);
 
         (bool ok, int256 pnl, uint256 btc) = _run(12_500e6, 100, push);
-        console.log("aanval geslaagd:", ok);
-        console.log("aanvaller PnL (EURC 6 dec):");
+        console.log("attack succeeded:", ok);
+        console.log("attacker PnL (EURC 6 dec):");
         console.logInt(pnl);
-        console.log("slachtoffer cbBTC met aanval:", btc);
+        console.log("victim cbBTC with attack:", btc);
 
-        // Omgekeerd ten opzichte van de oorspronkelijke PoC. Die bewees dat de aanval loonde (audit M-1: +27 EURC bij
-        // een run van 10k). De push tot de spotcheck (~50 bp) ligt ver buiten het blokvenster, dus de run revert al
-        // vóór de swap. Zonder push slaagt dezelfde owner wel, met een run die door de liquiditeit begrensd is.
-        assertGt(fairBtc, 0, "baseline zonder push slaagt niet: de test bewijst dan niets");
-        assertFalse(ok, "sandwich komt er weer doorheen");
-        assertLe(pnl, 0, "sandwich is weer winstgevend");
-        assertEq(btc, 0, "slachtoffer handelde toch op de geduwde koers");
+        // Reversed relative to the original PoC. That proved the attack paid off (audit M-1: +27 EURC on
+        // a run of 10k). The push up to the spot check (~50 bp) is far outside the block window, so the run reverts
+        // before the swap already. Without push the same owner does succeed, with a run limited by the liquidity.
+        assertGt(fairBtc, 0, "baseline without push does not succeed: the test then proves nothing");
+        assertFalse(ok, "sandwich gets through again");
+        assertLe(pnl, 0, "sandwich is profitable again");
+        assertEq(btc, 0, "victim still traded at the pushed price");
         vm.revertToState(snap);
         _assertSmallPushesUnprofitable(12_500e6, 100);
     }
 
-    /// @dev Was 30 bps in de oorspronkelijke PoC; `MIN_SLIPPAGE_BPS` is sinds de verharding 60 (audit L-2),
-    ///      dus dit is de krapste stand die een gebruiker nog kan kiezen.
+    /// @dev Was 30 bps in the original PoC; `MIN_SLIPPAGE_BPS` has been 60 since the hardening (audit L-2),
+    ///      so this is the tightest setting a user can still choose.
     function test_poc_selfSandwich_10k_slippage60() public {
         uint256 push = _maxPushWithinDeviation();
         uint256 snap = vm.snapshotState();
         (bool ok, int256 pnl, uint256 btc) = _run(12_500e6, 60, push);
-        console.log("slippage 60 bps (krapst toegestaan): aanval geslaagd:", ok);
+        console.log("slippage 60 bps (tightest allowed): attack succeeded:", ok);
         console.logInt(pnl);
-        assertFalse(ok, "sandwich met maximale push komt door");
-        assertLe(pnl, 0, "sandwich winstgevend");
+        assertFalse(ok, "sandwich with maximum push gets through");
+        assertLe(pnl, 0, "sandwich profitable");
         assertEq(btc, 0);
         vm.revertToState(snap);
         _assertSmallPushesUnprofitable(12_500e6, 60);
@@ -304,20 +304,20 @@ contract OracleSandwichTest is OracleSandwichBase {
         uint256 push = _maxPushWithinDeviation();
         uint256 snap = vm.snapshotState();
         (bool ok, int256 pnl,) = _run(1_250e6, 100, push);
-        console.log("run 1k: geslaagd:", ok);
+        console.log("run 1k: succeeded:", ok);
         console.logInt(pnl);
-        assertFalse(ok, "sandwich met maximale push komt door");
-        assertLe(pnl, 0, "sandwich winstgevend");
+        assertFalse(ok, "sandwich with maximum push gets through");
+        assertLe(pnl, 0, "sandwich profitable");
         vm.revertToState(snap);
         _assertSmallPushesUnprofitable(1_250e6, 100);
     }
 
-    /// @dev Testgat execute 4 (EX-03): op de echte route, met de EURC/USDC-pool vooraf voorgeschoven, krijgt de owner
-    ///      voor elke run die slaagt minstens de oraclewaarde minus FEE_BPS + maxSlippageBps. De push gebeurt in het
-    ///      vorige blok, tot de spotcheck (daar ziet het blokvenster niets en beschermt alleen de spotcheck), of klein
-    ///      in hetzelfde blok. Runs die een check niet halen tellen niet; minstens één geduwde run moet slagen. De run
-    ///      kan door de liquiditeit kleiner zijn dan de correctie van 1.000 EURC; de grens geldt voor wat werkelijk
-    ///      verhandeld is.
+    /// @dev Test gap execute 4 (EX-03): on the real route, with the EURC/USDC pool pushed beforehand, the owner gets,
+    ///      for every run that succeeds, at least the oracle value minus FEE_BPS + maxSlippageBps. The push happens in
+    ///      the previous block, up to the spot check (there the block window sees nothing and only the spot check
+    ///      protects), or small in the same block. Runs that fail a check do not count; at least one pushed run must
+    ///      succeed. The run can be smaller than the 1,000 EURC correction due to the liquidity; the bound applies to
+    ///      what is actually traded.
     function test_fork_lossPerRunBoundedUnderSpotPush() public {
         uint256 oracle = r.quote();
         uint256 maxPush = _maxPushWithinDeviation();
@@ -342,19 +342,19 @@ contract OracleSandwichTest is OracleSandwichBase {
                     uint256 worstSats = Math.mulDiv(fairSats, 10_000 - r.FEE_BPS() - slippages[s], 10_000);
                     uint256 received = CBBTC.balanceOf(victim);
                     console.log("slippage:", slippages[s], " push:", push);
-                    console.log("  zelfde blok:", sameBlock, " verhandeld EURC:", spent);
-                    console.log("  ontvangen sats:", received, " ondergrens:", worstSats);
-                    assertGe(received + 1, worstSats, "verlies boven fee + maxSlippage");
+                    console.log("  same block:", sameBlock, " traded EURC:", spent);
+                    console.log("  received sats:", received, " lower bound:", worstSats);
+                    assertGe(received + 1, worstSats, "loss above fee + maxSlippage");
                     if (push > 0) pushedRunsSucceeded++;
                 }
                 vm.revertToState(snap);
             }
         }
-        assertGt(pushedRunsSucceeded, 0, "geen enkele geduwde run geslaagd: de test bewijst niets");
+        assertGt(pushedRunsSucceeded, 0, "not a single pushed run succeeded: the test proves nothing");
     }
 
-    /// @dev L-3: een push > 50 bps laat isDue/dueOwners leeg en execute reverten, zolang de pool geduwd blijft. Zet
-    ///      arbitrage (hier de aanvaller zelf) de pool terug, dan is de owner een blok later weer due.
+    /// @dev L-3: a push > 50 bps leaves isDue/dueOwners empty and makes execute revert while the pool stays pushed. If
+    ///      arbitrage (here the attacker itself) resets the pool, the owner is due again one block later.
     function test_poc_dosBySpotPush() public {
         _fundVictim(1_250e6, 100);
         (bool due,) = r.isDue(victim);
@@ -363,41 +363,41 @@ contract OracleSandwichTest is OracleSandwichBase {
         deal(address(EURC), address(atk), push);
         atk.pushOnly(push);
         (due,) = r.isDue(victim);
-        assertFalse(due, "isDue nog true");
+        assertFalse(due, "isDue still true");
         assertEq(r.dueOwners(0, 10).length, 0);
         vm.expectRevert();
         r.execute(victim, address(this));
         uint256 usdcOut = USDC.balanceOf(address(atk));
-        console.log("DoS-push (EURC):", push, " USDC ontvangen:", usdcOut);
+        console.log("DoS push (EURC):", push, " USDC received:", usdcOut);
 
-        // Ook een blok later nog geblokkeerd: de spotcheck ziet de push nog.
+        // Still blocked one block later: the spot check still sees the push.
         _nextBlock();
         (due,) = r.isDue(victim);
-        assertFalse(due, "push over blokken heen blokkeert niet meer");
+        assertFalse(due, "push across blocks no longer blocks");
 
         atk.pushUsdcOnly(usdcOut);
-        console.log("kosten DoS voor de aanvaller (EURC 6 dec):", push - EURC.balanceOf(address(atk)));
+        console.log("DoS cost for the attacker (EURC 6 dec):", push - EURC.balanceOf(address(atk)));
         _nextBlock();
         (due,) = r.isDue(victim);
-        assertTrue(due, "na herstel van de pool niet weer due");
+        assertTrue(due, "not due again after the pool recovered");
         r.execute(victim, address(this));
     }
 
-    /// @dev Sweep: run-grootte x push-grootte, slippage 100 bps. Geen enkele geslaagde aanval levert de aanvaller meer
-    ///      op dan de beloning, en minstens één push binnen het venster slaagt.
+    /// @dev Sweep: run size x push size, slippage 100 bps. No successful attack yields the attacker more
+    ///      than the reward, and at least one push within the window succeeds.
     function test_poc_sweep() public {
         uint256 oracle = r.quote();
         uint256 maxPush = _maxPushWithinDeviation();
         uint256[5] memory smallPushes = _smallPushes();
         console.log("oracle:", oracle, " spot:", r.spot());
-        console.log("maxPush binnen 50 bps:", maxPush);
+        console.log("maxPush within 50 bps:", maxPush);
         uint256[4] memory runs = [uint256(1_250e6), 3_125e6, 6_250e6, 12_500e6];
         uint256 okCount;
         for (uint256 k = 0; k < runs.length; k++) {
             uint256 snap0 = vm.snapshotState();
             (bool okBase,, uint256 fairBtc) = _run(runs[k], 100, 0);
             vm.revertToState(snap0);
-            console.log("---- correctie EURC:", runs[k] * 8 / 10, " baseline ok:", okBase);
+            console.log("---- correction EURC:", runs[k] * 8 / 10, " baseline ok:", okBase);
             console.log("     baseline cbBTC:", fairBtc);
             for (uint256 f = 0; f < 10; f++) {
                 uint256 push = f < 5 ? smallPushes[f] : maxPush * (f - 4) / 5;
@@ -406,17 +406,17 @@ contract OracleSandwichTest is OracleSandwichBase {
                 if (ok) {
                     okCount++;
                     console.log("     push:", push, " victim cbBTC:", btc);
-                    console.log("       PnL aanvaller incl. beloning (EURC):");
+                    console.log("       attacker PnL incl. reward (EURC):");
                     console.logInt(pnl);
-                    assertLe(pnl, int256(REWARD), "aanvaller verdient meer dan de beloning");
+                    assertLe(pnl, int256(REWARD), "attacker earns more than the reward");
                 } else {
-                    console.log("     push:", push, " -> execute faalt");
-                    assertEq(btc, 0, "mislukte aanval liet toch een run staan");
+                    console.log("     push:", push, " -> execute fails");
+                    assertEq(btc, 0, "failed attack still left a run");
                 }
                 vm.revertToState(snap);
             }
         }
-        assertGt(okCount, 0, "geen enkele aanval geslaagd: de test bewijst dan niets");
+        assertGt(okCount, 0, "not a single attack succeeded: the test then proves nothing");
     }
 
     function _maxUsdcPushWithinDeviation() internal returns (uint256 push) {
@@ -435,15 +435,15 @@ contract OracleSandwichTest is OracleSandwichBase {
         push = lo;
     }
 
-    /// @dev Verkooprun: slachtoffer heeft alleen cbBTC, maxCorrection 100% -> correctie 20% van de waarde. De
-    ///      aanvaller verdient met geen enkele push (binnen het venster of tot de spotcheck) USDC; de beloning houdt
-    ///      hij apart als EURC. Minstens één geduwde aanval slaagt.
+    /// @dev Sell run: victim holds only cbBTC, maxCorrection 100% -> correction 20% of the value. The
+    ///      attacker earns no USDC with any push (within the window or up to the spot check); it keeps the reward
+    ///      separately as EURC. At least one pushed attack succeeds.
     function test_poc_sweepSell() public {
         uint256 oracle = r.quote();
         uint256 maxPush = _maxUsdcPushWithinDeviation();
-        console.log("maxPush USDC binnen 50 bps:", maxPush);
-        uint256[5] memory smallPushes = _smallUsdcPushes(); // ~1 USDC per EURC: dezelfde orde; de laatste binnen de tick
-        uint256[3] memory btcs = [uint256(7_500_000), 18_750_000, 37_500_000]; // ~5k, 12.5k, 25k EURC waarde
+        console.log("maxPush USDC within 50 bps:", maxPush);
+        uint256[5] memory smallPushes = _smallUsdcPushes(); // ~1 USDC per EURC: same order; the last one within the tick
+        uint256[3] memory btcs = [uint256(7_500_000), 18_750_000, 37_500_000]; // ~5k, 12.5k, 25k EURC value
         uint256 okCount;
         for (uint256 k = 0; k < btcs.length; k++) {
             deal(address(CBBTC), victim, btcs[k]);
@@ -467,7 +467,7 @@ contract OracleSandwichTest is OracleSandwichBase {
             uint256 fairEurc = EURC.balanceOf(victim);
             vm.revertToState(snap0);
             console.log(
-                "---- verkoop, EURC-waarde positie:", btcs[k] * oracle / 1e8, " baseline EURC ontvangen:", fairEurc
+                "---- sell, EURC value of position:", btcs[k] * oracle / 1e8, " baseline EURC received:", fairEurc
             );
             for (uint256 f = 0; f < 10; f++) {
                 uint256 push = f < 5 ? smallPushes[f] : maxPush * (f - 4) / 5;
@@ -477,18 +477,18 @@ contract OracleSandwichTest is OracleSandwichBase {
                 try atk.attackSell(r, victim, push) {
                     okCount++;
                     int256 pnl = int256(USDC.balanceOf(address(atk))) - int256(usdcBefore);
-                    console.log("     push USDC:", push, " EURC slachtoffer:", EURC.balanceOf(victim));
-                    console.log("       PnL aanvaller excl. beloning (USDC):");
+                    console.log("     push USDC:", push, " EURC victim:", EURC.balanceOf(victim));
+                    console.log("       attacker PnL excl. reward (USDC):");
                     console.logInt(pnl);
-                    assertLe(pnl, 0, "aanvaller verdient USDC aan de sandwich");
-                    assertLe(EURC.balanceOf(address(atk)), REWARD, "aanvaller hield meer EURC over dan de beloning");
+                    assertLe(pnl, 0, "attacker earns USDC from the sandwich");
+                    assertLe(EURC.balanceOf(address(atk)), REWARD, "attacker kept more EURC than the reward");
                 } catch {
-                    console.log("     push USDC:", push, " -> execute faalt");
+                    console.log("     push USDC:", push, " -> execute fails");
                 }
                 vm.revertToState(snap);
             }
             deal(address(CBBTC), victim, 0);
         }
-        assertGt(okCount, 0, "geen enkele aanval geslaagd: de test bewijst dan niets");
+        assertGt(okCount, 0, "not a single attack succeeded: the test then proves nothing");
     }
 }

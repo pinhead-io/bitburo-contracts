@@ -3,11 +3,11 @@ pragma solidity 0.8.37;
 
 import {IUniswapV3Factory} from "../../src/interfaces/IUniswapV3Factory.sol";
 
-/// @notice Uniswap v3-factory-nabootsing: een instelbaar register van pools per tokenpaar en fee-tier.
+/// @notice Uniswap v3 factory imitation: a configurable registry of pools per token pair and fee tier.
 contract MockUniswapV3Factory is IUniswapV3Factory {
     mapping(address tokenA => mapping(address tokenB => mapping(uint24 fee => address pool))) public getPool;
 
-    /// @notice Registreert `pool` voor {tokenA, tokenB} en `fee`, in beide volgordes (zoals de echte factory).
+    /// @notice Registers `pool` for {tokenA, tokenB} and `fee`, in both orders (like the real factory).
     function setPool(address tokenA, address tokenB, uint24 fee, address pool) external {
         getPool[tokenA][tokenB][fee] = pool;
         getPool[tokenB][tokenA][fee] = pool;

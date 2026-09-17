@@ -9,7 +9,7 @@ import {TickMath} from "../src/libraries/TickMath.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
 import {RebalancerTestBase} from "./Rebalancer.t.sol";
 
-/// @dev Maakt het blokvenster leesbaar voor de randtests.
+/// @dev Makes the block window readable for the edge tests.
 contract RebalancerWindowHarness is Rebalancer {
     constructor(Deployment memory d) Rebalancer(d) {}
 
@@ -27,7 +27,7 @@ contract RebalancerWindowHarness is Rebalancer {
     }
 }
 
-/// @notice Unit-tests voor audit M-1: blokvenster, runomvang uit de liquiditeit en rondes in delen.
+/// @notice Unit tests for audit M-1: block window, run size from the liquidity, and rounds in chunks.
 contract BlockWindowTest is RebalancerTestBase {
     RebalancerWindowHarness internal h;
 
@@ -36,7 +36,7 @@ contract BlockWindowTest is RebalancerTestBase {
         h = new RebalancerWindowHarness(_deployment());
     }
 
-    // ─── Hulpfuncties ───────────────────────────────────────────────────────────────────────────────────────
+    // ─── Helpers ────────────────────────────────────────────────────────────────────────────────────────────
 
     function _params(uint16 maxCorrectionBps, uint64 minTrade) internal pure returns (Rebalancer.Params memory p) {
         p = _defaultParams();
@@ -63,8 +63,8 @@ contract BlockWindowTest is RebalancerTestBase {
         feedEurc.set(1e8, vm.getBlockTimestamp(), vm.getBlockTimestamp());
     }
 
-    /// @dev Grootste EURC-input in de EURC/USDC-pool (koop, token0 erin) volgens de formule uit de specificatie,
-    ///      onafhankelijk van het contract uitgerekend: L × 2^96 × (√P − √lower) / (√P × √lower) × 75%.
+    /// @dev Largest EURC input into the EURC/USDC pool (buy, token0 in) per the formula from the specification,
+    ///      computed independently of the contract: L × 2^96 × (√P − √lower) / (√P × √lower) × 75%.
     function _expectedMaxBuy(uint128 liquidity) internal view returns (uint256) {
         (, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
         uint256 s = poolEurcUsdc.sqrtPriceX96();
@@ -72,7 +72,7 @@ contract BlockWindowTest is RebalancerTestBase {
         return amount * 7500 / 10_000;
     }
 
-    /// @dev Idem voor verkopen: USDC (token1) erin tot `upper`, bij koers 1:1 gelijk aan EURC.
+    /// @dev Same for sells: USDC (token1) in up to `upper`, equal to EURC at a 1:1 price.
     function _expectedMaxSell(uint128 liquidity) internal view returns (uint256) {
         (, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
         uint256 s = poolEurcUsdc.sqrtPriceX96();
@@ -85,35 +85,35 @@ contract BlockWindowTest is RebalancerTestBase {
         remaining = rem;
     }
 
-    // ─── Venster ────────────────────────────────────────────────────────────────────────────────────────────
+    // ─── Window ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// @notice Het venster ligt conservatief binnen MAX_BLOCK_MOVE_BPS van beide randen van de begintick, en is op
-    ///         afronding na even breed: lower² ≥ P(t+1)² × (1 − 6 bp) en upper² ≤ P(t)² × (1 + 6 bp).
+    /// @notice The window lies conservatively within MAX_BLOCK_MOVE_BPS of both edges of the starting tick, and is, up
+    ///         to rounding, equally wide: lower² ≥ P(t+1)² × (1 − 6 bp) and upper² ≤ P(t)² × (1 + 6 bp).
     function testFuzz_window_conservativeAndTight(int24 tick, uint256 frac) public {
         tick = int24(bound(tick, -200_000, 200_000));
         frac = bound(frac, 0, 1e18);
         uint256 p0 = TickMath.getSqrtPriceAtTick(tick);
         uint256 p1 = TickMath.getSqrtPriceAtTick(tick + 1);
         poolEurcUsdc.setSqrtPriceX96(uint160(p0 + Math.mulDiv(p1 - p0 - 1, frac, 1e18)));
-        assertEq(poolEurcUsdc.tick(), tick, "opzet: tick");
+        assertEq(poolEurcUsdc.tick(), tick, "setup: tick");
 
         (bool touched, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
         assertFalse(touched);
-        // P(t) uit TickMath is naar boven afgerond; de echte P(t) ligt boven p0 - 1.
-        assertGe(uint256(w.lower) * w.lower * 10_000, p1 * p1 * 9994, "ondergrens te ruim");
-        assertLe(uint256(w.upper) * w.upper * 10_000, (p0 - 1) * (p0 - 1) * 10_006, "bovengrens te ruim");
+        // P(t) from TickMath is rounded up; the real P(t) is above p0 - 1.
+        assertGe(uint256(w.lower) * w.lower * 10_000, p1 * p1 * 9994, "lower bound too loose");
+        assertLe(uint256(w.upper) * w.upper * 10_000, (p0 - 1) * (p0 - 1) * 10_006, "upper bound too loose");
         uint256 tol = p1 / (1 << 96) + 3;
-        assertLe(w.lower, Math.sqrt(p1 * p1 * 9994 / 10_000) + tol, "ondergrens onnodig krap");
-        assertGe(w.upper + tol, Math.sqrt((p0 - 1) * (p0 - 1) * 10_006 / 10_000), "bovengrens onnodig krap");
+        assertLe(w.lower, Math.sqrt(p1 * p1 * 9994 / 10_000) + tol, "lower bound needlessly tight");
+        assertGe(w.upper + tol, Math.sqrt((p0 - 1) * (p0 - 1) * 10_006 / 10_000), "upper bound needlessly tight");
         assertEq(w.sqrtPriceX96, poolEurcUsdc.sqrtPriceX96());
     }
 
-    /// @notice Aan de randen van het tickbereik kapt de bovengrens niet af (geen uint160-overloop) en revert niets.
+    /// @notice At the edges of the tick range the upper bound is not clipped (no uint160 overflow) and nothing reverts.
     function test_window_extremeTicksDoNotOverflow() public {
         poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MAX_TICK - 1));
         (bool touched, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
         assertFalse(touched);
-        assertEq(w.upper, type(uint160).max, "bovengrens afgekapt");
+        assertEq(w.upper, type(uint160).max, "upper bound clipped");
         assertLe(w.lower, poolEurcUsdc.sqrtPriceX96());
 
         poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MIN_TICK));
@@ -121,18 +121,18 @@ contract BlockWindowTest is RebalancerTestBase {
         assertFalse(touched);
         assertGe(w.upper, poolEurcUsdc.sqrtPriceX96());
 
-        // Tick MAX_TICK kan een echte pool niet hebben; dan een leeg venster in plaats van een revert in TickMath.
+        // A real pool cannot have tick MAX_TICK; then an empty window instead of a revert in TickMath.
         poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(TickMath.MAX_TICK));
-        assertEq(poolEurcUsdc.tick(), TickMath.MAX_TICK, "opzet");
+        assertEq(poolEurcUsdc.tick(), TickMath.MAX_TICK, "setup");
         (touched, w) = h.window(poolEurcUsdc);
         assertFalse(touched);
-        assertGt(w.lower, w.upper, "venster niet leeg");
+        assertGt(w.lower, w.upper, "window not empty");
     }
 
-    /// @notice Blokcheck: een observatie van dit blok op `observationIndex` (bij elke index en cardinality, ook 1)
-    ///         markeert de pool als aangeraakt; een oudere observatie niet, en dan volgt het venster uit slot0.tick.
-    ///         Vervangt de fuzz-test op de afleiding van de begintick uit twee observaties: die afleiding is weg,
-    ///         want zonder observatie in dit blok is slot0.tick de begintick, en met een observatie is er geen run.
+    /// @notice Block check: an observation of this block at `observationIndex` (at any index and cardinality, also 1)
+    ///         marks the pool as touched; an older observation does not, and then the window follows from slot0.tick.
+    ///         Replaces the fuzz test on deriving the starting tick from two observations: that derivation is gone,
+    ///         because without an observation in this block slot0.tick is the start tick, and with one there is no run.
     function testFuzz_window_observationThisBlockMeansTouched(int24 tick, uint16 index, uint16 cardinality, uint32 age)
         public
     {
@@ -147,42 +147,42 @@ contract BlockWindowTest is RebalancerTestBase {
 
         poolEurcUsdc.setObservation(index, uint32(block.timestamp) - age, 0, true);
         (bool touched, Rebalancer.Window memory w) = h.window(poolEurcUsdc);
-        assertFalse(touched, "oude observatie telt als aangeraakt");
-        assertEq(w.lower, ref.lower, "lower volgt niet slot0.tick");
-        assertEq(w.upper, ref.upper, "upper volgt niet slot0.tick");
-        assertLt(w.lower, TickMath.getSqrtPriceAtTick(tick), "venster niet rond slot0.tick");
-        assertGt(w.upper, TickMath.getSqrtPriceAtTick(tick + 1), "venster niet rond slot0.tick");
+        assertFalse(touched, "old observation counts as touched");
+        assertEq(w.lower, ref.lower, "lower does not follow slot0.tick");
+        assertEq(w.upper, ref.upper, "upper does not follow slot0.tick");
+        assertLt(w.lower, TickMath.getSqrtPriceAtTick(tick), "window not around slot0.tick");
+        assertGt(w.upper, TickMath.getSqrtPriceAtTick(tick + 1), "window not around slot0.tick");
 
         poolEurcUsdc.setObservation(index, uint32(block.timestamp), 0, true);
         (touched,) = h.window(poolEurcUsdc);
-        assertTrue(touched, "observatie van dit blok niet gezien");
+        assertTrue(touched, "observation of this block not seen");
     }
 
-    /// @notice Een swap binnen de tick schrijft geen observatie en laat het venster staan; een swap die de tick
-    ///         verandert (mock schrijft zoals Uniswap) raakt de pool aan. Een volgend blok begint op de nieuwe koers.
+    /// @notice A swap within the tick writes no observation and leaves the window as is; a swap that changes the
+    ///         tick (mock writes like Uniswap) touches the pool. A next block starts at the new price.
     function test_window_swapWithinTickKeepsWindow_tickChangeTouches() public {
         (, Rebalancer.Window memory before) = h.window(poolEurcUsdc);
-        poolEurcUsdc.swapToPrice(1e6, 1.00005e6); // 0,5 bp omhoog, binnen tick 0
-        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
+        poolEurcUsdc.swapToPrice(1e6, 1.00005e6); // 0.5 bp up, within tick 0
+        assertEq(poolEurcUsdc.tick(), 0, "setup: tick");
         (bool touched, Rebalancer.Window memory within) = h.window(poolEurcUsdc);
-        assertFalse(touched, "swap binnen de tick telt als aangeraakt");
+        assertFalse(touched, "swap within the tick counts as touched");
         assertEq(within.lower, before.lower);
         assertEq(within.upper, before.upper);
 
-        poolEurcUsdc.swapToPrice(1e6, 1.002e6); // 20 bp: tickwissel
+        poolEurcUsdc.swapToPrice(1e6, 1.002e6); // 20 bp: tick change
         (touched,) = h.window(poolEurcUsdc);
-        assertTrue(touched, "tickwissel niet gezien");
+        assertTrue(touched, "tick change not seen");
 
         _nextBlock();
         Rebalancer.Window memory next;
         (touched, next) = h.window(poolEurcUsdc);
-        assertFalse(touched, "volgend blok nog aangeraakt");
+        assertFalse(touched, "next block still touched");
         assertGt(next.upper, before.upper);
     }
 
-    /// @notice De constructor eist geen minimum aantal observaties meer: de blokcheck leest alleen de laatste.
-    ///         (Vervangt `test_constructor_rejectsPoolWithCardinalityBelowTwo`; die check was alleen nodig voor de
-    ///         afleiding van de begintick uit de vorige observatie.)
+    /// @notice The constructor no longer needs a minimum count of observations: the block check reads the last one.
+    ///         (Replaces `test_constructor_rejectsPoolWithCardinalityBelowTwo`; that check was only needed for
+    ///         deriving the starting tick from the previous observation.)
     function test_constructor_acceptsCardinalityOne() public {
         poolEurcUsdc.setObservationCardinality(1);
         poolUsdcCbbtc.setObservationCardinality(1);
@@ -190,9 +190,9 @@ contract BlockWindowTest is RebalancerTestBase {
         assertEq(address(fresh.POOL_EURC_USDC()), address(poolEurcUsdc));
     }
 
-    /// @notice Een observatie van dit blok in een van beide pools: execute revert vóór de swap met
-    ///         PoolTouchedThisBlock, isDue en dueOwners melden niets. Een volgend blok wel. Ook bij cardinality 1.
-    ///         (Vervangt `test_blockStartUnknown_revertsAndNotDue`: een onbekende begintick bestaat niet meer.)
+    /// @notice An observation of this block in either pool: execute reverts before the swap with
+    ///         PoolTouchedThisBlock, isDue and dueOwners report nothing. A next block does. Also at cardinality 1.
+    ///         (Replaces `test_blockStartUnknown_revertsAndNotDue`: an unknown starting tick no longer exists.)
     function test_poolTouchedThisBlock_revertsAndNotDue() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         MockUniswapV3Pool[2] memory pools = [poolEurcUsdc, poolUsdcCbbtc];
@@ -205,9 +205,9 @@ contract BlockWindowTest is RebalancerTestBase {
             assertEq(r.dueOwners(0, 10).length, 0, "dueOwners");
             vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, pools[i]));
             r.execute(alice, keeper);
-            assertEq(router.calls(), 0, "swap gedaan");
+            assertEq(router.calls(), 0, "swap done");
             assertEq(r.lastExecutedAt(alice), 0);
-            pools[i].setObservation(0, 1, 0, true); // weer een oude observatie
+            pools[i].setObservation(0, 1, 0, true); // an old observation again
         }
         _nextBlock();
         (bool dueNext,) = r.isDue(alice);
@@ -215,29 +215,29 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
-    /// @notice De selector die wekkers als tijdelijke revert herkennen.
+    /// @notice The selector that keepers recognise as a temporary revert.
     function test_poolTouchedThisBlock_selector() public pure {
         assertEq(Rebalancer.PoolTouchedThisBlock.selector, bytes4(keccak256("PoolTouchedThisBlock(address)")));
         assertEq(Rebalancer.PoolTouchedThisBlock.selector, bytes4(0x817a53db));
     }
 
-    // ─── Vooraf: pool in dit blok al bewogen ────────────────────────────────────────────────────────────────
+    // ─── Before: pool already moved in this block ──────────────────────────────────────────────────────────
 
-    /// @notice Een push van 7 bp in dit blok verandert de tick en raakt dus de blokcheck. Vóór de blokcheck strandde
-    ///         dit op het venster (BlockMoveExceeded); de weigering vooraf is nu strenger en heeft een eigen error.
+    /// @notice A push of 7 bp in this block changes the tick and so hits the block check. Before the block check this
+    ///         stranded on the window (BlockMoveExceeded); the upfront rejection is now stricter and has its own error.
     function test_execute_revertsPoolTouchedBeforeSwap() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
-        // 7 bp in dit blok (tegen de koop in, dus omhoog).
+        // 7 bp in this block (against the buy, so up).
         poolEurcUsdc.swapToPrice(1e6, 1.0007e6);
         (bool due,) = r.isDue(alice);
         assertFalse(due, "isDue");
         assertEq(r.dueOwners(0, 10).length, 0, "dueOwners");
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
         r.execute(alice, keeper);
-        assertEq(router.calls(), 0, "swap gedaan");
+        assertEq(router.calls(), 0, "swap done");
         assertEq(r.lastExecutedAt(alice), 0);
 
-        // Volgend blok: de nieuwe koers is de beginkoers.
+        // Next block: the new price is the starting price.
         _nextBlock();
         (due,) = r.isDue(alice);
         assertTrue(due);
@@ -251,58 +251,58 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(bob, keeper);
     }
 
-    /// @notice Een push binnen de begintick schrijft geen observatie en mag; een push over de tickgrens niet, ook
-    ///         niet als hij binnen het venster van 6 bp blijft. Vroeger mocht een push van 4 bp
-    ///         (`test_execute_pushWithinWindowAllowed`): dat is precies de ruimte die push-then-JIT gebruikte
+    /// @notice A push within the starting tick writes no observation and is allowed; a push across the tick boundary
+    ///         is not, even if it stays within the 6 bp window. A push of 4 bp used to be allowed
+    ///         (`test_execute_pushWithinWindowAllowed`): that is exactly the room push-then-JIT used
     ///         (review PR #18, M-1).
     function test_execute_pushWithinTickAllowed_pushOverTickRefused() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
-        // Vorig blok: koers midden in tick 0.
+        // Previous block: price in the middle of tick 0.
         poolEurcUsdc.setPrice(1e6, 1.00005e6);
         uint256 snap = vm.snapshotState();
 
-        poolEurcUsdc.swapToPrice(1e6, 1.000001e6); // ~0,5 bp in de richting van de koop, binnen tick 0
-        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
+        poolEurcUsdc.swapToPrice(1e6, 1.000001e6); // ~0.5 bp in the direction of the buy, within tick 0
+        assertEq(poolEurcUsdc.tick(), 0, "setup: tick");
         (bool due,) = r.isDue(alice);
-        assertTrue(due, "push binnen de tick");
+        assertTrue(due, "push within the tick");
         r.execute(alice, keeper);
         assertEq(eurc.balanceOf(alice), 900e6);
 
         vm.revertToState(snap);
-        poolEurcUsdc.swapToPrice(1.0004e6, 1e6); // 4 bp in de richting van de koop: tickwissel
+        poolEurcUsdc.swapToPrice(1.0004e6, 1e6); // 4 bp in the direction of the buy: tick change
         (due,) = r.isDue(alice);
-        assertFalse(due, "push over de tick");
+        assertFalse(due, "push across the tick");
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
         r.execute(alice, keeper);
     }
 
-    // ─── Achteraf: push plus eigen swap ─────────────────────────────────────────────────────────────────────
+    // ─── After: push plus own swap ──────────────────────────────────────────────────────────────────────────
 
     function test_execute_revertsBlockMoveExceededAfterSwap() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         _setUser(bob, 0, 1_250_000, _defaultParams());
 
-        // Koop duwt EURC/USDC 7 bp omlaag: buiten het venster, binnen de spotcheck.
+        // Buy pushes EURC/USDC 7 bp down: outside the window, within the spot check.
         router.setPoolShift(poolEurcUsdc, 1.0007e6, 1e6);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
         r.execute(alice, keeper);
-        assertEq(eurc.balanceOf(alice), 1000e6, "niets geboekt");
+        assertEq(eurc.balanceOf(alice), 1000e6, "nothing booked");
         assertEq(r.lastExecutedAt(alice), 0);
 
-        // Verkoop via USDC/cbBTC: idem.
+        // Sell via USDC/cbBTC: same.
         router.setPoolShift(poolUsdcCbbtc, PRICE, 1.0007e8);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolUsdcCbbtc));
         r.execute(bob, keeper);
         assertEq(cbbtc.balanceOf(bob), 1_250_000);
 
-        // Een push vooraf kan alleen nog binnen de begintick (anders PoolTouchedThisBlock), en het venster blijft vanaf
-        // de randen van die tick gerekend. Vorig blok: koers midden in tick 0. Push binnen de tick naar net boven P(0),
-        // dan eigen impact tot 6 bp onder P(0): buiten het venster, dat omlaag vanaf P(1) rekent en dus 5 bp onder P(0)
-        // eindigt. Tot 5 bp onder P(0) past wel. (Vroeger was de push hier 3 bp over de tickgrens; die raakt nu de
-        // blokcheck.)
+        // A prior push can only stay within the starting tick (else PoolTouchedThisBlock), and the window is still
+        // computed from that tick's edges. Previous block: price mid tick 0. Push within the tick to just above P(0),
+        // then own impact to 6 bp below P(0): outside the window, which counts down from P(1), ending 5 bp below P(0).
+        // Up to 5 bp below P(0) does fit. (The push here used to be 3 bp across the tick boundary; that now hits the
+        // block check.)
         poolEurcUsdc.setPrice(1e6, 1.00005e6);
         poolEurcUsdc.swapToPrice(1e6, 1.000001e6);
-        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
+        assertEq(poolEurcUsdc.tick(), 0, "setup: tick");
         router.setPoolShift(poolEurcUsdc, 1.0006e6, 1e6);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
         r.execute(alice, keeper);
@@ -311,30 +311,30 @@ contract BlockWindowTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(alice), 900e6);
     }
 
-    // ─── Runomvang uit de liquiditeit ───────────────────────────────────────────────────────────────────────
+    // ─── Run size from the liquidity ────────────────────────────────────────────────────────────────────────
 
     function test_plan_buyBoundedByLiquidityOpensRound() public {
         uint128 liq = 1e12;
         poolEurcUsdc.setLiquidity(liq);
-        _setUser(alice, 10_000e6, 0, _params(10_000, 20e6)); // correctie 8.000, budget 10.000
+        _setUser(alice, 10_000e6, 0, _params(10_000, 20e6)); // correction 8,000, budget 10,000
         uint256 expected = _expectedMaxBuy(liq);
-        assertGt(expected, 180e6, "opzet");
-        assertLt(expected, 200e6, "opzet");
+        assertGt(expected, 180e6, "setup");
+        assertLt(expected, 200e6, "setup");
 
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
-        assertEq(delta, int256(expected), "isDue meldt het deel");
+        assertEq(delta, int256(expected), "isDue reports the chunk");
         r.execute(alice, keeper);
-        assertEq(10_000e6 - eurc.balanceOf(alice), expected, "run volgt uit de liquiditeit");
+        assertEq(10_000e6 - eurc.balanceOf(alice), expected, "run follows from the liquidity");
         (bool isBuy, uint256 remaining) = _round(alice);
         assertTrue(isBuy);
-        assertEq(remaining, 10_000e6 - expected, "restbudget");
+        assertEq(remaining, 10_000e6 - expected, "remaining budget");
     }
 
     function test_plan_sellBoundedByLiquidityOpensRound() public {
         uint128 liq = 1e12;
         poolEurcUsdc.setLiquidity(liq);
-        _setUser(bob, 0, 12_500_000, _params(10_000, 20e6)); // 10.000 EURC in cbBTC, correctie 2.000
+        _setUser(bob, 0, 12_500_000, _params(10_000, 20e6)); // 10,000 EURC in cbBTC, correction 2,000
         uint256 expected = _expectedMaxSell(liq);
         uint256 sats = Math.mulDiv(expected, 1e8, PRICE, Math.Rounding.Ceil);
         (bool due, int256 delta) = r.isDue(bob);
@@ -347,19 +347,19 @@ contract BlockWindowTest is RebalancerTestBase {
         assertEq(remaining, 10_000e6 - Math.mulDiv(sats, PRICE, 1e8, Math.Rounding.Ceil));
     }
 
-    /// @notice Lead 2: twee runs in hetzelfde blok. De run van alice verandert de tick (5 bp); bob revert daarom
-    ///         vooraf op de blokcheck (vroeger op het venster, BlockMoveExceeded), een blok later niet.
+    /// @notice Lead 2: two runs in the same block. Alice's run changes the tick (5 bp); bob therefore reverts
+    ///         upfront on the block check (previously on the window, BlockMoveExceeded), one block later he does not.
     function test_execute_twoOwnersSameBlockShareWindow() public {
         poolEurcUsdc.setLiquidity(1e12);
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
         _setUser(bob, 10_000e6, 0, _params(10_000, 20e6));
-        // De run van alice duwt EURC/USDC 5 bp omlaag (zoals een echte swap: observatie in dit blok).
+        // Alice's run pushes EURC/USDC 5 bp down (like a real swap: observation in this block).
         router.setPoolShift(poolEurcUsdc, 1.0005e6, 1e6);
         r.execute(alice, keeper);
         router.setPoolShift(MockUniswapV3Pool(address(0)), 0, 0);
 
         (bool due,) = r.isDue(bob);
-        assertFalse(due, "bob due in hetzelfde blok");
+        assertFalse(due, "bob due in the same block");
         address[] memory list = r.dueOwners(0, 10);
         assertEq(list.length, 0);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
@@ -367,37 +367,37 @@ contract BlockWindowTest is RebalancerTestBase {
 
         _nextBlock();
         (due,) = r.isDue(bob);
-        assertTrue(due, "bob een blok later");
+        assertTrue(due, "bob one block later");
         r.execute(bob, keeper);
     }
 
-    /// @notice Twee runs in hetzelfde blok die de tick niet veranderen, delen het venster van de begintick: de tweede
-    ///         mag, en wordt gesized op de ruimte die de eerste overliet.
+    /// @notice Two runs in the same block that do not change the tick share the window of the starting tick: the second
+    ///         is allowed, and is sized on the room the first one left.
     function test_execute_twoOwnersSameBlockWithinTickShareWindow() public {
         poolEurcUsdc.setLiquidity(1e12);
-        poolEurcUsdc.setPrice(1e6, 1.00009e6); // vorig blok: bovenin tick 0
+        poolEurcUsdc.setPrice(1e6, 1.00009e6); // previous block: top of tick 0
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
         _setUser(bob, 10_000e6, 0, _params(10_000, 20e6));
         (, int256 deltaAliceAlone) = r.isDue(alice);
-        router.setPoolShift(poolEurcUsdc, 1e6, 1.00001e6); // run van alice blijft binnen tick 0
+        router.setPoolShift(poolEurcUsdc, 1e6, 1.00001e6); // alice's run stays within tick 0
         r.execute(alice, keeper);
         router.setPoolShift(MockUniswapV3Pool(address(0)), 0, 0);
-        assertEq(poolEurcUsdc.tick(), 0, "opzet: tick");
+        assertEq(poolEurcUsdc.tick(), 0, "setup: tick");
         (bool due, int256 deltaBob) = r.isDue(bob);
-        assertTrue(due, "bob mag in hetzelfde blok zolang de tick staat");
-        assertLt(deltaBob, deltaAliceAlone, "bob krijgt de resterende ruimte, niet het hele venster");
+        assertTrue(due, "bob allowed in the same block as long as the tick holds");
+        assertLt(deltaBob, deltaAliceAlone, "bob gets the remaining room, not the whole window");
         r.execute(bob, keeper);
     }
 
-    // ─── Liquiditeitsklif (review L-1) ──────────────────────────────────────────────────────────────────────
+    // ─── Liquidity cliff (review L-1) ───────────────────────────────────────────────────────────────────────
 
-    /// @dev Zet EURC/USDC (vorig blok) op tick `t`, iets boven de onderrand.
+    /// @dev Sets EURC/USDC (previous block) to tick `t`, slightly above the lower edge.
     function _p1AtTick(int24 t) internal {
         poolEurcUsdc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(t) + 1_000);
-        assertEq(poolEurcUsdc.tick(), t, "opzet: tick");
+        assertEq(poolEurcUsdc.tick(), t, "setup: tick");
     }
 
-    /// @dev Grootste run bij liquiditeit `liq` in EURC/USDC en `liquidityNet` = `net` op `boundary`, in een snapshot.
+    /// @dev Largest run at liquidity `liq` in EURC/USDC and `liquidityNet` = `net` at `boundary`, in a snapshot.
     function _runWith(bool isBuy, uint128 liq, int24 boundary, int128 net) internal returns (uint256 run) {
         uint256 snap = vm.snapshotState();
         poolEurcUsdc.setLiquidity(liq);
@@ -406,15 +406,15 @@ contract BlockWindowTest is RebalancerTestBase {
         vm.revertToState(snap);
     }
 
-    /// @notice Koop (EURC/USDC omlaag) met de koers op tick 0: grens 0 ligt in het venster en wordt meteen gekruist.
-    ///         Houdt de liquiditeit daar op (1e12 → 5e11), dan rekent de run met 5e11. Groeit ze (1e12 → 1,5e12),
-    ///         dan blijft de run die van 1e12. isDue en execute volgen dezelfde omvang.
+    /// @notice Buy (EURC/USDC down) with the price at tick 0: boundary 0 is in the window and is crossed at once.
+    ///         If the liquidity ends there (1e12 → 5e11), the run uses 5e11. If it grows (1e12 → 1.5e12),
+    ///         the run stays that of 1e12. isDue and execute follow the same size.
     function test_cliff_buy_boundaryInWindowUsesThinnerSide() public {
         uint256 thin = _runWith(true, 5e11, 0, 0);
         uint256 full = _runWith(true, 1e12, 0, 0);
-        assertGt(thin, 20e6, "opzet");
-        assertEq(_runWith(true, 1e12, 0, 5e11), thin, "klif niet meegerekend");
-        assertEq(_runWith(true, 1e12, 0, -5e11), full, "liquiditeit voorbij de grens maakte de run groter");
+        assertGt(thin, 20e6, "setup");
+        assertEq(_runWith(true, 1e12, 0, 5e11), thin, "cliff not counted");
+        assertEq(_runWith(true, 1e12, 0, -5e11), full, "liquidity beyond the boundary made the run larger");
 
         poolEurcUsdc.setLiquidity(1e12);
         poolEurcUsdc.setLiquidityNet(0, 5e11);
@@ -426,38 +426,38 @@ contract BlockWindowTest is RebalancerTestBase {
         assertEq(10_000e6 - eurc.balanceOf(alice), thin, "execute");
     }
 
-    /// @notice Verkoop (EURC/USDC omhoog) met de koers op tick 5: grens 10 ligt in het venster. Zelfde regel, andere
-    ///         richting en teken: omhoog kruisen telt `liquidityNet` op.
+    /// @notice Sell (EURC/USDC up) with the price at tick 5: boundary 10 is in the window. Same rule, other
+    ///         direction and sign: crossing upward adds `liquidityNet`.
     function test_cliff_sell_boundaryInWindowUsesThinnerSide() public {
         _p1AtTick(5);
         uint256 thin = _runWith(false, 5e11, 10, 0);
         uint256 full = _runWith(false, 1e12, 10, 0);
-        assertGt(thin, 20e6, "opzet");
-        assertEq(_runWith(false, 1e12, 10, -5e11), thin, "klif niet meegerekend");
-        assertEq(_runWith(false, 1e12, 10, 5e11), full, "liquiditeit voorbij de grens maakte de run groter");
-        // Tick 5 omlaag: grens 0 ligt ook in het venster (t - 5).
-        assertEq(_runWith(true, 1e12, 0, 5e11), _runWith(true, 5e11, 0, 0), "grens t - 5 niet meegerekend");
+        assertGt(thin, 20e6, "setup");
+        assertEq(_runWith(false, 1e12, 10, -5e11), thin, "cliff not counted");
+        assertEq(_runWith(false, 1e12, 10, 5e11), full, "liquidity beyond the boundary made the run larger");
+        // Tick 5 down: boundary 0 is also in the window (t - 5).
+        assertEq(_runWith(true, 1e12, 0, 5e11), _runWith(true, 5e11, 0, 0), "boundary t - 5 not counted");
     }
 
-    /// @notice Geen initialiseerbare grens in het venster in de swaprichting: `liquidityNet` van de grens erbuiten
-    ///         doet niets. Koop op tick 6 (grens 0 ligt net onder het venster), verkoop op tick 4 (grens 10 net
-    ///         erboven).
+    /// @notice No initializable boundary in the window in the swap direction: `liquidityNet` of the boundary outside it
+    ///         does nothing. Buy at tick 6 (boundary 0 is just below the window), sell at tick 4 (boundary 10 just
+    ///         above it).
     function test_cliff_noBoundaryInWindowIgnoresNet() public {
         _p1AtTick(6);
-        assertEq(_runWith(true, 1e12, 0, 1e12), _runWith(true, 1e12, 0, 0), "koop: grens buiten het venster telde");
+        assertEq(_runWith(true, 1e12, 0, 1e12), _runWith(true, 1e12, 0, 0), "buy: boundary outside the window counted");
         _p1AtTick(4);
-        assertEq(_runWith(false, 1e12, 10, -1e12), _runWith(false, 1e12, 10, 0), "verkoop: grens buiten het venster");
+        assertEq(_runWith(false, 1e12, 10, -1e12), _runWith(false, 1e12, 10, 0), "sell: boundary outside the window");
     }
 
-    /// @notice Voorbij de grens geen liquiditeit: geen run. isDue en dueOwners melden niets en execute revert vooraf
-    ///         met BlockMoveExceeded, in beide richtingen. Zo zijn isDue en execute het eens (review L-1: vroeger
-    ///         isDue true en execute elke keer een revert na de swap).
+    /// @notice No liquidity beyond the boundary: no run. isDue and dueOwners report nothing and execute reverts upfront
+    ///         with BlockMoveExceeded, in both directions. So isDue and execute agree (review L-1: previously
+    ///         isDue true and execute a revert after the swap every time).
     function test_cliff_zeroLiquidityBeyondBoundary_notDue() public {
         poolEurcUsdc.setLiquidity(1e12);
         poolEurcUsdc.setLiquidityNet(0, 1e12);
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
         (bool due,) = r.isDue(alice);
-        assertFalse(due, "koop due");
+        assertFalse(due, "buy due");
         assertEq(r.dueOwners(0, 10).length, 0);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
         r.execute(alice, keeper);
@@ -466,34 +466,34 @@ contract BlockWindowTest is RebalancerTestBase {
         poolEurcUsdc.setLiquidityNet(10, -1e12);
         _setUser(bob, 0, 12_500_000, _params(10_000, 20e6));
         (due,) = r.isDue(bob);
-        assertFalse(due, "verkoop due");
+        assertFalse(due, "sell due");
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.BlockMoveExceeded.selector, poolEurcUsdc));
         r.execute(bob, keeper);
     }
 
-    /// @notice USDC/cbBTC heeft negatieve ticks: de grens omlaag is floor(tick / 10) × 10, niet naar nul afgerond.
+    /// @notice USDC/cbBTC has negative ticks: the boundary downward is floor(tick / 10) × 10, not rounded toward zero.
     function test_cliff_negativeTickInCbbtcPool() public {
         poolEurcUsdc.setLiquidity(type(uint128).max);
         int24 t = poolUsdcCbbtc.tick();
-        assertLt(t, 0, "opzet: negatieve tick");
+        assertLt(t, 0, "setup: negative tick");
         int24 b = t / 10 * 10;
         if (t % 10 != 0) b -= 10;
-        poolUsdcCbbtc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(b + 2) + 1_000); // koop omlaag: grens b in venster
+        poolUsdcCbbtc.setSqrtPriceX96(TickMath.getSqrtPriceAtTick(b + 2) + 1_000); // buy down: boundary b in window
         poolUsdcCbbtc.setLiquidity(1e13);
         (uint256 full, address binding) = h.maxRunEurc(true, PRICE);
-        assertEq(binding, address(poolUsdcCbbtc), "opzet: cbBTC-pool begrenst");
-        poolUsdcCbbtc.setLiquidityNet(b + 10, 1e13); // naar nul afgeronde grens: buiten de swaprichting, telt niet
+        assertEq(binding, address(poolUsdcCbbtc), "setup: cbBTC pool limits");
+        poolUsdcCbbtc.setLiquidityNet(b + 10, 1e13); // boundary rounded to zero: outside swap direction, not counted
         (uint256 run,) = h.maxRunEurc(true, PRICE);
-        assertEq(run, full, "verkeerde grens bij negatieve tick");
+        assertEq(run, full, "wrong boundary at negative tick");
         poolUsdcCbbtc.setLiquidityNet(b, 5e12);
         (run,) = h.maxRunEurc(true, PRICE);
-        assertLt(run, full * 51 / 100, "grens bij negatieve tick niet meegerekend");
+        assertLt(run, full * 51 / 100, "boundary at negative tick not counted");
         assertGt(run, full * 49 / 100);
     }
 
-    /// @notice Voor elke `liquidityNet` op de grens en elke tick rond een veelvoud van 10: de run is nooit groter dan
-    ///         zonder grens, en gelijk aan de run bij min(liquiditeit nu, liquiditeit voorbij de grens) als de grens in
-    ///         het venster ligt.
+    /// @notice For every `liquidityNet` at the boundary and every tick around a multiple of 10: the run is never larger
+    ///         than without a boundary, and equal to the run at min(liquidity now, liquidity beyond the boundary) if
+    ///         the boundary lies in the window.
     function testFuzz_cliff_neverLargerAndMinLiquidity(int128 net, uint8 offset, bool isBuy) public {
         int24 t = int24(uint24(bound(offset, 0, 9)));
         _p1AtTick(t);
@@ -502,26 +502,26 @@ contract BlockWindowTest is RebalancerTestBase {
         int24 boundary = isBuy ? int24(0) : int24(10);
         uint256 without = _runWith(isBuy, liq, boundary, 0);
         uint256 with = _runWith(isBuy, liq, boundary, net);
-        assertLe(with, without, "run groter door liquiditeit voorbij de grens");
-        // Grens in het venster: omlaag voor t <= 5, omhoog voor t >= 5 (zie _maxInput).
+        assertLe(with, without, "run larger because of liquidity beyond the boundary");
+        // Boundary in the window: down for t <= 5, up for t >= 5 (see _maxInput).
         bool inWindow = isBuy ? t <= 5 : t >= 5;
         int256 beyond = isBuy ? int256(uint256(liq)) - net : int256(uint256(liq)) + net;
         if (!inWindow) {
-            assertEq(with, without, "grens buiten het venster telde mee");
+            assertEq(with, without, "boundary outside the window counted");
         } else if (beyond <= 0) {
-            assertEq(with, 0, "geen liquiditeit voorbij de grens, toch een run");
+            assertEq(with, 0, "no liquidity beyond the boundary, still a run");
         } else {
             uint128 minLiq = uint128(Math.min(liq, uint256(beyond)));
-            assertEq(with, _runWith(isBuy, minLiq, boundary, 0), "niet de kleinste liquiditeit");
+            assertEq(with, _runWith(isBuy, minLiq, boundary, 0), "not the smallest liquidity");
         }
     }
 
-    // ─── Review I-2: dueOwners deelt de runomvang over de pagina ─────────────────────────────────────────────
+    // ─── Review I-2: dueOwners shares the run size across the page ───────────────────────────────────────────
 
-    /// @notice `dueOwners` rekent de runomvang per richting één keer per pagina (review I-2). Voor elke stand van de
-    ///         liquiditeit, de tickgrens en een mix van owners (koop en verkoop, binnen de band, inactief, zonder
-    ///         allowance, met en zonder lopende ronde, groot en klein) geeft elke pagina precies de owners waarvoor
-    ///         `isDue` true geeft, in registervolgorde.
+    /// @notice `dueOwners` computes the run size per direction once per page (review I-2). For every state of the
+    ///         liquidity, the tick boundary and a mix of owners (buy and sell, within the band, inactive, without
+    ///         allowance, with or without an open round, large and small) each page returns exactly the owners where
+    ///         `isDue` returns true, in registry order.
     function testFuzz_dueOwners_matchesIsDuePerOwner(uint256 seed, uint128 liq, int128 net, uint8 offset) public {
         _p1AtTick(int24(uint24(bound(offset, 0, 9))));
         liq = uint128(bound(liq, 1e9, 1e14));
@@ -544,7 +544,7 @@ contract BlockWindowTest is RebalancerTestBase {
                 vm.prank(users[i]);
                 eurc.approve(address(r), (x >> 200) % 2 == 0 ? 0 : 30e6);
             }
-            // Een deel voert nu al een run uit: dat opent soms een ronde (deel na CHUNK_INTERVAL) of zet de klok.
+            // Some already run now: that sometimes opens a round (chunk after CHUNK_INTERVAL) or sets the clock.
             if ((x >> 208) % 3 == 0) {
                 try r.execute(users[i], keeper) {} catch {}
                 _nextBlock();
@@ -559,22 +559,22 @@ contract BlockWindowTest is RebalancerTestBase {
             if (isDueNow) expected[m++] = users[i];
         }
         address[] memory due = r.dueOwners(0, n);
-        assertEq(due.length, m, "aantal due owners wijkt af van isDue");
+        assertEq(due.length, m, "number of due owners differs from isDue");
         for (uint256 i; i < m; i++) {
-            assertEq(due[i], expected[i], "dueOwners wijkt af van isDue");
+            assertEq(due[i], expected[i], "dueOwners differs from isDue");
         }
-        // Pagina's van 3 samen geven dezelfde lijst.
+        // Pages of 3 together give the same list.
         uint256 k;
         for (uint256 off; off < n; off += 3) {
             address[] memory page = r.dueOwners(off, 3);
             for (uint256 j; j < page.length; j++) {
-                assertEq(page[j], expected[k++], "pagina wijkt af van isDue");
+                assertEq(page[j], expected[k++], "page differs from isDue");
             }
         }
-        assertEq(k, m, "pagina's missen owners");
+        assertEq(k, m, "pages miss owners");
     }
 
-    // ─── Rondes in delen ────────────────────────────────────────────────────────────────────────────────────
+    // ─── Rounds in chunks ───────────────────────────────────────────────────────────────────────────────────
 
     function test_chunk_nextOnlyAfterChunkInterval() public {
         poolEurcUsdc.setLiquidity(1e12);
@@ -584,7 +584,7 @@ contract BlockWindowTest is RebalancerTestBase {
 
         _warp(10 minutes - 1);
         (bool due,) = r.isDue(alice);
-        assertFalse(due, "due voor CHUNK_INTERVAL");
+        assertFalse(due, "due before CHUNK_INTERVAL");
         vm.expectRevert(Rebalancer.NotDue.selector);
         r.execute(alice, keeper);
 
@@ -592,20 +592,20 @@ contract BlockWindowTest is RebalancerTestBase {
         (, uint256 remBefore) = _round(alice);
         int256 delta;
         (due, delta) = r.isDue(alice);
-        assertTrue(due, "deel niet due na CHUNK_INTERVAL");
+        assertTrue(due, "chunk not due after CHUNK_INTERVAL");
         assertEq(r.dueOwners(0, 10).length, 1);
         assertEq(r.dueOwners(0, 10)[0], alice);
         uint256 before = eurc.balanceOf(alice);
         r.execute(alice, keeper);
         assertEq(before - eurc.balanceOf(alice), uint256(delta));
-        assertEq(r.lastExecutedAt(alice), uint64(t0 + 10 minutes), "lastExecutedAt volgt het deel");
+        assertEq(r.lastExecutedAt(alice), uint64(t0 + 10 minutes), "lastExecutedAt follows the chunk");
         (, uint256 remAfter) = _round(alice);
-        assertEq(remAfter, remBefore - uint256(delta), "restbudget daalt met het deel");
+        assertEq(remAfter, remBefore - uint256(delta), "remaining budget drops by the chunk");
     }
 
-    /// @notice Een correctie loopt in delen af tot binnen de band; daarna geen deel meer, pas weer na `interval`.
+    /// @notice A correction runs in chunks until within the band; then no more chunks, only again after `interval`.
     function test_chunk_runsUntilWithinBand() public {
-        poolEurcUsdc.setLiquidity(1e13); // ~1.875 EURC per deel
+        poolEurcUsdc.setLiquidity(1e13); // ~1,875 EURC per chunk
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
         uint256 chunks;
         uint256 traded;
@@ -617,24 +617,24 @@ contract BlockWindowTest is RebalancerTestBase {
             chunks++;
             _warp(10 minutes);
         }
-        assertGt(chunks, 3, "niet in delen");
-        // De ronde eindigt zodra de schatting zonder fee binnen de band uitkomt; met 0,25% fee kan de owner net
-        // (hooguit de fee van het laatste deel) buiten de band blijven. Die rest wacht op het gewone interval.
+        assertGt(chunks, 3, "not in chunks");
+        // The round ends as soon as the estimate without fee lands within the band; with 0.25% fee the owner can stay
+        // just (at most the fee of the last chunk) outside the band. That rest waits for the normal interval.
         (uint256 fraction,) = _fractionOf(alice);
-        assertGe(fraction, 0.749e18, "niet (bijna) binnen de band");
+        assertGe(fraction, 0.749e18, "not (almost) within the band");
         (, uint256 remaining) = _round(alice);
-        assertEq(remaining, 0, "ronde niet afgesloten");
-        assertLe(traded, 10_000e6, "budget overschreden");
-        // Pas na `interval` na het laatste deel weer een nieuwe ronde (als er dan iets te doen is).
+        assertEq(remaining, 0, "round not closed");
+        assertLe(traded, 10_000e6, "budget exceeded");
+        // Only after `interval` after the last chunk a new round again (if there is something to do then).
         vm.expectRevert(Rebalancer.NotDue.selector);
         r.execute(alice, keeper);
     }
 
-    /// @notice Het budget van de ronde (maxCorrectionBps van de waarde bij de eerste run) is niet via delen te
-    ///         overschrijden; daarna geldt weer `interval`, ook al staat de owner nog buiten de band.
+    /// @notice The budget of the round (maxCorrectionBps of the value at the first run) cannot be exceeded via
+    ///         chunks; after that `interval` applies again, even though the owner is still outside the band.
     function test_chunk_budgetCapsRound() public {
-        poolEurcUsdc.setLiquidity(2e12); // ~375 EURC per deel
-        _setUser(alice, 10_000e6, 0, _params(1000, 20e6)); // budget 1.000 EURC, correctie 8.000
+        poolEurcUsdc.setLiquidity(2e12); // ~375 EURC per chunk
+        _setUser(alice, 10_000e6, 0, _params(1000, 20e6)); // budget 1,000 EURC, correction 8,000
         uint256 traded;
         uint256 chunks;
         for (uint256 i; i < 10; i++) {
@@ -645,7 +645,7 @@ contract BlockWindowTest is RebalancerTestBase {
             chunks++;
             _warp(10 minutes);
         }
-        assertEq(traded, 1000e6, "budget niet precies opgebruikt");
+        assertEq(traded, 1000e6, "budget not used up exactly");
         assertEq(chunks, 3, "375 + 375 + 250");
         (, uint256 remaining) = _round(alice);
         assertEq(remaining, 0);
@@ -653,20 +653,20 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(alice, keeper);
         _warp(1 hours);
         (bool dueAgain, int256 d) = r.isDue(alice);
-        assertTrue(dueAgain, "nieuwe ronde na interval");
+        assertTrue(dueAgain, "new round after interval");
         assertGt(d, 0);
     }
 
-    /// @notice Een restbudget onder minTradeEurc opent geen ronde.
+    /// @notice A remaining budget below minTradeEurc opens no round.
     function test_chunk_tailBelowMinTradeEndsRound() public {
-        poolEurcUsdc.setLiquidity(1e12); // ~187,5 EURC per deel
-        _setUser(alice, 10_000e6, 0, _params(200, 20e6)); // budget 200 EURC -> rest 12,5 < 20
+        poolEurcUsdc.setLiquidity(1e12); // ~187.5 EURC per chunk
+        _setUser(alice, 10_000e6, 0, _params(200, 20e6)); // budget 200 EURC -> rest 12.5 < 20
         r.execute(alice, keeper);
         (, uint256 remaining) = _round(alice);
         assertEq(remaining, 0);
     }
 
-    /// @notice Een run die door de allowance (niet de liquiditeit) begrensd is, opent geen ronde.
+    /// @notice A run limited by the allowance (not the liquidity) opens no round.
     function test_chunk_allowanceBoundRunOpensNoRound() public {
         poolEurcUsdc.setLiquidity(1e12);
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
@@ -678,7 +678,7 @@ contract BlockWindowTest is RebalancerTestBase {
         assertEq(remaining, 0);
     }
 
-    /// @notice Richtingswissel: een deel gebeurt nooit in de andere richting dan de ronde (geen ping-pong).
+    /// @notice Direction change: a chunk never happens in the other direction than the round (no ping-pong).
     function test_chunk_directionChangeNeverStartsChunk() public {
         poolEurcUsdc.setLiquidity(1e12);
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
@@ -687,12 +687,12 @@ contract BlockWindowTest is RebalancerTestBase {
         assertTrue(isBuy);
         assertGt(remaining, 0);
 
-        // cbBTC 1.000× duurder: de kleine positie is nu ruim boven 80%, dus verkopen.
+        // cbBTC 1,000× more expensive: the small position is now well above 80%, so sell.
         _warp(10 minutes);
         _setPrice(PRICE * 1000);
         router.setPrice(PRICE * 1000);
         (bool due,) = r.isDue(alice);
-        assertFalse(due, "deel in de andere richting");
+        assertFalse(due, "chunk in the other direction");
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         r.execute(alice, keeper);
 
@@ -700,8 +700,8 @@ contract BlockWindowTest is RebalancerTestBase {
         _setPrice(PRICE * 1000);
         int256 delta;
         (due, delta) = r.isDue(alice);
-        assertTrue(due, "na interval wel");
-        assertLt(delta, 0, "nu verkopen");
+        assertTrue(due, "after interval it is");
+        assertLt(delta, 0, "now sell");
         r.execute(alice, keeper);
     }
 
@@ -714,49 +714,49 @@ contract BlockWindowTest is RebalancerTestBase {
         vm.prank(alice);
         r.setParams(_params(10_000, 20e6));
         (, remaining) = _round(alice);
-        assertEq(remaining, 0, "ronde niet afgebroken");
+        assertEq(remaining, 0, "round not aborted");
         _warp(10 minutes);
         vm.expectRevert(Rebalancer.NotDue.selector);
         r.execute(alice, keeper);
     }
 
-    /// @notice Een deel dat nu onder MIN_TRADE_FLOOR zou vallen (ruimte in dit blok op), wacht: niet due, revert
-    ///         vooraf, en de ronde blijft staan tot er weer ruimte is.
+    /// @notice A chunk that would now fall below MIN_TRADE_FLOOR (room in this block used up) waits: not due, reverts
+    ///         upfront, and the round stays open until there is room again.
     function test_chunk_belowFloorWaitsAndKeepsRound() public {
         poolEurcUsdc.setLiquidity(1e12);
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
         r.execute(alice, keeper);
         (, uint256 remaining) = _round(alice);
         _warp(10 minutes);
-        // Iemand anders duwt de pool in dit blok over de tick. Vroeger viel het deel dan onder de vloer
-        // (BlockMoveExceeded); nu weigert de blokcheck het eerder. De ronde blijft in beide gevallen staan.
+        // Someone else pushes the pool across the tick in this block. Previously the chunk then fell below the floor
+        // (BlockMoveExceeded); now the block check rejects it earlier. The round stays open in both cases.
         poolEurcUsdc.swapToPrice(1.0005e6, 1e6);
         (bool due,) = r.isDue(alice);
         assertFalse(due);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, poolEurcUsdc));
         r.execute(alice, keeper);
         (, uint256 stillRemaining) = _round(alice);
-        assertEq(stillRemaining, remaining, "ronde verdwenen");
+        assertEq(stillRemaining, remaining, "round disappeared");
         _nextBlock();
         (due,) = r.isDue(alice);
         assertTrue(due);
     }
 
-    /// @notice Een deel mag kleiner zijn dan minTradeEurc van de gebruiker (die geldt voor de correctie), maar
-    ///         nooit kleiner dan MIN_TRADE_FLOOR.
+    /// @notice A chunk may be smaller than the user's minTradeEurc (which applies to the correction), but
+    ///         never smaller than MIN_TRADE_FLOOR.
     function test_chunk_smallerThanUserMinTradeButAboveFloor() public {
-        poolEurcUsdc.setLiquidity(1e12); // ~187,5 EURC per deel
+        poolEurcUsdc.setLiquidity(1e12); // ~187.5 EURC per chunk
         _setUser(alice, 10_000e6, 0, _params(10_000, 500e6));
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
         assertLt(uint256(delta), 500e6);
         assertGe(uint256(delta), r.MIN_TRADE_FLOOR());
         r.execute(alice, keeper);
-        // Fee van het deel dekt de beloning.
+        // Fee of the chunk covers the reward.
         assertEq(eurc.balanceOf(keeper), r.KEEPER_REWARD_EURC());
 
-        // Liquiditeit zo klein dat een deel onder de vloer valt: wachten.
-        poolEurcUsdc.setLiquidity(1e11); // ~18,75 EURC
+        // Liquidity so small that a chunk falls below the floor: wait.
+        poolEurcUsdc.setLiquidity(1e11); // ~18.75 EURC
         _warp(10 minutes);
         (due,) = r.isDue(alice);
         assertFalse(due);
@@ -764,29 +764,29 @@ contract BlockWindowTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
-    /// @notice Zelf-audit 2026-09-17, lead 13: de constructor weigert een venster dat niet ruim binnen de tick-afstand
-    ///         past. Met de constanten van dit contract (6 bp, spacing 10) klopt het; 10 of meer bij spacing 10 niet.
+    /// @notice Self-audit 2026-09-17, lead 13: the constructor rejects a window that does not fit well within the tick
+    ///         spacing. With this contract's constants (6 bp, spacing 10) it holds; 10 or more at spacing 10 does not.
     function test_constructor_windowFitsTickSpacing() public view {
-        assertTrue(h.windowFitsTickSpacing(r.MAX_BLOCK_MOVE_BPS(), r.TICK_SPACING()), "constanten van dit contract");
+        assertTrue(h.windowFitsTickSpacing(r.MAX_BLOCK_MOVE_BPS(), r.TICK_SPACING()), "constants of this contract");
         assertTrue(h.windowFitsTickSpacing(9, 10));
-        assertFalse(h.windowFitsTickSpacing(10, 10), "venster even breed als de tick-afstand");
+        assertFalse(h.windowFitsTickSpacing(10, 10), "window as wide as the tick spacing");
         assertFalse(h.windowFitsTickSpacing(60, 10));
         assertFalse(h.windowFitsTickSpacing(6, 0), "spacing 0");
     }
 
-    /// @notice Zelf-audit 2026-09-17, lead 11: krimpt de wallet tijdens een ronde (opnemen of een koersdaling), dan is
-    ///         een deel nooit groter dan `maxCorrectionBps` van de waarde van dat moment. Vroeger gold het budget van
-    ///         de eerste run, zodat een deel hier 375 EURC op een wallet van 3.000 EURC kon zijn.
+    /// @notice Self-audit 2026-09-17, lead 11: if the wallet shrinks during a round (withdrawal or a price drop), then
+    ///         a chunk is never larger than `maxCorrectionBps` of the value at that moment. Previously the budget of
+    ///         the first run applied, so a chunk here could be 375 EURC on a wallet of 3,000 EURC.
     function test_chunk_budgetShrinksWithWallet() public {
         poolEurcUsdc.setLiquidity(2e12);
-        _setUser(alice, 20_000e6, 0, _params(1000, 20e6)); // budget 2.000
+        _setUser(alice, 20_000e6, 0, _params(1000, 20e6)); // budget 2,000
         r.execute(alice, keeper);
         (, uint256 remaining) = _round(alice);
-        assertGt(remaining, 0, "opzet: de liquiditeit begrensde de eerste run, ronde open");
+        assertGt(remaining, 0, "setup: the liquidity limited the first run, round open");
         uint256 cap = _expectedMaxBuy(2e12);
-        assertGt(cap, 300e6, "opzet: de liquiditeit laat meer dan 10% van de gekrompen wallet toe");
+        assertGt(cap, 300e6, "setup: the liquidity allows more than 10% of the shrunken wallet");
 
-        // De owner neemt op tot een wallet van ~3.000 EURC; hij ligt nog ver onder zijn doel van 80% cbBTC.
+        // The owner withdraws down to a wallet of ~3,000 EURC; it is still far below its 80% cbBTC target.
         uint256 btcValue = Math.mulDiv(cbbtc.balanceOf(alice), PRICE, 1e8);
         uint256 withdraw = eurc.balanceOf(alice) - (3_000e6 - btcValue);
         vm.prank(alice);
@@ -794,20 +794,20 @@ contract BlockWindowTest is RebalancerTestBase {
         _warp(10 minutes);
 
         (bool due, int256 delta) = r.isDue(alice);
-        assertTrue(due, "deel is due");
+        assertTrue(due, "chunk is due");
         uint256 total = eurc.balanceOf(alice) + Math.mulDiv(cbbtc.balanceOf(alice), PRICE, 1e8);
-        assertLe(uint256(delta), total * 1000 / BPS, "deel groter dan maxCorrectionBps van de huidige waarde");
+        assertLe(uint256(delta), total * 1000 / BPS, "chunk larger than maxCorrectionBps of the current value");
         r.execute(alice, keeper);
         (, remaining) = _round(alice);
-        assertLe(remaining, total * 1000 / BPS, "restbudget boven het budget van de huidige waarde");
+        assertLe(remaining, total * 1000 / BPS, "remaining budget above the budget of the current value");
     }
 
-    /// @notice Lead 3: een donatie tijdens een ronde vergroot het budget niet.
+    /// @notice Lead 3: a donation during a round does not increase the budget.
     function test_chunk_donationDoesNotGrowRoundBudget() public {
         poolEurcUsdc.setLiquidity(2e12);
-        _setUser(alice, 10_000e6, 0, _params(1000, 20e6)); // budget 1.000
+        _setUser(alice, 10_000e6, 0, _params(1000, 20e6)); // budget 1,000
         r.execute(alice, keeper);
-        eurc.mint(alice, 100_000e6); // donatie: waarde ×11, correctie veel groter
+        eurc.mint(alice, 100_000e6); // donation: value ×11, correction much larger
         uint256 traded = 10_000e6 - (eurc.balanceOf(alice) - 100_000e6);
         for (uint256 i; i < 10; i++) {
             _warp(10 minutes);
@@ -816,11 +816,11 @@ contract BlockWindowTest is RebalancerTestBase {
             r.execute(alice, keeper);
             traded += uint256(delta);
         }
-        assertEq(traded, 1000e6, "budget van de ronde groeide mee met de donatie");
+        assertEq(traded, 1000e6, "budget of the round grew with the donation");
     }
 
-    /// @notice Na `interval` sinds de laatste run begint een nieuwe ronde met een vers budget, ook als er nog een
-    ///         (verlopen) ronde stond.
+    /// @notice After `interval` since the last run a new round starts with a fresh budget, even if an (expired)
+    ///         round was still open.
     function test_chunk_freshRoundAfterIntervalReplacesStaleRound() public {
         poolEurcUsdc.setLiquidity(1e12);
         _setUser(alice, 10_000e6, 0, _params(10_000, 20e6));
@@ -832,15 +832,15 @@ contract BlockWindowTest is RebalancerTestBase {
         (, uint256 total) = _fractionOf(alice);
         r.execute(alice, keeper);
         (, uint256 fresh) = _round(alice);
-        assertGt(fresh, remaining - uint256(delta), "budget niet vernieuwd");
-        assertEq(fresh + uint256(delta), total, "vers budget = 100% van de waarde bij deze run");
+        assertGt(fresh, remaining - uint256(delta), "budget not renewed");
+        assertEq(fresh + uint256(delta), total, "fresh budget = 100% of the value at this run");
     }
 
-    /// @notice Loopt de ronde tot vlak bij de band, dan sluit de schatting (zonder fee) de ronde af zodra het deel
-    ///         de owner binnen de band brengt; er blijft geen ronde staan.
+    /// @notice If the round runs to near the band, the estimate (without fee) closes the round as soon as the chunk
+    ///         brings the owner within the band; no round stays open.
     function test_chunk_roundEndsWhenRunReachesBand() public {
-        poolEurcUsdc.setLiquidity(1e13); // ~1.875 EURC per deel
-        // 7.400 EURC + cbBTC ter waarde van 2.600: aandeel 26%, afwijking 54% × 10.000 = 5.400.
+        poolEurcUsdc.setLiquidity(1e13); // ~1,875 EURC per chunk
+        // 7,400 EURC + cbBTC worth 2,600: share 26%, deviation 54% × 10,000 = 5,400.
         _setUser(alice, 7_400e6, 3_250_000, _params(10_000, 20e6));
         for (uint256 i; i < 10; i++) {
             (bool due,) = r.isDue(alice);
@@ -848,7 +848,7 @@ contract BlockWindowTest is RebalancerTestBase {
             r.execute(alice, keeper);
             (, uint256 remaining) = _round(alice);
             (uint256 fraction,) = _fractionOf(alice);
-            if (fraction + 0.05e18 >= 0.8e18) assertEq(remaining, 0, "ronde blijft staan binnen de band");
+            if (fraction + 0.05e18 >= 0.8e18) assertEq(remaining, 0, "round stays open within the band");
             _warp(10 minutes);
         }
     }

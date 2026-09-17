@@ -3,7 +3,7 @@ pragma solidity 0.8.37;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @notice ERC-20 met instelbare decimalen, vrije mint en FiatToken-achtige pause/blacklist.
+/// @notice ERC-20 with configurable decimals, free mint and FiatToken-like pause/blacklist.
 contract MockERC20 is ERC20 {
     uint8 private immutable _decimals;
     bool public paused;
