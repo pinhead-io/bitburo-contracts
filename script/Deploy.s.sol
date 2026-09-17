@@ -23,8 +23,9 @@ contract DeployRebalancer is Script {
     address constant FEED_CBBTC_USD = 0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D;
     /// @dev EURC/USD (DualAggregator, heartbeat 3600 s, deviatie 0,1%) uit Chainlinks referentiedirectory voor
     ///      Base. Op 15 september 2026 via cast geverifieerd: description() "EURC / USD", decimals() 8,
-    ///      latestRoundData() ronde van 1.443 s oud. De vorige feed 0xDAe398…8250 (24 u) staat niet meer in de
-    ///      directory (audit M-2); het contract eist MAX_AGE_EURC = 4500 s, dus die feed zou direct StaleFeed geven.
+    ///      latestRoundData() ronde van 1.443 s oud. De vorige feed 0xDAe398…8250 heeft een heartbeat van
+    ///      24 uur (audit M-2; op 17 september 2026 nog in de directory); het contract eist MAX_AGE_EURC = 4500 s, dus die
+    ///      feed zou direct StaleFeed geven.
     address constant FEED_EURC_USD = 0x9867186e52d2F1C2c565CDA6E747101Fa56501e0;
     address constant SEQUENCER_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
     /// @dev Uniswap v3 0,05%-pools, alleen gelezen voor de spot-vs-oracle-check.

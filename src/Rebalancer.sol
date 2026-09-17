@@ -40,7 +40,11 @@ import {TickMath} from "./libraries/TickMath.sol";
  *         Hooguit één per blok (Oracle.sol:90). Een swap binnen de tick, een mint of burn buiten de range, een
  *         burn van 0, `collect` en `flash` schrijven niets. Is er in dit blok geen observatie, dan staan tick en
  *         in-range liquiditeit nog zoals aan het begin van het blok: een aanvaller kan in dit blok hooguit binnen
- *         de begintick duwen (≤ 1 tick ≈ 1 bp per pool) en geen JIT-liquiditeit in de range zetten. Vóór én na de
+ *         de begintick duwen (≤ 1 tick ≈ 1 bp per pool) en geen JIT-liquiditeit in de range zetten. Uitzondering
+ *         (zelf-audit 2026-09-17, L-E): staat de koers precies op een tickgrens b, dan telt een positie met b als
+ *         grens in de swaprichting voor Uniswap als buiten de range; een mint schrijft niets, maar de run kruist b
+ *         meteen en handelt ertegen. Dat maakt de run niet groter dan de in-range bovengrens en geeft het
+ *         slachtoffer een betere koers; de JIT-positie int alleen poolfee, ten koste van andere LP's. Vóór én na de
  *         swap moet de koers bovendien binnen MAX_BLOCK_MOVE_BPS van die begintick liggen, inclusief de eigen
  *         swap. Restrisico (review F-4): een push binnen de begintick schrijft niets en is zonder observatie niet
  *         te zien, dus het slachtoffer kan tot ~1 tick per geduwde pool slechter handelen (tick-granulariteit). Een
@@ -58,7 +62,9 @@ import {TickMath} from "./libraries/TickMath.sol";
  *           als LP ook niet aan de marge op dat volume. Het slachtoffer verliest niet meer dan ~1 tick per
  *           geduwde pool. Geaccepteerd risico; zie README.
  *         Niet gezien wordt duwen aan het eind van het vorige blok (review I-4; niet atomair, laag 3 en arbitrage
- *         begrenzen het).
+ *         begrenzen het). Laag 3 meet tegen Chainlink, niet tegen de markt: loopt een feed binnen zijn
+ *         deviation-drempel achter in het voordeel van de aanvaller (cbBTC/USD 0,3%, EURC/USD 0,1%), dan mag die push
+ *         groter zijn (zelf-audit 2026-09-17, L-F; zie README).
  *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick
  *         verandert; daarna is de pool in dit blok aangeraakt.
  *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers op SIZING_BPS van
