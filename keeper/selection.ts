@@ -759,6 +759,35 @@ export const replacementFees = (previous: TxFees, baseFeePerGas: bigint, maxTip:
   return { maxPriorityFeePerGas: tip, maxFeePerGas: fee > floor ? fee : floor };
 };
 
+/**
+ * Verificatie 579f763 (K-6): hangt er nog een eigen transactie? Ja als de node meer transacties kent met `pending` dan
+ * er gemined zijn (`latest`). Dat gebeurt na een run die stopte omdat een transactie niet te vervangen was, of na een
+ * fout van de node tijdens het vervangen. Een nieuwe transactie zou dan achter die nonce blijven hangen (of met nonce+1
+ * later reverten met NotDue), dus de keeper verstuurt niets en probeert het in een later blok opnieuw.
+ */
+export const ownTransactionPending = (latestNonce: number, pendingNonce: number): boolean => pendingNonce > latestNonce;
+
+/** Tijd na de laatste receipt voor hersimulatie, logs en opslaan. */
+export const SEND_AFTER_SECONDS = 30;
+
+/**
+ * Verificatie 579f763 (K-6): hoe lang een transactie in het slechtste geval duurt, als geen enkel blok mislukt: elke
+ * verzending (de eerste plus TX_REPLACEMENTS vervangers) wacht TX_WAIT_BLOCKS blokken van 2 s plus hooguit
+ * BLOCK_WAIT_SECONDS zonder nieuw blok, en daarna `SEND_AFTER_SECONDS`. Met de standaardwaarden 4 × (30 + 30) + 30 =
+ * 270 s.
+ */
+export const sendWorstCaseSeconds = (txWaitBlocks: number, txReplacements: number, blockWaitSeconds: number): number =>
+  (txReplacements + 1) * (txWaitBlocks * Number(BASE_BLOCK_SECONDS) + blockWaitSeconds) + SEND_AFTER_SECONDS;
+
+/**
+ * Verificatie 579f763 (K-6): mag de keeper nog een transactie versturen? De watchdog (`lockWatchdogSeconds`) stopt de run
+ * hard; valt dat midden in een transactie, dan blijft die zonder vervanging en zonder oordeel achter. Een owner die net
+ * vóór het eind van het retry-budget aan de beurt komt, kan anders tot ver na dat budget doorlopen. Alleen versturen
+ * als de hele transactie vóór de watchdog past; anders overslaan zonder cool-down (de volgende run pakt hem op).
+ */
+export const hasTimeToSend = (nowSeconds: number, watchdogAtSeconds: number, neededSeconds: number): boolean =>
+  nowSeconds + neededSeconds <= watchdogAtSeconds;
+
 /** Moet de transactie vervangen worden? Ja als hij `waitBlocks` blokken na het verzendblok nog niet gemined is. */
 export const isStuck = (sentAtBlock: bigint, latestBlock: bigint, waitBlocks: number): boolean =>
   latestBlock >= sentAtBlock + BigInt(waitBlocks);

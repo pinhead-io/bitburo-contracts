@@ -27,6 +27,9 @@ import {
   isBlockWindowRevert,
   isCoolingDown,
   isStuck,
+  hasTimeToSend,
+  ownTransactionPending,
+  sendWorstCaseSeconds,
   isTemporaryFailure,
   lockIsStale,
   lockWatchdogSeconds,
@@ -848,6 +851,26 @@ describe("stuck transaction (final review I-6)", () => {
   test("no replacement above the tip cap: the run stops clearly", () => {
     expect(replacementFees({ maxPriorityFeePerGas: max, maxFeePerGas: max * 2n }, parseGwei("0.005"), max)).toBeNull();
     expect(replacementFees({ maxPriorityFeePerGas: parseGwei("2.7"), maxFeePerGas: max * 2n }, 0n, max)).toBeNull();
+  });
+
+  test("verification 579f763 (K-6): with an own transaction still pending nothing new is sent, and that is temporary", () => {
+    expect(ownTransactionPending(41, 41)).toBe(false);
+    expect(ownTransactionPending(41, 42)).toBe(true); // de vorige run liet nonce 41 hangen
+    // keeper.ts gooit dan een gewone Error (geen contract-revert): tijdelijk, opnieuw in een later blok, geen cool-down.
+    expect(failureAction({ errorName: undefined, transient: true }, 0, 540)).toBe("retry");
+  });
+
+  test("verification 579f763 (K-6): a transaction is only sent if it fits before the watchdog", () => {
+    // Standaard: 4 verzendingen × (15 blokken × 2 s + 30 s) + 30 s.
+    expect(sendWorstCaseSeconds(15, 3, 30)).toBe(270);
+    const start = 1_000;
+    const watchdogAt = start + lockWatchdogSeconds(900); // 1.885
+    // Tot aan het eind van het retry-budget (540 s) past een hele transactie met de standaardwaarden.
+    expect(hasTimeToSend(start + 540, watchdogAt, 270)).toBe(true);
+    expect(hasTimeToSend(start + 615, watchdogAt, 270)).toBe(true);
+    expect(hasTimeToSend(start + 616, watchdogAt, 270)).toBe(false);
+    // De minimale configuratie LOCK_MAX_SECONDS = RETRY_SECONDS + 60: vlak voor het eind van het budget niet meer.
+    expect(hasTimeToSend(start + 530, start + lockWatchdogSeconds(600), 270)).toBe(false);
   });
 });
 

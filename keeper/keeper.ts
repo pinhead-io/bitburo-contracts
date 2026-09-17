@@ -45,6 +45,8 @@
  *   die owner bediend: geen blokkade, geen cool-down, geen hogere tip. Na een eigen transactie zonder
  *   blokkade, en aan het eind van een run zonder blokkade en zonder eigen transactie, halveert de tip tot de basis.
  * - Eén run tegelijk (LOCK_FILE), en de run leest na het retry-budget geen nieuwe kandidaten meer.
+ * - Geen nieuwe transactie zolang een eigen transactie nog hangt (nonce `pending` > `latest`), en alleen een transactie
+ *   die in het slechtste geval (alle vervangingen) vóór de watchdog klaar is (verificatie 579f763, K-6).
  *
  * Registratiespam (audit lead 9): iedereen kan zich registreren, ook zonder saldo, en het register krimpt nooit. Het
  * script leest daarom per 500 owners in één Multicall3 per 100 owners `params(owner).active` en saldo en allowance van
@@ -118,6 +120,9 @@ import {
   isCoolingDown,
   isStuck,
   isTemporaryFailure,
+  hasTimeToSend,
+  ownTransactionPending,
+  sendWorstCaseSeconds,
   lockWatchdogSeconds,
   maxFeePerGas,
   minRunBaseUnits,
@@ -676,12 +681,27 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
       console.log(`[dry-run] ${owner}: ${direction} ≈ ${eurc} EURC (simulatie ok${at.blockOverrides ? ", volgend blok" : ""})`);
       return { outcome: "dry-run", block: null };
     }
+    // Verificatie 579f763 (K-6): geen transactie die de watchdog halverwege zou afbreken.
+    const needed = sendWorstCaseSeconds(txWaitBlocks, txReplacements, blockWaitSeconds);
+    if (!hasTimeToSend(nowSec(), lockStartedAt + lockWatchdogSeconds(lockMaxSeconds), needed)) {
+      console.log(`${owner}: overgeslagen, te weinig tijd vóór de watchdog voor een transactie (${needed} s nodig); geen cool-down`);
+      return { outcome: "skipped", block: null };
+    }
     try {
+      // Verificatie 579f763 (K-6): hangt er nog een eigen transactie (vorige run gestopt, of een fout van de node tijdens
+      // het vervangen), dan niets versturen: tijdelijk, opnieuw in een later blok.
+      const [minedNonce, pendingNonce] = await Promise.all([
+        publicClient.getTransactionCount({ address: walletClient.account.address, blockTag: "latest" }),
+        publicClient.getTransactionCount({ address: walletClient.account.address, blockTag: "pending" }),
+      ]);
+      if (ownTransactionPending(minedNonce, pendingNonce)) {
+        throw new Error(`eigen transactie met nonce ${minedNonce} hangt nog (pending ${pendingNonce}); niets verstuurd`);
+      }
       // Gas, beide fees, nonce en chainId expliciet: anders schat viem ze zelf. eth_estimateGas draait op het laatste
       // blok (waar een aanraking de schatting laat reverten), een fee-schatting overschrijft de gekozen tip, en zonder
       // nonce probeert viem eerst eth_fillTransaction. GAS_LIMIT 1.000.000 is de grens die
       // test_fork_buyAndSellGasCost bewaakt.
-      const nonce = await publicClient.getTransactionCount({ address: walletClient.account.address, blockTag: "pending" });
+      const nonce = pendingNonce;
       const send = (fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) =>
         walletClient.writeContract({
           address: rebalancer,
