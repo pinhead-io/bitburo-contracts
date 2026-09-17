@@ -600,8 +600,12 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @return price EURC-basiseenheden (6 dec) per 1 cbBTC.
     function _quote() internal view returns (uint256 price) {
         (, int256 seqAnswer, uint256 seqStartedAt,,) = SEQUENCER_FEED.latestRoundData();
-        // startedAt == 0 is een niet-geïnitialiseerde ronde van de uptime-feed en telt als "onbekend", niet als up.
-        if (seqAnswer != 0 || seqStartedAt == 0 || block.timestamp - seqStartedAt < GRACE_PERIOD) {
+        // startedAt == 0 is een niet-geïnitialiseerde ronde van de uptime-feed en telt als "onbekend", niet als up. Een
+        // startedAt in de toekomst ook: SequencerDown in plaats van een Panic (zelf-audit 2026-09-17, Info-G).
+        if (
+            seqAnswer != 0 || seqStartedAt == 0 || seqStartedAt > block.timestamp
+                || block.timestamp - seqStartedAt < GRACE_PERIOD
+        ) {
             revert SequencerDown();
         }
 

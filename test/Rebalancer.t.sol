@@ -575,6 +575,18 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     /// @dev L-9: een niet-geïnitialiseerde ronde (startedAt == 0) van de uptime-feed telt niet als "up".
+    /// @notice Zelf-audit 2026-09-17, Info-G: een `startedAt` in de toekomst geeft `SequencerDown`, geen Panic.
+    function test_execute_revertsSequencerDownWhenStartedAtInFuture() public {
+        _setUser(alice, 1000e6, 0, _defaultParams());
+        sequencer.set(0, vm.getBlockTimestamp() + 1, vm.getBlockTimestamp() + 1);
+        vm.expectRevert(Rebalancer.SequencerDown.selector);
+        r.execute(alice, keeper);
+        vm.expectRevert(Rebalancer.SequencerDown.selector);
+        r.quote();
+        (bool due,) = r.isDue(alice);
+        assertFalse(due);
+    }
+
     function test_execute_revertsSequencerDownWhenStartedAtZero() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         sequencer.set(0, 0, 0);
