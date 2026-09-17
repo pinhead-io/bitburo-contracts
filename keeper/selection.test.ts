@@ -122,6 +122,15 @@ describe("what to do after a failure", () => {
     expect(failureAction({ reason: "Too little received" })).toBe("skip");
   });
 
+  test("a plain revert string is judged by its reason: viem names every one of them Error", () => {
+    expect(failureAction({ errorName: "Error", reason: "Too little received" })).toBe("skip");
+    expect(failureAction({ errorName: "Error", reason: "Blacklistable: account is blacklisted" })).toBe("cooldown");
+    expect(failureAction({ errorName: "Error" })).toBe("cooldown");
+    expect(failureAction({ errorName: "Panic", reason: "Arithmetic operation resulted in underflow or overflow." })).toBe(
+      "cooldown",
+    );
+  });
+
   test("a state that changed since isDue is skipped: someone else ran it, the band, a replaced keeper", () => {
     for (const errorName of ["NotDue", "NothingToDo", "Inactive", "NotOwnerOrKeeper"]) {
       expect(failureAction({ errorName })).toBe("skip");
@@ -181,10 +190,23 @@ describe("cool-down", () => {
     expect(clearFailure({}, OWNER)).toEqual({});
   });
 
-  test("pruneExpired drops entries whose cool-down has passed", () => {
+  test("pruneExpired drops entries whose cool-down ended longer ago than it keeps them", () => {
     let state = recordFailure({}, OWNER, 1000, "x", policy);
     state = recordFailure(state, OTHER, 10_000, "y", policy);
-    expect(Object.keys(pruneExpired(state, 5000))).toEqual([OTHER.toLowerCase()]);
+    const ownerUntil = state[OWNER.toLowerCase()].until;
+    expect(Object.keys(pruneExpired(state, ownerUntil + 100, 100))).toEqual([OTHER.toLowerCase()]);
+  });
+
+  test("an owner who fails again right after his cool-down gets the doubled wait, across runs", () => {
+    // Every run prunes first, then records. The entry has to survive its own cool-down for the streak to count.
+    let state = recordFailure({}, OWNER, 1000, "x", policy);
+    const firstWait = state[OWNER.toLowerCase()].until - 1000;
+    const nextRun = state[OWNER.toLowerCase()].until + 1;
+    state = pruneExpired(state, nextRun, policy.maxSeconds);
+    expect(isCoolingDown(state, OWNER, nextRun)).toBe(false);
+    state = recordFailure(state, OWNER, nextRun, "x", policy);
+    expect(state[OWNER.toLowerCase()].failures).toBe(2);
+    expect(state[OWNER.toLowerCase()].until - nextRun).toBe(2 * firstWait);
   });
 
   test("parseCooldownState accepts its own output and rejects garbage", () => {
