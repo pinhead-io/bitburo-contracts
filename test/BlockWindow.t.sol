@@ -761,6 +761,34 @@ contract BlockWindowTest is RebalancerTestBase {
     }
 
     /// @notice Lead 3: een donatie tijdens een ronde vergroot het budget niet.
+    /// @notice Zelf-audit 2026-09-17, lead 11: krimpt de wallet tijdens een ronde (opnemen of een koersdaling), dan is
+    ///         een deel nooit groter dan `maxCorrectionBps` van de waarde van dat moment. Vroeger gold het budget van de
+    ///         eerste run, zodat een deel hier tot ~23% van de gekrompen wallet kon zijn.
+    function test_chunk_budgetShrinksWithWallet() public {
+        poolEurcUsdc.setLiquidity(2e12);
+        _setUser(alice, 20_000e6, 0, _params(1000, 20e6)); // budget 2.000
+        r.execute(alice, keeper);
+        (, uint256 remaining) = _round(alice);
+        assertGt(remaining, 0, "opzet: de liquiditeit begrensde de eerste run, ronde open");
+        uint256 cap = _expectedMaxBuy(2e12);
+        assertGt(cap, 300e6, "opzet: de liquiditeit laat meer dan 10% van de gekrompen wallet toe");
+
+        // De owner neemt op tot een wallet van ~3.000 EURC; hij ligt nog ver onder zijn doel van 80% cbBTC.
+        uint256 btcValue = Math.mulDiv(cbbtc.balanceOf(alice), PRICE, 1e8);
+        uint256 withdraw = eurc.balanceOf(alice) - (3_000e6 - btcValue);
+        vm.prank(alice);
+        eurc.transfer(bob, withdraw);
+        _warp(10 minutes);
+
+        (bool due, int256 delta) = r.isDue(alice);
+        assertTrue(due, "deel is due");
+        uint256 total = eurc.balanceOf(alice) + Math.mulDiv(cbbtc.balanceOf(alice), PRICE, 1e8);
+        assertLe(uint256(delta), total * 1000 / BPS, "deel groter dan maxCorrectionBps van de huidige waarde");
+        r.execute(alice, keeper);
+        (, remaining) = _round(alice);
+        assertLe(remaining, total * 1000 / BPS, "restbudget boven het budget van de huidige waarde");
+    }
+
     function test_chunk_donationDoesNotGrowRoundBudget() public {
         poolEurcUsdc.setLiquidity(2e12);
         _setUser(alice, 10_000e6, 0, _params(1000, 20e6)); // budget 1.000

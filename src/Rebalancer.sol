@@ -78,8 +78,8 @@ import {TickMath} from "./libraries/TickMath.sol";
  *
  *      Delen: een run die door de liquiditeit is begrensd, opent een ronde. Het volgende deel in dezelfde
  *      richting mag al na CHUNK_INTERVAL in plaats van na `interval`, tot de afwijking binnen de band is of het
- *      budget van de ronde (maxCorrectionBps van de waarde bij de eerste run) op is. Elk deel is een gewone run
- *      met fee en keeperbeloning.
+ *      budget van de ronde (maxCorrectionBps van de waarde bij de eerste run, en per deel nooit meer dan
+ *      maxCorrectionBps van de huidige waarde) op is. Elk deel is een gewone run met fee en keeperbeloning.
  *
  *      Uitval: een run revert vóór de swap met `PoolTouchedThisBlock` als een pool in dit blok al een observatie
  *      schreef (door anderen of door een eerdere run), en met `BlockMoveExceeded` als er te weinig ruimte of
@@ -860,7 +860,8 @@ contract Rebalancer is ReentrancyGuardTransient {
      * @dev Rekenregel per run.
      *      1. Correctie zoals in de app: |drift| × total, alleen buiten de band.
      *      2. Budget: bij een nieuwe ronde max(total × maxCorrectionBps, minTradeEurc); bij een deel wat er van de
-     *         ronde over is. Een deel in de andere richting dan de ronde gebeurt niet (geen ping-pong).
+     *         ronde over is, maar nooit meer dan dat budget van de huidige waarde (zelf-audit lead 11). Een deel in de
+     *         andere richting dan de ronde gebeurt niet (geen ping-pong).
      *      3. correctie = min(correctie, budget); onder minTradeEurc -> niets (ook: de ronde is klaar).
      *      4. run = min(correctie, `_maxRunEurc`). Onder MIN_TRADE_FLOOR -> `blockedBy`: de correctie wacht op
      *         ruimte in een volgend blok; een lopende ronde blijft staan tot er weer ruimte is of `interval` na de
@@ -898,13 +899,13 @@ contract Rebalancer is ReentrancyGuardTransient {
             return pl;
         }
 
-        uint256 budget;
+        uint256 budget = Math.max(Math.mulDiv(pl.total, p.maxCorrectionBps, BPS), p.minTradeEurc);
         if (chunk) {
             Round memory rd = rounds[owner];
             if (rd.isBuy != pl.isBuy) return pl;
-            budget = rd.remainingEurc;
-        } else {
-            budget = Math.max(Math.mulDiv(pl.total, p.maxCorrectionBps, BPS), p.minTradeEurc);
+            // Nooit meer dan het budget van de huidige waarde: krimpt de wallet tijdens de ronde (opnemen of een
+            // koersdaling), dan krimpt het budget mee (zelf-audit 2026-09-17, lead 11).
+            budget = Math.min(rd.remainingEurc, budget);
         }
         uint256 correction = Math.min(Math.mulDiv(driftWad, pl.total, WAD), budget);
         if (correction < p.minTradeEurc) {
