@@ -15,180 +15,180 @@ import {TickMath} from "./libraries/TickMath.sol";
 
 /**
  * @title Rebalancer
- * @notice Eén onveranderbaar contract dat, met een ERC-20-mandaat (allowance) van de gebruiker, diens wallet
- *         rebalancet tussen EURC en cbBTC naar een door de gebruiker gekozen verdeling. Het geld blijft in de
- *         wallet van de gebruiker; het contract houdt buiten een transactie nooit saldo.
+ * @notice A single immutable contract that, using an ERC-20 mandate (allowance) from the user, rebalances the
+ *         user's wallet between EURC and cbBTC towards an allocation chosen by the user. The funds stay in the
+ *         user's wallet; outside a transaction the contract never holds a balance.
  *
- * @dev De rekenregel is één op één AutoTradeStrategy::rebalanceAmount uit de Bitburo-app:
- *      fraction = position / total; drift = fraction - target; |drift| <= band -> niets;
+ * @dev The calculation rule is a one-to-one copy of AutoTradeStrategy::rebalanceAmount from the Bitburo app:
+ *      fraction = position / total; drift = fraction - target; |drift| <= band -> nothing;
  *      correction = |drift| * total; cap = max(total * maxCorrection, minTrade); correction = min(correction, cap);
- *      correction < minTrade -> niets. Drift < 0 -> kopen (EURC -> cbBTC), anders verkopen.
+ *      correction < minTrade -> nothing. Drift < 0 -> buy (EURC -> cbBTC), otherwise sell.
  *
- *      Geen admin, geen upgrade, geen pauzeknop. `execute` is permissionless; de aanroeper kan alleen kiezen
- *      wanneer, nooit wat of hoeveel. De fee is vast en gaat altijd in EURC naar de treasury, met een vaste
- *      beloning voor de aanroeper. De enige bevoegdheid van de treasury is `retire`: een eenmalige,
- *      onomkeerbare uitschakelaar die het contract definitief stopt (zie daar). Die kan niets met fondsen.
+ *      No admin, no upgrade, no pause button. `execute` is permissionless; the caller can only choose
+ *      when, never what or how much. The fee is fixed and always goes to the treasury in EURC, with a fixed
+ *      reward for the caller. The treasury's only power is `retire`: a one-time,
+ *      irreversible switch that stops the contract permanently (see there). It cannot do anything with funds.
  *
- *      Sandwich-bescherming (audit M-1, L-3), in drie lagen:
- *      1. Blokcheck en blokvenster per pool. Een run gebeurt alleen als geen van beide pools in dit blok al een
- *         oracle-observatie schreef (`observations[slot0.observationIndex].blockTimestamp == block.timestamp`,
- *         anders `PoolTouchedThisBlock`). Volgens Uniswap v3-core (commit d8b1c635) schrijven precies deze acties
- *         een observatie:
- *         - een swap die de tick verandert (UniswapV3Pool.sol:732-748);
- *         - een mint of burn met liquiditeit > 0 van een positie waarvan de range de huidige tick bevat
- *           (`_modifyPosition`, :327 en :336-348).
- *         Hooguit één per blok (Oracle.sol:90). Een swap binnen de tick, een mint of burn buiten de range, een
- *         burn van 0, `collect` en `flash` schrijven niets. Is er in dit blok geen observatie, dan staan tick en
- *         in-range liquiditeit nog zoals aan het begin van het blok: een aanvaller kan in dit blok hooguit binnen
- *         de begintick duwen (≤ 1 tick ≈ 1 bp per pool) en geen JIT-liquiditeit in de range zetten. Uitzondering
- *         (zelf-audit 2026-09-17, L-E): staat de koers precies op een tickgrens b, dan telt een positie met b als
- *         grens in de swaprichting voor Uniswap als buiten de range; een mint schrijft niets, maar de run kruist b
- *         meteen en handelt ertegen. Dat maakt de run niet groter dan de in-range bovengrens en geeft het
- *         slachtoffer een betere koers; de JIT-positie int alleen poolfee, ten koste van andere LP's. Vóór én na de
- *         swap moet de koers bovendien binnen MAX_BLOCK_MOVE_BPS van die begintick liggen, inclusief de eigen
- *         swap. Restrisico (review F-4): een push binnen de begintick schrijft niets en is zonder observatie niet
- *         te zien, dus het slachtoffer kan tot ~1 tick per geduwde pool slechter handelen (tick-granulariteit). Een
- *         LP met een groot aandeel die in een eerder blok minde, krijgt de poolfee van die push grotendeels terug;
- *         wat hem rest, is het protocolfee-deel. Dat is een governance-instelling van Uniswap (`feeProtocol` nu 68,
- *         1/4 op beide pools). Twee maten, elk in bp van de run:
- *         - extra verlies van het slachtoffer (met push tegen zonder push, bij gelijke run): < 2,05 bp, ~1 tick
- *           per geduwde pool, los van de protocolfee (gemeten +1,99 bp);
- *         - extra winst van de aanvaller (met push tegen zonder push, bij dezelfde correctie, elk bij zijn eigen
- *           run): < 0,5 bp bij de huidige protocolfee (gemeten tot +0,18 bp; rond de capaciteit van het venster
- *           ≤ −1,68 bp). Zet Uniswap de protocolfee op 0 (hypothetisch), dan is die winst blokafhankelijk en
- *           zonder vaste grens: gemeten +1,39 tot +4,07 bp over vijf blokken (aandeel 99% of 99,9% van beide
- *           pools, een run vlak onder de capaciteit; hoogste op blok 51.407.293). Het surplus boven het verlies van het
- *           slachtoffer komt uit het volume dat wegvalt: maakt de push de run kleiner, dan verliest de aanvaller
- *           als LP ook niet aan de marge op dat volume. Het slachtoffer verliest niet meer dan ~1 tick per
- *           geduwde pool. Geaccepteerd risico; zie README.
- *         Niet gezien wordt duwen aan het eind van het vorige blok (review I-4; niet atomair, laag 3 en arbitrage
- *         begrenzen het). Laag 3 meet tegen Chainlink, niet tegen de markt: loopt een feed binnen zijn
- *         deviation-drempel achter in het voordeel van de aanvaller (cbBTC/USD 0,3%, EURC/USD 0,1%), dan mag die push
- *         groter zijn (zelf-audit 2026-09-17, L-F; zie README).
- *         Meerdere `execute`'s in hetzelfde blok delen hetzelfde venster, maar alleen zolang geen run de tick
- *         verandert; daarna is de pool in dit blok aangeraakt.
- *      2. Runomvang uit de liquiditeit. `_plan` begrenst de run zo dat de geschatte eindkoers op SIZING_BPS van
- *         de resterende ruimte tot de vensterrand blijft, gerekend met de kleinste liquiditeit tot die rand (ook
- *         voorbij een tickgrens in het venster, review L-1). Liquiditeit buiten de range maakt een run nooit groter dan
- *         de in-range liquiditeit toelaat (wel kan ze een klif opheffen die de run eerst kleiner maakte).
- *         Past de correctie daar niet in, dan gaat hij in delen (zie `rounds`).
- *      3. Spot tegen Chainlink. Vóór én na elke swap moet de spot van beide pools binnen
- *         MAX_SPOT_DEVIATION_BPS van de Chainlink-koers liggen, en `amountOutMinimum` volgt uit Chainlink en
- *         `maxSlippageBps`. Dat begrenst duwen over meerdere blokken, wat het blokvenster niet ziet. Het
- *         maximale verlies per run ten opzichte van de Chainlink-koers blijft FEE_BPS + maxSlippageBps
- *         (0,85% tot 1,25%). Omdat de eigen swap de gecombineerde spot hooguit ~12 bp verschuift (6 bp per pool),
- *         kan een eerlijke run alleen na de swap op de spotcheck vastlopen als de spot vooraf al meer dan ~38 bp in
- *         de runrichting afweek (audit lead 4; gemeten in 0,69% van de uurmetingen over 30 dagen, zie README).
- *         Beide feeds zijn volgens Chainlink `dex_state_price`; welke pools erin zitten is niet gepubliceerd, dus
- *         de bewaakte pools kunnen deels in de feed zitten (audit lead 5, zie README).
+ *      Sandwich protection (audit M-1, L-3), in three layers:
+ *      1. Block check and block window per pool. A run happens only if neither pool has already written an
+ *         oracle observation in this block (`observations[slot0.observationIndex].blockTimestamp == block.timestamp`,
+ *         otherwise `PoolTouchedThisBlock`). According to Uniswap v3-core (commit d8b1c635) exactly these actions
+ *         write an observation:
+ *         - a swap that changes the tick (UniswapV3Pool.sol:732-748);
+ *         - a mint or burn with liquidity > 0 of a position whose range contains the current tick
+ *           (`_modifyPosition`, :327 and :336-348).
+ *         At most one per block (Oracle.sol:90). A swap within the tick, a mint or burn outside the range, a
+ *         burn of 0, `collect` and `flash` write nothing. If there is no observation in this block, tick and
+ *         in-range liquidity are still as at the start of the block: in this block an attacker can at most push
+ *         within the start tick (≤ 1 tick ≈ 1 bp per pool) and cannot add JIT liquidity in the range. Exception
+ *         (self-audit 2026-09-17, L-E): if the price sits exactly on a tick boundary b, Uniswap treats a position
+ *         with b as its boundary in the swap direction as outside the range; a mint writes nothing, but the run
+ *         crosses b immediately and trades against it. That does not make the run larger than the in-range upper
+ *         bound and gives the victim a better price; the JIT position only collects pool fee, at the expense of
+ *         other LPs. Both before and after the swap the price must also lie within MAX_BLOCK_MOVE_BPS of that start
+ *         tick, including the run's own swap. Residual risk (review F-4): a push within the start tick writes
+ *         nothing and cannot be seen without an observation, so the victim may trade up to ~1 tick per pushed pool
+ *         worse (tick granularity). An LP with a large share that minted in an earlier block gets most of the pool
+ *         fee of that push back; what remains for him is the protocol fee share. That is a Uniswap governance
+ *         setting (`feeProtocol` currently 68, 1/4 on both pools). Two measures, each in bp of the run:
+ *         - extra loss for the victim (with push versus without push, for the same run): < 2.05 bp, ~1 tick
+ *           per pushed pool, independent of the protocol fee (measured +1.99 bp);
+ *         - extra profit for the attacker (with push versus without push, for the same correction, each at its own
+ *           run): < 0.5 bp at the current protocol fee (measured up to +0.18 bp; around the capacity of the window
+ *           ≤ −1.68 bp). If Uniswap sets the protocol fee to 0 (hypothetical), that profit depends on the block and
+ *           has no fixed bound: measured +1.39 to +4.07 bp over five blocks (share of 99% or 99.9% of both
+ *           pools, a run just below capacity; highest at block 51,407,293). The surplus above the victim's loss
+ *           comes from the volume that falls away: if the push makes the run smaller, the attacker as LP also
+ *           does not lose on the margin on that volume. The victim loses no more than ~1 tick per
+ *           pushed pool. Accepted risk; see README.
+ *         Pushing at the end of the previous block is not detected (review I-4; not atomic, layer 3 and arbitrage
+ *         bound it). Layer 3 measures against Chainlink, not against the market: if a feed lags within its
+ *         deviation threshold in the attacker's favour (cbBTC/USD 0.3%, EURC/USD 0.1%), that push may be
+ *         larger (self-audit 2026-09-17, L-F; see README).
+ *         Multiple `execute`s in the same block share the same window, but only as long as no run changes the
+ *         tick; after that the pool has been touched in this block.
+ *      2. Run size from liquidity. `_plan` caps the run so that the estimated final price uses at most SIZING_BPS
+ *         of the remaining room up to the window edge, calculated with the smallest liquidity up to that edge (also
+ *         beyond a tick boundary in the window, review L-1). Liquidity outside the range never makes a run larger
+ *         than the in-range liquidity allows (though it can remove a cliff that first made the run smaller).
+ *         If the correction does not fit within that, it is done in chunks (see `rounds`).
+ *      3. Spot against Chainlink. Before and after every swap the spot of both pools must lie within
+ *         MAX_SPOT_DEVIATION_BPS of the Chainlink price, and `amountOutMinimum` follows from Chainlink and
+ *         `maxSlippageBps`. That bounds pushing over multiple blocks, which the block window does not see. The
+ *         maximum loss per run relative to the Chainlink price remains FEE_BPS + maxSlippageBps
+ *         (0.85% to 1.25%). Because the run's own swap moves the combined spot by at most ~12 bp (6 bp per pool),
+ *         an honest run can only get stuck on the spot check after the swap if the spot already deviated by more
+ *         than ~38 bp in the run direction beforehand (audit lead 4; measured in 0.69% of hourly samples over 30
+ *         days, see README). According to Chainlink both feeds are `dex_state_price`; which pools they use is not
+ *         published, so the monitored pools may partly be in the feed (audit lead 5, see README).
  *
- *      Delen: een run die door de liquiditeit is begrensd, opent een ronde. Het volgende deel in dezelfde
- *      richting mag al na CHUNK_INTERVAL in plaats van na `interval`, tot de afwijking binnen de band is of het
- *      budget van de ronde (maxCorrectionBps van de waarde bij de eerste run, en per deel nooit meer dan
- *      maxCorrectionBps van de huidige waarde) op is. Elk deel is een gewone run met fee en keeperbeloning.
+ *      Chunks: a run capped by liquidity opens a round. The next chunk in the same direction
+ *      may follow after CHUNK_INTERVAL instead of after `interval`, until the deviation is within the band or the
+ *      round's budget (maxCorrectionBps of the value at the first run, and per chunk never more than
+ *      maxCorrectionBps of the current value) is used up. Every chunk is a normal run with fee and keeper reward.
  *
- *      Uitval: een run revert vóór de swap met `PoolTouchedThisBlock` als een pool in dit blok al een observatie
- *      schreef (door anderen of door een eerdere run), en met `BlockMoveExceeded` als er te weinig ruimte of
- *      liquiditeit is of de run de vensterrand haalt. Beide zijn tijdelijk: in een volgend blok opnieuw proberen.
- *      Gemeten op Base (2.000 blokken rond blok 51.390.800) valt door de blokcheck 0% van de pogingen uit als de
- *      transactie bovenaan het blok staat, 4,3% halverwege en 7 tot 11% onderaan.
+ *      Failure: a run reverts before the swap with `PoolTouchedThisBlock` if a pool already wrote an observation
+ *      in this block (by others or by an earlier run), and with `BlockMoveExceeded` if there is too little room or
+ *      liquidity or the run reaches the window edge. Both are temporary: retry in a later block.
+ *      Measured on Base (2,000 blocks around block 51,390,800), the block check makes 0% of attempts fail when the
+ *      transaction is at the top of the block, 4.3% halfway and 7 to 11% at the bottom.
  *
- *      Runs tegenhouden (audit L-3): wie een pool elk blok aanraakt (een burn van 1 liquiditeit in de range kost
- *      ~92.630 gas, gemeten ~1,8 EURC per uur), houdt alle runs in die blokken tegen, zonder er iets aan te
- *      verdienen. Geen contractwijziging maakt dat duurder zonder de aanraking voor gas te laten staan; het antwoord
- *      zit in de wekkers: lezen met blok-overrides voor het volgende blok, het hele retry-budget blijven proberen,
- *      en versturen met een priority fee die na een blokkade oploopt, zodat de aanvaller die tip elk blok moet
- *      betalen (zie README en keeper/keeper.ts).
+ *      Blocking runs (audit L-3): whoever touches a pool every block (a burn of 1 liquidity in the range costs
+ *      ~92,630 gas, measured ~1.8 EURC per hour) blocks all runs in those blocks, without earning anything from
+ *      it. No contract change makes that more expensive while a touch still costs only gas; the answer lies in
+ *      the keepers: reading with block overrides for the next block, retrying for the whole retry budget,
+ *      and sending with a priority fee that rises after a blockade, so that the attacker has to pay that tip every
+ *      block (see README and keeper/keeper.ts).
  *
- *      Beschikbaarheid: de fee-transfer naar de treasury en de beloning worden met een niet-reverterende
- *      transfer gedaan. Faalt de treasury-transfer (bijvoorbeeld een Circle-blacklist), dan blijft de fee in
- *      het contract (FeeRetained) en kan `sweep` die later alsnog ophalen; de rebalance zelf loopt nooit stuk
- *      op de fee-ontvanger.
+ *      Availability: the fee transfer to the treasury and the reward are done with a non-reverting
+ *      transfer. If the treasury transfer fails (for example a Circle blacklist), the fee stays in
+ *      the contract (FeeRetained) and `sweep` can still collect it later; the rebalance itself never breaks
+ *      on the fee recipient.
  */
 contract Rebalancer is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
-    // ─── Vaste parameters ───────────────────────────────────────────────────────────────────────────────────
+    // ─── Fixed parameters────────────────────────────────────────────────────────────────────────────────────
 
-    IERC20 public immutable EURC; // 6 decimalen
-    IERC20 public immutable CBBTC; // 8 decimalen
-    address public immutable USDC; // alleen als tussenhop in het Uniswap-pad
+    IERC20 public immutable EURC; // 6 decimals
+    IERC20 public immutable CBBTC; // 8 decimals
+    address public immutable USDC; // only as an intermediate hop in the Uniswap path
     IV3SwapRouter public immutable ROUTER; // Uniswap SwapRouter02
-    IAggregatorV3 public immutable FEED_CBBTC_USD; // 8 decimalen
-    /// @dev Op Base de Standard proxy `0x9867…01e0` van de SVR-feed EURC/USD, niet de SVR-proxy `0x8a55…E287`: zo
-    ///      geldt de vertraging voor de MEV-Share-veiling niet (audit lead 5).
-    IAggregatorV3 public immutable FEED_EURC_USD; // 8 decimalen
+    IAggregatorV3 public immutable FEED_CBBTC_USD; // 8 decimals
+    /// @dev On Base the Standard proxy `0x9867…01e0` of the SVR feed EURC/USD, not the SVR proxy `0x8a55…E287`: this
+    ///      way the delay for the MEV-Share auction does not apply (audit lead 5).
+    IAggregatorV3 public immutable FEED_EURC_USD; // 8 decimals
     IAggregatorV3 public immutable SEQUENCER_FEED; // L2 Sequencer Uptime, answer 0 = up
     address public immutable TREASURY;
-    /// @notice Uniswap v3-pool EURC/USDC (0,05%), alleen gelezen voor de spot-vs-oracle-check. De constructor dwingt
-    ///         af dat dit de POOL_FEE-pool van de factory van ROUTER is, dus de pool waar de swap doorheen gaat.
+    /// @notice Uniswap v3 pool EURC/USDC (0.05%), only read for the spot-vs-oracle check. The constructor enforces
+    ///         that this is the POOL_FEE pool of ROUTER's factory, i.e. the pool the swap goes through.
     IUniswapV3Pool public immutable POOL_EURC_USDC;
-    /// @notice Uniswap v3-pool USDC/cbBTC (0,05%), alleen gelezen voor de spot-vs-oracle-check. Zelfde constructorcheck.
+    /// @notice Uniswap v3 pool USDC/cbBTC (0.05%), only read for the spot-vs-oracle check. Same constructor check.
     IUniswapV3Pool public immutable POOL_USDC_CBBTC;
     bool private immutable _eurcIsToken0;
     bool private immutable _usdcIsToken0;
 
-    uint24 public constant POOL_FEE = 500; // 0,05% op beide hops
-    /// @notice tickSpacing van de POOL_FEE-pools (UniswapV3Factory: feeAmountTickSpacing[500] = 10, niet te wijzigen).
-    ///         De constructor dwingt het af; `_maxInput` rekent erop.
+    uint24 public constant POOL_FEE = 500; // 0.05% on both hops
+    /// @notice tickSpacing of the POOL_FEE pools (UniswapV3Factory: feeAmountTickSpacing[500] = 10, cannot change).
+    ///         The constructor enforces it; `_maxInput` relies on it.
     int24 public constant TICK_SPACING = 10;
     uint16 public constant FEE_BPS = 25;
-    /// @notice Beloning voor de aanroeper, hooguit de helft van de fee van de run (zelf-audit 2026-09-17, L-D): zo
-    ///         houdt de treasury van elke run minstens de helft, ook als de aanroeper de owner zelf is.
-    uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0,05 EURC
+    /// @notice Reward for the caller, at most half of the run's fee (self-audit 2026-09-17, L-D): this way the
+    ///         treasury keeps at least half of every run, even if the caller is the owner themselves.
+    uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0.05 EURC
     uint16 public constant MAX_SLIPPAGE_BPS = 100;
-    /// @notice Ondergrens voor `maxSlippageBps`: MAX_SPOT_DEVIATION_BPS + 2 × 5 bps poolfee. `amountOutMinimum`
-    ///         wordt van de oracle afgeleid, terwijl de swap tegen de pool-spot loopt; die mag 0,5% afwijken en
-    ///         kost 0,1% aan poolfees. Onder 60 bps zou een run die de spot-check haalt structureel op
-    ///         "Too little received" kunnen reverten.
+    /// @notice Lower bound for `maxSlippageBps`: MAX_SPOT_DEVIATION_BPS + 2 × 5 bps pool fee. `amountOutMinimum`
+    ///         is derived from the oracle, while the swap runs against the pool spot; that may deviate 0.5% and
+    ///         costs 0.1% in pool fees. Below 60 bps a run that passes the spot check could structurally
+    ///         revert with "Too little received".
     uint16 public constant MIN_SLIPPAGE_BPS = 60;
     uint16 public constant MAX_SPOT_DEVIATION_BPS = 50;
-    /// @notice Ondergrens voor `minTradeEurc` (20 EURC) en voor elke run, ook elk deel van een ronde. Bij
-    ///         FEE_BPS = 25 is de fee van de kleinste run dan 0,05 EURC, zodat een dust-owner de wekkers niet gratis
-    ///         bezig kan houden: de beloning is dan 0,025 EURC (de helft van de fee, zie KEEPER_REWARD_EURC) en de
-    ///         treasury krijgt de andere helft. Dat geldt voor kopen én verkopen: bij een koop is de fee-grondslag
-    ///         het bruto inputbedrag, bij een verkoop max(ontvangen, verwachte opbrengst), waarbij de verwachte
-    ///         opbrengst dezelfde oraclewaarde is waarop de ondergrens is gecontroleerd (audit L-B). Bovendien is
-    ///         `expectedOut` bij een koop dan ≥ ~25.000 sats bij 80.000 EURC/cbBTC, waardoor de afronding in
-    ///         `amountOutMinimum` onder 1 bp blijft.
+    /// @notice Lower bound for `minTradeEurc` (20 EURC) and for every run, including every chunk of a round. With
+    ///         FEE_BPS = 25 the fee of the smallest run is then 0.05 EURC, so that a dust owner cannot keep the
+    ///         keepers busy for free: the reward is then 0.025 EURC (half of the fee, see KEEPER_REWARD_EURC) and the
+    ///         treasury gets the other half. That holds for buying and selling alike: for a buy the fee base is
+    ///         the gross input amount, for a sell max(received, expected proceeds), where the expected
+    ///         proceeds are the same oracle value against which the lower bound was checked (audit L-B). Moreover,
+    ///         `expectedOut` for a buy is then ≥ ~25,000 sats at 80,000 EURC/cbBTC, so that the rounding in
+    ///         `amountOutMinimum` stays below 1 bp.
     uint64 public constant MIN_TRADE_FLOOR = 20e6;
-    /// @notice Hoever de koers van elke pool binnen één blok van de koers aan het begin van dat blok mag
-    ///         afliggen, inclusief de eigen swap (audit M-1). Onder de poolfee heen en terug (2 × 5 bp), zodat
-    ///         een zelf-sandwich per geduwde eenheid verlies maakt. De begintick is afgerond; het venster wordt
-    ///         vanaf de ongunstigste rand van die tick gerekend, zodat de afronding (≤ 1 tick ≈ 1 bp) alleen
-    ///         eerlijke runs ruimte kost en nooit een aanvaller ruimte geeft.
-    ///         Moet ruim onder TICK_SPACING ticks blijven (1 tick ≈ 1 bp): `_maxInput` gaat ervan uit dat er tussen de
-    ///         koers en de vensterrand hooguit één initialiseerbare tickgrens ligt.
+    /// @notice How far the price of each pool may lie within one block from the price at the start of that
+    ///         block, including the run's own swap (audit M-1). Below the pool fee there and back (2 × 5 bp), so
+    ///         that a self-sandwich makes a loss per pushed unit. The start tick is rounded; the window is
+    ///         calculated from the least favourable edge of that tick, so that the rounding (≤ 1 tick ≈ 1 bp) only
+    ///         costs honest runs room and never gives an attacker room.
+    ///         Must stay well below TICK_SPACING ticks (1 tick ≈ 1 bp): `_maxInput` assumes that between the
+    ///         price and the window edge there is at most one initializable tick boundary.
     uint16 public constant MAX_BLOCK_MOVE_BPS = 6;
-    /// @notice Welk deel van de resterende ruimte tot de vensterrand een run volgens de schatting bij constante
-    ///         liquiditeit mag gebruiken. De marge vangt liquiditeit die over een tickgrens dunner wordt.
+    /// @notice Which share of the remaining room up to the window edge a run may use according to the estimate at
+    ///         constant liquidity. The margin absorbs liquidity that becomes thinner across a tick boundary.
     uint16 public constant SIZING_BPS = 7500;
-    /// @notice Minimale tijd tussen twee delen van één ronde.
+    /// @notice Minimum time between two chunks of one round.
     uint32 public constant CHUNK_INTERVAL = 10 minutes;
-    /// @notice Ondergrens voor `maxCorrectionBps` (0,1% per run): sluit configuraties uit die elk interval een
-    ///         verwaarloosbare correctie doen en daarmee eeuwig due blijven.
+    /// @notice Lower bound for `maxCorrectionBps` (0.1% per run): rules out configurations that make a
+    ///         negligible correction every interval and thereby stay due forever.
     uint16 public constant MIN_CORRECTION_BPS = 10;
-    /// @notice Ondergrens voor `bandBps` (1,25%): FEE_BPS + MAX_SLIPPAGE_BPS, het meeste wat een run kost. Een run
-    ///         gebeurt dus pas bij een afwijking die groter is dan dat verlies. Zo kan een permissionless aanroeper een
-    ///         wallet niet herhaaldelijk laten handelen op kleine koersbewegingen zonder dat de verhouding echt
-    ///         verbetert, en is een volledige correctie in één run klaar: de restafwijking door fee en slippage
-    ///         (≤ 1,25% van het runbedrag) valt binnen de band (rekenaudit 2026-09-15, I-01).
+    /// @notice Lower bound for `bandBps` (1.25%): FEE_BPS + MAX_SLIPPAGE_BPS, the most a run costs. A run
+    ///         therefore only happens at a deviation larger than that loss. This way a permissionless caller cannot
+    ///         make a wallet trade repeatedly on small price moves without the allocation actually
+    ///         improving, and a full correction is done in one run: the residual deviation from fee and slippage
+    ///         (≤ 1.25% of the run amount) falls within the band (calculation audit 2026-09-15, I-01).
     uint16 public constant MIN_BAND_BPS = 125;
     uint16 public constant MIN_TARGET_BPS = 500;
     uint16 public constant MAX_TARGET_BPS = 9500;
     uint32 public constant MIN_INTERVAL = 1 hours;
     uint256 public constant GRACE_PERIOD = 1 hours;
-    /// @notice Beide feeds moeten dit aantal decimalen hebben; de omrekening in `_quote` deelt ze op elkaar.
+    /// @notice Both feeds must have this number of decimals; the conversion in `_quote` divides them by each other.
     uint8 public constant FEED_DECIMALS = 8;
-    uint256 public constant MAX_AGE_CBBTC = 1200 + 300; // heartbeat 20 min + marge
-    /// @notice EURC/USD-feed 0x9867…01e0 op Base: heartbeat 1 uur, deviatie 0,1%; zelfde 25% marge als cbBTC.
+    uint256 public constant MAX_AGE_CBBTC = 1200 + 300; // heartbeat 20 min + margin
+    /// @notice EURC/USD feed 0x9867…01e0 on Base: heartbeat 1 hour, deviation 0.1%; same 25% margin as cbBTC.
     uint256 public constant MAX_AGE_EURC = 3600 + 900;
     uint256 public constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
     uint256 private constant EURC_UNIT = 1e6;
     uint256 private constant CBBTC_UNIT = 1e8;
-    /// @dev Decimalen waar EURC_UNIT, CBBTC_UNIT, MIN_TRADE_FLOOR en KEEPER_REWARD_EURC op rekenen; USDC als tussenhop
-    ///      met 6. De constructor dwingt ze af (review I-4).
+    /// @dev Decimals that EURC_UNIT, CBBTC_UNIT, MIN_TRADE_FLOOR and KEEPER_REWARD_EURC rely on; USDC as the
+    ///      intermediate hop with 6. The constructor enforces them (review I-4).
     uint8 private constant EURC_DECIMALS = 6;
     uint8 private constant CBBTC_DECIMALS = 8;
     uint8 private constant USDC_DECIMALS = 6;
@@ -196,42 +196,42 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 private constant Q96 = 1 << 96;
     uint256 private constant Q128 = 1 << 128;
 
-    // ─── Per gebruiker ──────────────────────────────────────────────────────────────────────────────────────
+    // ─── Per user────────────────────────────────────────────────────────────────────────────────────────────
 
     struct Params {
         bool active;
-        uint16 targetBps; // cbBTC-aandeel, 500–9500, veelvoud van 100
+        uint16 targetBps; // cbBTC share, 500–9500, multiple of 100
         uint16 bandBps; // MIN_BAND_BPS–9999
-        uint16 maxCorrectionBps; // MIN_CORRECTION_BPS–10000, aandeel van de totale waarde per run
-        uint64 minTradeEurc; // EURC-basiseenheden, >= MIN_TRADE_FLOOR
-        uint32 interval; // minimale tijd tussen runs, >= MIN_INTERVAL
+        uint16 maxCorrectionBps; // MIN_CORRECTION_BPS–10000, share of the total value per run
+        uint64 minTradeEurc; // EURC base units, >= MIN_TRADE_FLOOR
+        uint32 interval; // minimum time between runs, >= MIN_INTERVAL
         uint16 maxSlippageBps; // MIN_SLIPPAGE_BPS–MAX_SLIPPAGE_BPS
     }
 
-    /// @notice Een lopende rebalance-ronde: de vorige run was door de liquiditeit begrensd en de correctie is nog
-    ///         niet klaar. `remainingEurc` is wat er van het budget van de ronde over is; 0 = geen ronde.
+    /// @notice An ongoing rebalance round: the previous run was capped by liquidity and the correction is not
+    ///         done yet. `remainingEurc` is what is left of the round's budget; 0 = no round.
     struct Round {
         bool isBuy;
         uint128 remainingEurc;
     }
 
     mapping(address owner => Params) public params;
-    /// @notice Tijdstip van de laatste run, ook van een deel. Een nieuwe ronde kan pas `interval` daarna.
+    /// @notice Timestamp of the last run, including a chunk. A new round can only start `interval` after it.
     mapping(address owner => uint64) public lastExecutedAt;
-    /// @notice Lopende ronde per owner. Een deel mag CHUNK_INTERVAL na de vorige run, alleen in `isBuy`-richting
-    ///         en tot `remainingEurc`. `setParams` breekt de ronde af.
+    /// @notice Ongoing round per owner. A chunk may follow CHUNK_INTERVAL after the previous run, only in the
+    ///         `isBuy` direction and up to `remainingEurc`. `setParams` aborts the round.
     mapping(address owner => Round) public rounds;
     address[] private _owners;
     mapping(address owner => bool) private _isRegistered;
-    /// @notice True zodra de treasury `retire` heeft aangeroepen. Onomkeerbaar: daarna doet `execute` niets meer,
-    ///         geven `isDue`/`dueOwners` niets terug en kan `setParams` alleen nog een mandaat intrekken
-    ///         (`active = false`). `sweep` blijft werken.
+    /// @notice True once the treasury has called `retire`. Irreversible: after that `execute` does nothing anymore,
+    ///         `isDue`/`dueOwners` return nothing and `setParams` can only revoke a mandate
+    ///         (`active = false`). `sweep` keeps working.
     bool public retired;
 
-    // ─── Events en errors ───────────────────────────────────────────────────────────────────────────────────
+    // ─── Events and errors───────────────────────────────────────────────────────────────────────────────────
 
     event ParamsUpdated(address indexed owner, Params params);
-    /// @notice Het contract is definitief buiten gebruik gesteld door de treasury.
+    /// @notice The contract has been permanently decommissioned by the treasury.
     event Retired();
     event Executed(
         address indexed owner,
@@ -245,7 +245,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         uint256 totalValueEurc,
         uint256 fractionBps
     );
-    /// @notice De fee-transfer naar de treasury faalde; `amount` EURC blijft in het contract en is sweep-baar.
+    /// @notice The fee transfer to the treasury failed; `amount` EURC stays in the contract and can be swept.
     event FeeRetained(uint256 amount);
 
     error InvalidParams();
@@ -258,27 +258,27 @@ contract Rebalancer is ReentrancyGuardTransient {
     error ZeroAddress();
     error NotAContract(address account);
     error UnexpectedPoolTokens(address pool);
-    /// @notice De pool heeft niet de fee-tier POOL_FEE waar de swap doorheen gaat.
+    /// @notice The pool does not have the fee tier POOL_FEE that the swap goes through.
     error UnexpectedPoolFee(address pool);
-    /// @notice De pool heeft niet de tickSpacing TICK_SPACING waar de runomvang op rekent.
+    /// @notice The pool does not have the tickSpacing TICK_SPACING that the run size calculation relies on.
     error UnexpectedTickSpacing(address pool);
-    /// @notice De pool is niet de POOL_FEE-pool van de factory van de router, dus niet de pool van de swap.
+    /// @notice The pool is not the POOL_FEE pool of the router's factory, and therefore not the pool of the swap.
     error PoolNotFromRouterFactory(address pool);
     error SpotDeviatesFromOracle(uint256 spot, uint256 oracle);
-    /// @notice De koers van `pool` ligt na de swap verder dan MAX_BLOCK_MOVE_BPS van de koers aan het begin van dit
-    ///         blok, of er is te weinig ruimte of liquiditeit voor een run van MIN_TRADE_FLOOR. Tijdelijk: in een
-    ///         volgend blok opnieuw proberen.
+    /// @notice After the swap the price of `pool` lies further than MAX_BLOCK_MOVE_BPS from the price at the start of
+    ///         this block, or there is too little room or liquidity for a run of MIN_TRADE_FLOOR. Temporary: retry
+    ///         in a later block.
     error BlockMoveExceeded(address pool);
-    /// @notice `pool` schreef in dit blok al een oracle-observatie (tickwissel door een swap, of een mint of burn in
-    ///         de range), vóór deze run. Tijdelijk: in een volgend blok opnieuw proberen.
+    /// @notice `pool` already wrote an oracle observation in this block (tick change by a swap, or a mint or burn in
+    ///         the range), before this run. Temporary: retry in a later block.
     error PoolTouchedThisBlock(address pool);
     error UnexpectedFeedDecimals(address feed);
-    /// @notice `token` heeft niet de decimalen waar het contract op rekent (EURC 6, cbBTC 8, USDC 6).
+    /// @notice `token` does not have the decimals the contract relies on (EURC 6, cbBTC 8, USDC 6).
     error UnexpectedTokenDecimals(address token);
-    /// @notice MAX_BLOCK_MOVE_BPS past niet ruim binnen TICK_SPACING; `_maxInput` zou dan grenzen missen.
+    /// @notice MAX_BLOCK_MOVE_BPS does not fit well within TICK_SPACING; `_maxInput` would then miss boundaries.
     error WindowExceedsTickSpacing();
     error NoOutput();
-    /// @notice Het contract is buiten gebruik gesteld; alleen `setParams` met `active = false` en `sweep` kunnen nog.
+    /// @notice The contract has been decommissioned; only `setParams` with `active = false` and `sweep` still work.
     error ContractRetired();
     error AlreadyRetired();
     error NotTreasury(address caller);
@@ -323,33 +323,33 @@ contract Rebalancer is ReentrancyGuardTransient {
 
         _eurcIsToken0 = _poolOrder(POOL_EURC_USDC, d.eurc, d.usdc);
         _usdcIsToken0 = _poolOrder(POOL_USDC_CBBTC, d.usdc, d.cbbtc);
-        // De spotcheck moet de pools bewaken waar de swap werkelijk doorheen gaat (audit lead 1): de POOL_FEE-pools
-        // van dezelfde factory als de router.
+        // The spot check must monitor the pools the swap actually goes through (audit lead 1): the POOL_FEE pools
+        // of the same factory as the router.
         address factory = ROUTER.factory();
         _requireContract(factory);
         _requireSwapPool(IUniswapV3Factory(factory), POOL_EURC_USDC, d.eurc, d.usdc);
         _requireSwapPool(IUniswapV3Factory(factory), POOL_USDC_CBBTC, d.usdc, d.cbbtc);
 
-        // `_quote` deelt de twee feeds op elkaar; dat klopt alleen als beide dezelfde decimalen hebben.
+        // `_quote` divides the two feeds by each other; that is only correct if both have the same decimals.
         if (FEED_CBBTC_USD.decimals() != FEED_DECIMALS) revert UnexpectedFeedDecimals(d.feedCbbtcUsd);
         if (FEED_EURC_USD.decimals() != FEED_DECIMALS) revert UnexpectedFeedDecimals(d.feedEurcUsd);
 
-        // De eenheden en ondergrenzen hierboven zijn vaste getallen in basiseenheden; een token met andere decimalen
-        // (bijvoorbeeld verwisselde adressen) zou elke run met een factor 100 of meer verkeerd rekenen (review I-4).
-        // USDC zit in het swappad; de omrekening via de pool hangt niet van zijn decimalen af, maar een ander token
-        // op die plek is een deployfout.
+        // The units and lower bounds above are fixed numbers in base units; a token with different decimals
+        // (for example swapped addresses) would miscalculate every run by a factor of 100 or more (review I-4).
+        // USDC is in the swap path; the conversion via the pool does not depend on its decimals, but a different
+        // token in that position is a deployment error.
         _requireDecimals(d.eurc, EURC_DECIMALS);
         _requireDecimals(d.cbbtc, CBBTC_DECIMALS);
         _requireDecimals(d.usdc, USDC_DECIMALS);
 
-        // `_maxInput` kijkt naar hooguit één initialiseerbare tickgrens in het venster; dat klopt alleen zolang het
-        // venster (1 tick ≈ 1 bp) minder ticks beslaat dan TICK_SPACING (zelf-audit 2026-09-17, lead 13).
+        // `_maxInput` looks at no more than one initializable tick boundary in the window; that is only correct as
+        // long as the window (1 tick ≈ 1 bp) spans fewer ticks than TICK_SPACING (self-audit 2026-09-17, lead 13).
         if (!_windowFitsTickSpacing(MAX_BLOCK_MOVE_BPS, TICK_SPACING)) revert WindowExceedsTickSpacing();
     }
 
-    /// @dev Per richting kruist een swap binnen het venster hooguit `moveBps` opeenvolgende ticks (omlaag t tot en
-    ///      met t − moveBps + 1, omhoog t + 1 tot en met t + moveBps − 1). Minder dan `spacing` opeenvolgende ticks
-    ///      bevatten hooguit één veelvoud van `spacing`.
+    /// @dev Per direction, a swap within the window crosses at most `moveBps` consecutive ticks (down t through
+    ///      t − moveBps + 1, up t + 1 through t + moveBps − 1). Fewer than `spacing` consecutive ticks
+    ///      contain at most one multiple of `spacing`.
     function _windowFitsTickSpacing(uint16 moveBps, int24 spacing) internal pure returns (bool) {
         return spacing > 0 && int256(uint256(moveBps)) < int256(spacing);
     }
@@ -363,7 +363,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (account.code.length == 0) revert NotAContract(account);
     }
 
-    /// @return aIsToken0 True als `a` token0 van de pool is; revert als de pool niet precies {a, b} bevat.
+    /// @return aIsToken0 True if `a` is token0 of the pool; reverts if the pool does not contain exactly {a, b}.
     function _poolOrder(IUniswapV3Pool pool, address a, address b) private view returns (bool aIsToken0) {
         address token0 = pool.token0();
         address token1 = pool.token1();
@@ -372,27 +372,27 @@ contract Rebalancer is ReentrancyGuardTransient {
         revert UnexpectedPoolTokens(address(pool));
     }
 
-    /// @dev Revert als `pool` niet de POOL_FEE-pool van {a, b} uit `factory` is.
+    /// @dev Reverts if `pool` is not the POOL_FEE pool of {a, b} from `factory`.
     function _requireSwapPool(IUniswapV3Factory factory, IUniswapV3Pool pool, address a, address b) private view {
         if (pool.fee() != POOL_FEE) revert UnexpectedPoolFee(address(pool));
         if (pool.tickSpacing() != TICK_SPACING) revert UnexpectedTickSpacing(address(pool));
         if (factory.getPool(a, b, POOL_FEE) != address(pool)) revert PoolNotFromRouterFactory(address(pool));
     }
 
-    // ─── Gebruiker ──────────────────────────────────────────────────────────────────────────────────────────
+    // ─── User────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// @notice Zet of wijzigt de eigen instellingen. Alleen msg.sender kan zijn eigen instellingen wijzigen.
-    /// @dev Economische ondergrenzen: `minTradeEurc >= MIN_TRADE_FLOOR`, `maxCorrectionBps >= MIN_CORRECTION_BPS` en
+    /// @notice Sets or changes the caller's own settings. Only msg.sender can change its own settings.
+    /// @dev Economic lower bounds: `minTradeEurc >= MIN_TRADE_FLOOR`, `maxCorrectionBps >= MIN_CORRECTION_BPS` and
     ///      `bandBps >= MIN_BAND_BPS`.
-    ///      Na `retire` is alleen `active = false` nog toegestaan (mandaat intrekken); een actief mandaat zetten
-    ///      revert dan met `ContractRetired`. Breekt een lopende ronde af: de volgende run is weer een nieuwe
-    ///      ronde, `interval` na de laatste run.
-    ///      Niet atomair (audit lead 7): wie deze transactie (of een `approve(0)`) ziet voordat ze in een Flashblock
-    ///      zit, kan er met een hogere priority fee één `execute` op de oude instellingen vóór zetten, binnen de
-    ///      gewone grenzen van een run. Daarna geldt `interval`; wie zeker geen run meer wil, stuurt eerst `approve(0)`.
-    ///      Registreren vraagt geen saldo of allowance en het register krimpt nooit (audit lead 9). Een saldo-eis
-    ///      is te omzeilen en zou "eerst instellen, dan storten" onmogelijk maken; wekkers filteren het register
-    ///      daarom zelf off-chain op saldo en allowance.
+    ///      After `retire` only `active = false` is still allowed (revoking the mandate); setting an active mandate
+    ///      then reverts with `ContractRetired`. Aborts an ongoing round: the next run is again a new
+    ///      round, `interval` after the last run.
+    ///      Not atomic (audit lead 7): whoever sees this transaction (or an `approve(0)`) before it is in a Flashblock
+    ///      can put one `execute` on the old settings in front of it with a higher priority fee, within the
+    ///      normal limits of a run. After that `interval` applies; whoever wants no further run for sure sends
+    ///      `approve(0)` first. Registering requires no balance or allowance and the registry never shrinks (audit
+    ///      lead 9). A balance requirement can be circumvented and would make "configure first, then deposit"
+    ///      impossible; keepers therefore filter the registry off-chain on balance and allowance themselves.
     function setParams(Params calldata p) external {
         if (retired && p.active) revert ContractRetired();
         if (
@@ -412,16 +412,16 @@ contract Rebalancer is ReentrancyGuardTransient {
         emit ParamsUpdated(msg.sender, p);
     }
 
-    // ─── Lezen ──────────────────────────────────────────────────────────────────────────────────────────────
+    // ─── Reading─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// @notice Pagina uit de lijst van adressen die ooit instellingen hebben gezet (ook inactieve). Revert nooit,
-    ///         ook niet bij `limit = type(uint256).max`.
+    /// @notice Page from the list of addresses that have ever set settings (including inactive ones). Never reverts,
+    ///         not even with `limit = type(uint256).max`.
     function owners(uint256 offset, uint256 limit) external view returns (address[] memory page) {
         uint256 total = _owners.length;
         if (offset >= total) {
             return new address[](0);
         }
-        // Niet `offset + limit`: dat overflowt bij een grote `limit` (audit L-A).
+        // Not `offset + limit`: that overflows with a large `limit` (audit L-A).
         uint256 end = limit > total - offset ? total : offset + limit;
         page = new address[](end - offset);
         for (uint256 i = offset; i < end; i++) {
@@ -433,13 +433,13 @@ contract Rebalancer is ReentrancyGuardTransient {
         return _owners.length;
     }
 
-    /// @notice Zou `execute(owner, …)` nu iets doen? `eurcDelta` > 0 = kopen voor dat bedrag, < 0 = verkopen.
-    ///         Het bedrag is wat `execute` nu werkelijk zou handelen, dus al begrensd op saldo en allowance: bij
-    ///         kopen het EURC-inputbedrag, bij verkopen de cbBTC-input tegen de oraclekoers (audit L-C).
-    ///         Tijdens een ronde is dit het volgende deel, dus hooguit wat nu in het blokvenster past.
-    /// @dev Revert nooit: een storing in de feeds of sequencer, een te grote spot-afwijking, een pool die in dit blok
-    ///      al een observatie schreef, of te weinig ruimte in het blokvenster geeft (false, 0). Na `retire` altijd
-    ///      (false, 0).
+    /// @notice Would `execute(owner, …)` do something now? `eurcDelta` > 0 = buy for that amount, < 0 = sell.
+    ///         The amount is what `execute` would actually trade now, so already capped by balance and allowance:
+    ///         for a buy the EURC input amount, for a sell the cbBTC input at the oracle price (audit L-C).
+    ///         During a round this is the next chunk, so at most what currently fits in the block window.
+    /// @dev Never reverts: a failure in the feeds or sequencer, too large a spot deviation, a pool that already wrote
+    ///      an observation in this block, or too little room in the block window gives (false, 0). After `retire`
+    ///      always (false, 0).
     function isDue(address owner) external view returns (bool due, int256 eurcDelta) {
         Params memory p = params[owner];
         if (retired || !p.active) {
@@ -461,14 +461,14 @@ contract Rebalancer is ReentrancyGuardTransient {
         return _dueAt(owner, p, price, chunk, w1, w2, caps);
     }
 
-    /// @notice Pagina uit de owner-lijst, gefilterd op wie nu due is (zelfde regels als `isDue`). Revert nooit.
-    /// @dev Een owner die structureel revert (blacklist, te krappe slippage) blijft in de lijst staan; het
-    ///      contract onthoudt mislukte pogingen niet. De wekkers simuleren daarom eerst en houden zelf een
-    ///      cool-down per owner bij. Na `retire` altijd een lege lijst. Alle owners in de lijst delen hetzelfde
-    ///      blokvenster: na één run in dit blok is er voor de rest meestal geen ruimte meer (een run die de tick
-    ///      verandert, raakt de pool aan). Heeft een pool in dit blok al een observatie, dan is de lijst leeg.
-    ///      Koers, blokvensters en de runomvang per richting worden één keer per pagina gelezen (review I-2); een
-    ///      pagina van 50 due owners kost gemeten ~1,24 mln gas.
+    /// @notice Page from the owner list, filtered on who is due now (same rules as `isDue`). Never reverts.
+    /// @dev An owner that structurally reverts (blacklist, slippage too tight) stays in the list; the
+    ///      contract does not remember failed attempts. The keepers therefore simulate first and keep their own
+    ///      cool-down per owner. After `retire` always an empty list. All owners in the list share the same
+    ///      block window: after one run in this block there is usually no room left for the rest (a run that
+    ///      changes the tick touches the pool). If a pool already has an observation in this block, the list is empty.
+    ///      Price, block windows and the run size per direction are read once per page (review I-2); a
+    ///      page of 50 due owners costs a measured ~1.24 million gas.
     function dueOwners(uint256 offset, uint256 limit) external view returns (address[] memory due) {
         uint256 total = _owners.length;
         if (retired || offset >= total) {
@@ -482,11 +482,11 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (touched != address(0)) {
             return new address[](0);
         }
-        // Niet `offset + limit`: dat overflowt bij een grote `limit` (audit L-A).
+        // Not `offset + limit`: that overflows with a large `limit` (audit L-A).
         uint256 end = limit > total - offset ? total : offset + limit;
         address[] memory candidates = new address[](end - offset);
         uint256 n;
-        // Eén cache voor de hele pagina: de runomvang per richting hangt niet van de owner af (review I-2).
+        // One cache for the whole page: the run size per direction does not depend on the owner (review I-2).
         RunCaps memory caps;
         for (uint256 i = offset; i < end; i++) {
             address owner = _owners[i];
@@ -522,15 +522,15 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (pl.amountIn == 0) {
             return (false, 0);
         }
-        // Van `amountIn`, niet van de correctie vóór begrenzing: anders meldt isDue een grotere run dan execute doet.
+        // From `amountIn`, not from the correction before capping: otherwise isDue reports a larger run than execute.
         uint256 eurcAmount = pl.isBuy ? pl.amountIn : Math.mulDiv(pl.amountIn, price, CBBTC_UNIT);
         eurcDelta = pl.isBuy ? int256(eurcAmount) : -int256(eurcAmount);
         return (true, eurcDelta);
     }
 
-    /// @return timeDue Laat de klok nu een run toe?
-    /// @return chunk   True als dat alleen als deel van de lopende ronde mag (CHUNK_INTERVAL na de vorige run);
-    ///                 false als `interval` verstreken is en dit een nieuwe ronde is. Een nieuwe ronde gaat voor.
+    /// @return timeDue Does the clock allow a run now?
+    /// @return chunk   True if that is only allowed as a chunk of the ongoing round (CHUNK_INTERVAL after the previous
+    ///                 run); false if `interval` has elapsed and this is a new round. A new round takes precedence.
     function _timing(address owner, Params memory p) internal view returns (bool timeDue, bool chunk) {
         uint256 last = lastExecutedAt[owner];
         if (block.timestamp >= last + p.interval) {
@@ -539,23 +539,23 @@ contract Rebalancer is ReentrancyGuardTransient {
         return (rounds[owner].remainingEurc > 0 && block.timestamp >= last + CHUNK_INTERVAL, true);
     }
 
-    // ─── Uitvoeren ──────────────────────────────────────────────────────────────────────────────────────────
+    // ─── Execution───────────────────────────────────────────────────────────────────────────────────────────
 
-    /// @notice Voert één rebalance-stap uit voor `owner`. Iedereen mag dit aanroepen.
-    /// @param rewardTo Ontvanger van de beloning uit de fee; address(0) = hele fee naar de treasury.
-    /// @dev Revert met `ContractRetired` zodra de treasury `retire` heeft aangeroepen, vóór de swap met
-    ///      `PoolTouchedThisBlock` als een pool in dit blok al een observatie schreef, met `BlockMoveExceeded` als er
-    ///      te weinig ruimte of liquiditeit is of de koers na de swap buiten het venster ligt.
+    /// @notice Performs one rebalance step for `owner`. Anyone may call this.
+    /// @param rewardTo Recipient of the reward from the fee; address(0) = entire fee to the treasury.
+    /// @dev Reverts with `ContractRetired` once the treasury has called `retire`, before the swap with
+    ///      `PoolTouchedThisBlock` if a pool already wrote an observation in this block, with `BlockMoveExceeded` if
+    ///      there is too little room or liquidity or the price after the swap lies outside the window.
     function execute(address owner, address rewardTo) external nonReentrant {
         if (retired) revert ContractRetired();
         Params memory p = params[owner];
         if (!p.active) revert Inactive();
         (bool timeDue, bool chunk) = _timing(owner, p);
         if (!timeDue) revert NotDue();
-        // Een beloning aan het contract zelf zou blijven hangen; dan liever de hele fee naar de treasury.
+        // A reward to the contract itself would get stuck; in that case the entire fee goes to the treasury instead.
         if (rewardTo == address(this)) rewardTo = address(0);
 
-        // Eerst de blokcheck: een push in dit blok die ook de spot-check zou raken, meldt zich zo als tijdelijk.
+        // Block check first: a push in this block that would also hit the spot check is thus reported as temporary.
         (address touched, Window memory w1, Window memory w2) = _windows();
         if (touched != address(0)) revert PoolTouchedThisBlock(touched);
         uint256 price = _quoteChecked();
@@ -564,7 +564,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (pl.blockedBy != address(0)) revert BlockMoveExceeded(pl.blockedBy);
         if (pl.amountIn == 0) revert NothingToDo();
 
-        // Vanaf hier wordt de run geboekt, ook al zou de swap nog reverten (dan revert alles).
+        // From here on the run is recorded, even if the swap were still to revert (then everything reverts).
         lastExecutedAt[owner] = uint64(block.timestamp);
         if (pl.roundLeftEurc > 0) {
             rounds[owner] = Round({isBuy: pl.isBuy, remainingEurc: uint128(pl.roundLeftEurc)});
@@ -580,34 +580,34 @@ contract Rebalancer is ReentrancyGuardTransient {
         } else {
             (fee, reward, amountOut) = _sell(owner, p, pl.amountIn, price, rewardTo);
         }
-        // Blokvenster ná de swap: push vooraf plus de eigen impact samen binnen MAX_BLOCK_MOVE_BPS.
+        // Block window after the swap: prior push plus own impact together within MAX_BLOCK_MOVE_BPS.
         _requireWithinWindow(POOL_EURC_USDC, w1);
         _requireWithinWindow(POOL_USDC_CBBTC, w2);
 
         emit Executed(owner, pl.isBuy, pl.amountIn, fee, reward, rewardTo, amountOut, price, pl.total, pl.fractionBps);
     }
 
-    /// @notice Stuurt het volledige saldo van `token` in dit contract naar de treasury. Iedereen mag dit
-    ///         aanroepen; het contract hoort buiten een transactie geen saldo te hebben, behalve fee die door een
-    ///         mislukte treasury-transfer is achtergebleven (`FeeRetained`).
+    /// @notice Sends the full balance of `token` in this contract to the treasury. Anyone may call
+    ///         this; outside a transaction the contract should hold no balance, except fee left behind by a
+    ///         failed treasury transfer (`FeeRetained`).
     function sweep(IERC20 token) external nonReentrant {
         uint256 balance = token.balanceOf(address(this));
         if (balance > 0) token.safeTransfer(TREASURY, balance);
     }
 
-    /// @notice Stelt het contract eenmalig en onomkeerbaar buiten gebruik. Alleen de treasury mag dit.
-    /// @dev Dit is de enige bevoegdheid van de treasury en de enige vlag die het gedrag van het contract kan
-    ///      veranderen; er is geen weg terug en geen tegenhanger (`unretire`). Na `retire`:
-    ///      - `execute` revert met `ContractRetired`, dus er wordt nooit meer een swap of fee geboekt;
-    ///      - `isDue` geeft (false, 0) en `dueOwners` een lege lijst, zodat wekkers vanzelf stoppen;
-    ///      - `setParams` accepteert alleen nog `active = false`, zodat gebruikers hun mandaat kunnen intrekken;
-    ///      - `sweep` blijft werken om achtergebleven fee naar de treasury te halen.
+    /// @notice Decommissions the contract once and irreversibly. Only the treasury may do this.
+    /// @dev This is the treasury's only power and the only flag that can change the contract's
+    ///      behaviour; there is no way back and no counterpart (`unretire`). After `retire`:
+    ///      - `execute` reverts with `ContractRetired`, so no swap or fee is ever recorded again;
+    ///      - `isDue` returns (false, 0) and `dueOwners` an empty list, so keepers stop by themselves;
+    ///      - `setParams` only accepts `active = false`, so that users can revoke their mandate;
+    ///      - `sweep` keeps working to send left-behind fee to the treasury.
     ///
-    ///      Non-custodial blijft dit: het contract houdt nooit gebruikersfondsen. Het mandaat is een ERC-20-
-    ///      allowance die in de tokencontracten bij de gebruiker staat; `retire` verandert daar niets aan en kan
-    ///      er niets mee. Het enige pad dat die allowance ooit gebruikte (`execute`) is na `retire` dicht, dus de
-    ///      treasury kan met deze knop geen fondsen verplaatsen, alleen het contract stilzetten. De gebruiker
-    ///      houdt zelf de controle: `approve(0)` op EURC/cbBTC en/of `setParams` met `active = false`.
+    ///      This remains non-custodial: the contract never holds user funds. The mandate is an ERC-20
+    ///      allowance that sits with the user in the token contracts; `retire` changes nothing there and cannot
+    ///      do anything with it. The only path that ever used that allowance (`execute`) is closed after `retire`,
+    ///      so the treasury cannot move funds with this switch, only stop the contract. The user
+    ///      keeps control: `approve(0)` on EURC/cbBTC and/or `setParams` with `active = false`.
     function retire() external {
         if (msg.sender != TREASURY) revert NotTreasury(msg.sender);
         if (retired) revert AlreadyRetired();
@@ -615,13 +615,13 @@ contract Rebalancer is ReentrancyGuardTransient {
         emit Retired();
     }
 
-    // ─── Intern: koers ──────────────────────────────────────────────────────────────────────────────────────
+    // ─── Internal: price─────────────────────────────────────────────────────────────────────────────────────
 
-    /// @return price EURC-basiseenheden (6 dec) per 1 cbBTC.
+    /// @return price EURC base units (6 dec) per 1 cbBTC.
     function _quote() internal view returns (uint256 price) {
         (, int256 seqAnswer, uint256 seqStartedAt,,) = SEQUENCER_FEED.latestRoundData();
-        // startedAt == 0 is een niet-geïnitialiseerde ronde van de uptime-feed en telt als "onbekend", niet als up.
-        // Een startedAt in de toekomst ook: SequencerDown in plaats van een Panic (zelf-audit 2026-09-17, Info-G).
+        // startedAt == 0 is an uninitialized round of the uptime feed and counts as "unknown", not as up.
+        // A startedAt in the future as well: SequencerDown instead of a Panic (self-audit 2026-09-17, Info-G).
         if (
             seqAnswer != 0 || seqStartedAt == 0 || seqStartedAt > block.timestamp
                 || block.timestamp - seqStartedAt < GRACE_PERIOD
@@ -635,48 +635,48 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (price == 0) revert InvalidFeedAnswer(address(FEED_CBBTC_USD));
     }
 
-    /// @dev Oracle-koers, geweigerd als de pool-spot er meer dan MAX_SPOT_DEVIATION_BPS van afwijkt.
+    /// @dev Oracle price, rejected if the pool spot deviates from it by more than MAX_SPOT_DEVIATION_BPS.
     function _quoteChecked() internal view returns (uint256 price) {
         price = _quote();
         _requireSpotNear(price);
     }
 
-    /// @dev Revert als de huidige pool-spot meer dan MAX_SPOT_DEVIATION_BPS van `price` afwijkt. Wordt vóór de
-    ///      swap (via `_quoteChecked`) én na de swap aangeroepen, zodat voorschuiving en eigen prijsimpact samen
-    ///      binnen de tolerantie moeten blijven.
+    /// @dev Reverts if the current pool spot deviates from `price` by more than MAX_SPOT_DEVIATION_BPS. Called
+    ///      before the swap (via `_quoteChecked`) and after the swap, so that a prior push and the own price impact
+    ///      together must stay within the tolerance.
     function _requireSpotNear(uint256 price) internal view {
         uint256 spotPrice = _spot();
         uint256 diff = spotPrice > price ? spotPrice - price : price - spotPrice;
         if (diff * BPS > price * MAX_SPOT_DEVIATION_BPS) revert SpotDeviatesFromOracle(spotPrice, price);
     }
 
-    /// @return price EURC-basiseenheden (6 dec) per 1 cbBTC volgens de huidige spot van beide pools (midprijs,
-    ///               zonder poolfees).
+    /// @return price EURC base units (6 dec) per 1 cbBTC according to the current spot of both pools (mid price,
+    ///               without pool fees).
     function _spot() internal view returns (uint256 price) {
         uint256 usdcPerBtc = _spotOut(POOL_USDC_CBBTC, !_usdcIsToken0, CBBTC_UNIT);
         price = _spotOut(POOL_EURC_USDC, !_eurcIsToken0, usdcPerBtc);
     }
 
-    /// @dev Hoeveel basiseenheden van het andere token `amountIn` basiseenheden waard zijn op de spot van
-    ///      `pool`. `inIsToken0` zegt of het inputtoken token0 is. Rekent via ratioX128 = sqrtPriceX96² / 2^64
-    ///      (past in uint256 voor elke uint160 sqrtPriceX96), zoals Uniswaps OracleLibrary.getQuoteAtTick bij
-    ///      grote koersen. Niet via ratioX96 = sqrtPriceX96² / 2^96: die is 0 voor sqrtPriceX96 < 2^48 en de
-    ///      deling erdoor gaf dan een Panic (audit lead 10). ratioX128 is ≥ 1 voor elke sqrtPriceX96 ≥ 2^32, dus
-    ///      voor elke geldige Uniswap-koers (MIN_SQRT_RATIO = 4295128739 > 2^32).
+    /// @dev How many base units of the other token `amountIn` base units are worth at the spot of
+    ///      `pool`. `inIsToken0` says whether the input token is token0. Calculates via ratioX128 = sqrtPriceX96² /
+    ///      2^64 (fits in uint256 for every uint160 sqrtPriceX96), like Uniswap's OracleLibrary.getQuoteAtTick for
+    ///      large prices. Not via ratioX96 = sqrtPriceX96² / 2^96: that is 0 for sqrtPriceX96 < 2^48 and
+    ///      dividing by it then caused a Panic (audit lead 10). ratioX128 is ≥ 1 for every sqrtPriceX96 ≥ 2^32, so
+    ///      for every valid Uniswap price (MIN_SQRT_RATIO = 4295128739 > 2^32).
     function _spotOut(IUniswapV3Pool pool, bool inIsToken0, uint256 amountIn) internal view returns (uint256) {
         (uint160 sqrtPriceX96,,,,,,) = pool.slot0();
         return _convert(sqrtPriceX96, inIsToken0, amountIn);
     }
 
-    /// @dev Zie `_spotOut`, met een gegeven sqrtPriceX96.
+    /// @dev See `_spotOut`, with a given sqrtPriceX96.
     function _convert(uint160 sqrtPriceX96, bool inIsToken0, uint256 amountIn) internal pure returns (uint256) {
         uint256 ratioX128 = Math.mulDiv(sqrtPriceX96, sqrtPriceX96, Q64);
         return inIsToken0 ? Math.mulDiv(amountIn, ratioX128, Q128) : Math.mulDiv(amountIn, Q128, ratioX128);
     }
 
-    // ─── Intern: blokvenster ────────────────────────────────────────────────────────────────────────────────
+    // ─── Internal: block window──────────────────────────────────────────────────────────────────────────────
 
-    /// @dev De toegestane sqrtPriceX96 van een pool in dit blok, plus de stand waarmee de run wordt afgemeten.
+    /// @dev The allowed sqrtPriceX96 of a pool in this block, plus the state against which the run is measured.
     struct Window {
         uint160 lower;
         uint160 upper;
@@ -685,7 +685,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         int24 tick;
     }
 
-    /// @return touched address(0), of de eerste pool die in dit blok al een observatie schreef.
+    /// @return touched address(0), or the first pool that already wrote an observation in this block.
     function _windows() internal view returns (address touched, Window memory w1, Window memory w2) {
         bool t;
         (t, w1) = _window(POOL_EURC_USDC);
@@ -694,23 +694,23 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (t) return (address(POOL_USDC_CBBTC), w1, w2);
     }
 
-    /// @dev Blokcheck en venster [lower, upper] voor sqrtPriceX96 van `pool` in dit blok. Revert niet.
+    /// @dev Block check and window [lower, upper] for sqrtPriceX96 of `pool` in this block. Does not revert.
     ///
-    ///      Blokcheck. `touched = true` als de pool in dit blok al een observatie schreef; het venster is dan leeg en
-    ///      wordt niet gebruikt. Welke acties schrijven staat bovenaan het contract. Oracle.write zet
-    ///      `observationIndex` op de nieuwe observatie (ook bij cardinality 1, dan overschrijft hij index 0), dus
-    ///      `observations(observationIndex)` is altijd de laatste.
+    ///      Block check. `touched = true` if the pool already wrote an observation in this block; the window is then
+    ///      empty and is not used. Which actions write is listed at the top of the contract. Oracle.write sets
+    ///      `observationIndex` to the new observation (also with cardinality 1, where it overwrites index 0), so
+    ///      `observations(observationIndex)` is always the latest.
     ///
-    ///      Begintick. Zonder observatie in dit blok is de tick sinds het blokbegin niet veranderd (elke tickwissel
-    ///      schrijft, en de eerste schrijfactie van een blok gaat altijd door): begintick = slot0.tick. Een afleiding
-    ///      uit twee observaties is daardoor niet nodig. Dat blijft zo tot na de swap: het venster wordt vóór de swap
-    ///      berekend en na de swap tegen de nieuwe koers gehouden.
+    ///      Start tick. Without an observation in this block the tick has not changed since the start of the block
+    ///      (every tick change writes, and the first write of a block always goes through): start tick = slot0.tick.
+    ///      A derivation from two observations is therefore not needed. That stays so until after the swap: the
+    ///      window is calculated before the swap and held against the new price after the swap.
     ///
-    ///      Afronding. De werkelijke beginkoers ligt ergens in [P(t), P(t+1)] (sqrtPriceX96 bij tick t en t+1), want
-    ///      een swap binnen de tick verschuift de koers zonder observatie. De ondergrens wordt vanaf P(t+1) gerekend en
-    ///      de bovengrens vanaf P(t), zodat de toegestane beweging vanaf de werkelijke beginkoers in beide richtingen
-    ///      hooguit MAX_BLOCK_MOVE_BPS is. De afronding van TickMath, de wortel en mulDiv gaat steeds naar een smaller
-    ///      venster.
+    ///      Rounding. The actual starting price lies somewhere in [P(t), P(t+1)] (sqrtPriceX96 at tick t and t+1),
+    ///      because a swap within the tick moves the price without an observation. The lower bound is calculated from
+    ///      P(t+1) and the upper bound from P(t), so that the allowed move from the actual starting price in both
+    ///      directions is at most MAX_BLOCK_MOVE_BPS. The rounding of TickMath, the square root and mulDiv always goes
+    ///      towards a narrower window.
     function _window(IUniswapV3Pool pool) internal view returns (bool touched, Window memory w) {
         (uint160 sqrtPriceX96, int24 tick, uint16 index,,,,) = pool.slot0();
         (uint32 lastTimestamp,,,) = pool.observations(index);
@@ -718,8 +718,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         w.sqrtPriceX96 = sqrtPriceX96;
         w.liquidity = pool.liquidity();
         w.tick = tick;
-        // Een echte pool heeft altijd MIN_TICK <= tick < MAX_TICK (de swap weigert MIN/MAX_SQRT_RATIO als limiet).
-        // Anders een leeg venster: geen run (BlockMoveExceeded), en geen revert in TickMath.
+        // A real pool always has MIN_TICK <= tick < MAX_TICK (the swap rejects MIN/MAX_SQRT_RATIO as limit).
+        // Otherwise an empty window: no run (BlockMoveExceeded), and no revert in TickMath.
         if (tick < TickMath.MIN_TICK || tick >= TickMath.MAX_TICK) {
             w.lower = type(uint160).max;
             return (false, w);
@@ -727,19 +727,19 @@ contract Rebalancer is ReentrancyGuardTransient {
         uint256 down =
             Math.sqrt(Math.mulDiv(BPS - MAX_BLOCK_MOVE_BPS, Q96 * Q96, BPS, Math.Rounding.Ceil), Math.Rounding.Ceil);
         uint256 up = Math.sqrt(Math.mulDiv(BPS + MAX_BLOCK_MOVE_BPS, Q96 * Q96, BPS));
-        // TickMath rondt naar boven af; voor de bovengrens daarom 1 eraf, zodat P(t) nooit te hoog is. Vlak onder
-        // MAX_TICK past P(t) × √(1 + 6 bp) niet meer in uint160; dan geldt de grootste sqrtPriceX96 als grens.
+        // TickMath rounds up; for the upper bound therefore subtract 1, so that P(t) is never too high. Just below
+        // MAX_TICK, P(t) × √(1 + 6 bp) no longer fits in uint160; then the largest sqrtPriceX96 applies as bound.
         w.lower = uint160(Math.mulDiv(TickMath.getSqrtPriceAtTick(tick + 1), down, Q96, Math.Rounding.Ceil));
         w.upper = uint160(Math.min(Math.mulDiv(TickMath.getSqrtPriceAtTick(tick) - 1, up, Q96), type(uint160).max));
     }
 
-    /// @dev Revert met `BlockMoveExceeded` als de huidige koers van `pool` buiten het venster ligt.
+    /// @dev Reverts with `BlockMoveExceeded` if the current price of `pool` lies outside the window.
     function _requireWithinWindow(IUniswapV3Pool pool, Window memory w) internal view {
         (uint160 sqrtPriceX96,,,,,,) = pool.slot0();
         if (sqrtPriceX96 < w.lower || sqrtPriceX96 > w.upper) revert BlockMoveExceeded(address(pool));
     }
 
-    /// @dev Uitkomst van `_maxRunEurc` per richting, onthouden binnen één aanroep. Leeg = nog niet berekend.
+    /// @dev Result of `_maxRunEurc` per direction, remembered within one call. Empty = not yet calculated.
     struct RunCaps {
         bool buyKnown;
         bool sellKnown;
@@ -749,10 +749,10 @@ contract Rebalancer is ReentrancyGuardTransient {
         address sellBinding;
     }
 
-    /// @dev `_maxRunEurc` met `caps` als cache (review I-2). De uitkomst hangt alleen af van de richting, `price`, de
-    ///      vensters en de pool- en tickstaat van dit blok, en niets daarvan hangt van de owner af of verandert binnen
-    ///      een view-aanroep. `dueOwners` deelt één cache over de pagina en leest zo per richting hooguit één keer de
-    ///      ticks; `isDue` en `execute` geven een lege cache mee en rekenen precies als zonder cache.
+    /// @dev `_maxRunEurc` with `caps` as cache (review I-2). The result depends only on the direction, `price`, the
+    ///      windows and the pool and tick state of this block, and none of that depends on the owner or changes
+    ///      within a view call. `dueOwners` shares one cache across the page and so reads the ticks at most once per
+    ///      direction; `isDue` and `execute` pass an empty cache and calculate exactly as without a cache.
     function _maxRunCached(bool isBuy, uint256 price, Window memory w1, Window memory w2, RunCaps memory caps)
         internal
         view
@@ -772,38 +772,38 @@ contract Rebalancer is ReentrancyGuardTransient {
         return (caps.sellEurc, caps.sellBinding);
     }
 
-    /// @return eurc    Grootste run in EURC waarvan de geschatte eindkoers in beide pools binnen SIZING_BPS van de
-    ///                 resterende ruimte tot de vensterrand blijft. 0 als een pool nu al buiten zijn venster ligt of
-    ///                 voorbij de tickgrens in het venster geen liquiditeit heeft.
-    /// @return binding De pool die de grens bepaalt.
+    /// @return eurc    Largest run in EURC for which the estimated final price in both pools stays within SIZING_BPS
+    ///                 of the remaining room up to the window edge. 0 if a pool already lies outside its window or
+    ///                 has no liquidity beyond the tick boundary in the window.
+    /// @return binding The pool that determines the bound.
     function _maxRunEurc(bool isBuy, uint256 price, Window memory w1, Window memory w2)
         internal
         view
         returns (uint256 eurc, address binding)
     {
-        // Hop EURC/USDC: bij kopen gaat EURC erin, bij verkopen USDC. Beide omgerekend naar EURC via deze pool.
+        // Hop EURC/USDC: for a buy EURC goes in, for a sell USDC. Both converted to EURC via this pool.
         uint256 in1 = _maxInput(POOL_EURC_USDC, w1, isBuy == _eurcIsToken0);
         uint256 eurc1 = isBuy ? in1 : _convert(w1.sqrtPriceX96, !_eurcIsToken0, in1);
-        // Hop USDC/cbBTC: bij kopen gaat USDC erin (omgerekend via EURC/USDC), bij verkopen cbBTC (via de oracle).
+        // Hop USDC/cbBTC: for a buy USDC goes in (converted via EURC/USDC), for a sell cbBTC (via the oracle).
         uint256 in2 = _maxInput(POOL_USDC_CBBTC, w2, isBuy == _usdcIsToken0);
         uint256 eurc2 = isBuy ? _convert(w1.sqrtPriceX96, !_eurcIsToken0, in2) : Math.mulDiv(in2, price, CBBTC_UNIT);
         return eurc1 <= eurc2 ? (eurc1, address(POOL_EURC_USDC)) : (eurc2, address(POOL_USDC_CBBTC));
     }
 
-    /// @dev Inputhoeveelheid die de koers SIZING_BPS van de weg naar de vensterrand in de swaprichting brengt
-    ///      (Uniswap-formules voor amount0/amount1 tussen twee sqrtPrices, zonder poolfee: de fee verschuift de koers
-    ///      niet, dus dit is aan de voorzichtige kant). Een pool buiten zijn venster geeft 0. Begrensd op 2^96
-    ///      basiseenheden, zodat de omrekening naar EURC nooit overloopt.
+    /// @dev Input amount that moves the price SIZING_BPS of the way to the window edge in the swap direction
+    ///      (Uniswap formulas for amount0/amount1 between two sqrtPrices, without pool fee: the fee does not move the
+    ///      price, so this is on the cautious side). A pool outside its window gives 0. Capped at 2^96
+    ///      base units, so that the conversion to EURC never overflows.
     ///
-    ///      Liquiditeit (review L-1). Gerekend wordt met de kleinste liquiditeit tot de vensterrand: de in-range
-    ///      liquiditeit nu, en voorbij de eerstvolgende initialiseerbare tickgrens in de swaprichting de liquiditeit
-    ///      na het kruisen (± `liquidityNet` van die tick). Omlaag is dat floor(tick / TICK_SPACING) × TICK_SPACING,
-    ///      ook als de koers er precies op staat (UniswapV3Pool.swap kruist die tick dan meteen); omhoog de grens
-    ///      daarboven. Met begintick t (1 tick ≈ 1 bp) kan een swap binnen het venster omlaag hooguit de grenzen t tot
-    ///      en met t − 5 kruisen en omhoog t + 1 tot en met t + 5. Dat zijn per richting minder dan TICK_SPACING
-    ///      opeenvolgende ticks, dus hooguit één veelvoud van TICK_SPACING, en een `tickBitmap`-lookup is niet nodig:
-    ///      een niet-geïnitialiseerde tick heeft `liquidityNet` 0. Liquiditeit voorbij de grens die groter is, maakt de run
-    ///      nooit groter; is ze 0, dan geen run. Een grens precies op de vensterrand telt mee (voorzichtig).
+    ///      Liquidity (review L-1). The calculation uses the smallest liquidity up to the window edge: the in-range
+    ///      liquidity now, and beyond the next initializable tick boundary in the swap direction the liquidity
+    ///      after crossing (± `liquidityNet` of that tick). Downwards that is floor(tick / TICK_SPACING) ×
+    ///      TICK_SPACING, also when the price sits exactly on it (UniswapV3Pool.swap then crosses that tick
+    ///      immediately); upwards the boundary above it. With start tick t (1 tick ≈ 1 bp) a swap within the window
+    ///      can cross at most the boundaries t through t − 5 downwards and t + 1 through t + 5 upwards. Per direction
+    ///      those are fewer than TICK_SPACING consecutive ticks, so at most one multiple of TICK_SPACING, and no
+    ///      `tickBitmap` lookup is needed: an uninitialized tick has `liquidityNet` 0. Larger liquidity beyond the
+    ///      boundary never makes the run larger; if 0, no run. A boundary exactly on the window edge counts (cautious).
     function _maxInput(IUniswapV3Pool pool, Window memory w, bool zeroForOne) internal view returns (uint256 amount) {
         if (w.sqrtPriceX96 < w.lower || w.sqrtPriceX96 > w.upper) return 0;
         uint256 liquidity = w.liquidity;
@@ -814,32 +814,32 @@ contract Rebalancer is ReentrancyGuardTransient {
             uint160 atBoundary = TickMath.getSqrtPriceAtTick(boundary);
             if (zeroForOne ? atBoundary >= w.lower : atBoundary <= w.upper) {
                 (, int128 net,,,,,,) = pool.ticks(boundary);
-                // Omlaag kruisen trekt `liquidityNet` af, omhoog telt het op (UniswapV3Pool.swap).
+                // Crossing downwards subtracts `liquidityNet`, crossing upwards adds it (UniswapV3Pool.swap).
                 int256 beyond = zeroForOne ? int256(liquidity) - net : int256(liquidity) + net;
                 if (beyond <= 0) return 0;
                 liquidity = Math.min(liquidity, uint256(beyond));
             }
         }
         if (zeroForOne) {
-            // token0 erin: koers omlaag naar `lower`. amount0 = L × 2^96 × (√P − √lower) / (√P × √lower).
+            // token0 in: price down to `lower`. amount0 = L × 2^96 × (√P − √lower) / (√P × √lower).
             amount = Math.mulDiv(liquidity << 96, w.sqrtPriceX96 - w.lower, w.sqrtPriceX96) / w.lower;
         } else {
-            // token1 erin: koers omhoog naar `upper`. amount1 = L × (√upper − √P) / 2^96.
+            // token1 in: price up to `upper`. amount1 = L × (√upper − √P) / 2^96.
             amount = Math.mulDiv(liquidity, w.upper - w.sqrtPriceX96, Q96);
         }
         amount = Math.min(amount, type(uint96).max) * SIZING_BPS / BPS;
     }
 
-    /// @dev Geen absolute min/max op `answer` (audit lead 6): de aggregators handhaven er zelf geen zinvolle (minAnswer 1,
-    ///      maxAnswer 2^176 − 1), en een vaste grens zou dit onveranderbare contract bij een echte extreme koers
-    ///      blijvend stilleggen. De koers wordt vóór en na elke swap tegen beide pools gehouden (`_requireSpotNear`);
-    ///      een foute feed levert alleen een trade op als de pools op dezelfde foute koers staan.
+    /// @dev No absolute min/max on `answer` (audit lead 6): the aggregators themselves enforce no meaningful ones
+    ///      (minAnswer 1, maxAnswer 2^176 − 1), and a fixed bound would permanently halt this immutable contract at a
+    ///      real extreme price. The price is held against both pools before and after every swap (`_requireSpotNear`);
+    ///      a faulty feed only produces a trade if the pools sit at the same faulty price.
     function _readFeed(IAggregatorV3 feed, uint256 maxAge) internal view returns (uint256) {
         (, int256 answer,, uint256 updatedAt,) = feed.latestRoundData();
         if (answer <= 0) revert InvalidFeedAnswer(address(feed));
-        // Een updatedAt in de toekomst is net zo onbruikbaar als een te oude; beide geven StaleFeed, geen Panic.
+        // An updatedAt in the future is just as unusable as one that is too old; both give StaleFeed, not a Panic.
         if (updatedAt > block.timestamp || block.timestamp - updatedAt > maxAge) revert StaleFeed(address(feed));
-        // answer > 0 is hierboven afgedwongen, dus de cast kan niet afkappen.
+        // answer > 0 is enforced above, so the cast cannot truncate.
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint256(answer);
     }
@@ -852,49 +852,49 @@ contract Rebalancer is ReentrancyGuardTransient {
         }
     }
 
-    /// @notice Actuele koers volgens de feeds (EURC-basiseenheden per cbBTC). Revert bij storing.
+    /// @notice Current price according to the feeds (EURC base units per cbBTC). Reverts on failure.
     function quote() external view returns (uint256) {
         return _quote();
     }
 
-    /// @notice Actuele koers volgens de feeds, met álle checks van `execute`: revert ook als de pool-spot te
-    ///         ver van de feeds afwijkt.
+    /// @notice Current price according to the feeds, with all the checks of `execute`: also reverts if the pool spot
+    ///         deviates too far from the feeds.
     function quoteChecked() external view returns (uint256) {
         return _quoteChecked();
     }
 
-    /// @notice Spotkoers van de twee Uniswap-pools (EURC-basiseenheden per cbBTC, midprijs zonder fees).
+    /// @notice Spot price of the two Uniswap pools (EURC base units per cbBTC, mid price without fees).
     function spot() external view returns (uint256) {
         return _spot();
     }
 
-    // ─── Intern: rekenregel ─────────────────────────────────────────────────────────────────────────────────
+    // ─── Internal: calculation rule──────────────────────────────────────────────────────────────────────────
 
-    /// @dev Uitkomst van `_plan`.
+    /// @dev Result of `_plan`.
     struct Plan {
-        bool isBuy; // richting
-        uint256 amountIn; // in het input-token, al begrensd op saldo, allowance en blokvenster; 0 = niets doen
-        uint256 total; // totale waarde in EURC
-        uint256 fractionBps; // huidig cbBTC-aandeel in bps
-        uint256 roundLeftEurc; // > 0: de ronde loopt door met dit budget (run was door de liquiditeit begrensd)
-        address blockedBy; // != 0: er is een correctie, maar die past nu niet in het blokvenster van deze pool
+        bool isBuy; // direction
+        uint256 amountIn; // in the input token, already capped by balance, allowance and block window; 0 = do nothing
+        uint256 total; // total value in EURC
+        uint256 fractionBps; // current cbBTC share in bps
+        uint256 roundLeftEurc; // > 0: the round continues with this budget (run was capped by liquidity)
+        address blockedBy; // != 0: there is a correction, but it does not fit in this pool's block window right now
     }
 
     /**
-     * @dev Rekenregel per run.
-     *      1. Correctie zoals in de app: |drift| × total, alleen buiten de band.
-     *      2. Budget: bij een nieuwe ronde max(total × maxCorrectionBps, minTradeEurc); bij een deel wat er van de
-     *         ronde over is, maar nooit meer dan dat budget van de huidige waarde (zelf-audit lead 11). Het
-     *         restant wordt dan van dat kleinere budget gerekend en blijft laag, ook als de waarde later herstelt. Een
-     *         deel in de andere richting dan de ronde gebeurt niet (geen ping-pong).
-     *      3. correctie = min(correctie, budget); onder minTradeEurc -> niets (ook: de ronde is klaar).
-     *      4. run = min(correctie, `_maxRunEurc`). Onder MIN_TRADE_FLOOR -> `blockedBy`: de correctie wacht op
-     *         ruimte in een volgend blok; een lopende ronde blijft staan tot er weer ruimte is of `interval` na de
-     *         laatste run verstrijkt, waarna een nieuwe ronde begint. Een deel tussen MIN_TRADE_FLOOR en
-     *         minTradeEurc mag wel: minTradeEurc geldt voor de correctie, de vloer voor elke run.
-     *      5. Begrenzen op saldo en allowance. Moet dat de run onder min(run, minTradeEurc) brengen -> niets.
-     *      6. Was de liquiditeit de grens (run < correctie) en niet saldo of allowance, dan loopt de ronde door met
-     *         budget − verhandelde waarde, mits dat restant nog minstens minTradeEurc is.
+     * @dev Calculation rule per run.
+     *      1. Correction as in the app: |drift| × total, only outside the band.
+     *      2. Budget: for a new round max(total × maxCorrectionBps, minTradeEurc); for a chunk what is left of the
+     *         round, but never more than that budget of the current value (self-audit lead 11). The
+     *         remainder is then calculated from that smaller budget and stays low, even if the value recovers later. A
+     *         chunk in the opposite direction of the round does not happen (no ping-pong).
+     *      3. correction = min(correction, budget); below minTradeEurc -> nothing (also: the round is done).
+     *      4. run = min(correction, `_maxRunEurc`). Below MIN_TRADE_FLOOR -> `blockedBy`: the correction waits for
+     *         room in a later block; an ongoing round stays open until there is room again or `interval` after the
+     *         last run elapses, after which a new round starts. A chunk between MIN_TRADE_FLOOR and
+     *         minTradeEurc is allowed: minTradeEurc applies to the correction, the floor to every run.
+     *      5. Cap by balance and allowance. If that would bring the run below min(run, minTradeEurc) -> nothing.
+     *      6. If liquidity was the limit (run < correction) and not balance or allowance, the round continues with
+     *         budget − traded value, provided that remainder is still at least minTradeEurc.
      */
     function _plan(
         address owner,
@@ -928,8 +928,8 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (chunk) {
             Round memory rd = rounds[owner];
             if (rd.isBuy != pl.isBuy) return pl;
-            // Nooit meer dan het budget van de huidige waarde: krimpt de wallet tijdens de ronde (opnemen of een
-            // koersdaling), dan krimpt het budget mee (zelf-audit 2026-09-17, lead 11).
+            // Never more than the budget of the current value: if the wallet shrinks during the round (withdrawal
+            // or a price drop), the budget shrinks with it (self-audit 2026-09-17, lead 11).
             budget = Math.min(rd.remainingEurc, budget);
         }
         uint256 correction = Math.min(Math.mulDiv(driftWad, pl.total, WAD), budget);
@@ -944,8 +944,8 @@ contract Rebalancer is ReentrancyGuardTransient {
             return pl;
         }
 
-        // De begrenzing op het saldo is defensief: run <= |drift| * total <= saldo van het input-token, dus in de
-        // praktijk begrenst alleen de allowance. Blijft staan als vangnet bij latere wijzigingen.
+        // The cap by balance is defensive: run <= |drift| * total <= balance of the input token, so in
+        // practice only the allowance caps. Kept as a safety net against later changes.
         uint256 value;
         uint256 spent;
         if (pl.isBuy) {
@@ -953,8 +953,8 @@ contract Rebalancer is ReentrancyGuardTransient {
             value = pl.amountIn;
             spent = value;
         } else {
-            // Naar boven afgerond: anders is de teruggerekende waarde van een run die exact op de minTrade-vloer zit
-            // tot bijna 1 sat te klein en zou een kleine wallet nooit kunnen verkopen.
+            // Rounded up: otherwise the back-calculated value of a run that sits exactly on the minTrade floor is
+            // up to almost 1 sat too small and a small wallet could never sell.
             uint256 wantBtc = Math.mulDiv(run, CBBTC_UNIT, price, Math.Rounding.Ceil);
             pl.amountIn = Math.min(wantBtc, Math.min(btcBal, CBBTC.allowance(owner, address(this))));
             value = Math.mulDiv(pl.amountIn, price, CBBTC_UNIT);
@@ -965,10 +965,10 @@ contract Rebalancer is ReentrancyGuardTransient {
             return pl;
         }
 
-        // Doorlopen alleen als de afwijking na deze run nog buiten de band ligt. Die schatting rekent zonder fee en
-        // slippage en is daardoor optimistisch: met kosten ligt de owner na de run verder van het doel. Zegt de schatting
-        // "buiten de band", dan is dat dus ook zo; zegt ze "binnen", dan eindigt de ronde en wacht een kleine rest
-        // op het gewone interval.
+        // Continue only if the deviation after this run still lies outside the band. That estimate ignores fee and
+        // slippage and is therefore optimistic: with costs the owner is further from the target after the run. If the
+        // estimate says "outside the band", that is indeed so; if it says "inside", the round ends and a small
+        // remainder waits for the normal interval.
         uint256 driftEurc = Math.mulDiv(driftWad, pl.total, WAD);
         if (run < correction && value >= run && driftEurc > value + Math.mulDiv(bandWad, pl.total, WAD)) {
             uint256 left = budget > spent ? budget - spent : 0;
@@ -976,11 +976,11 @@ contract Rebalancer is ReentrancyGuardTransient {
         }
     }
 
-    // ─── Intern: swaps ──────────────────────────────────────────────────────────────────────────────────────
+    // ─── Internal: swaps─────────────────────────────────────────────────────────────────────────────────────
 
-    /// @dev Koop: fee over het bruto bedrag, rest de pool in, output rechtstreeks naar de owner. Revert met
-    ///      `NoOutput` als de router 0 cbBTC oplevert, en met `SpotDeviatesFromOracle` als de spot na de swap te
-    ///      ver van de oracle ligt.
+    /// @dev Buy: fee on the gross amount, the rest into the pool, output directly to the owner. Reverts with
+    ///      `NoOutput` if the router yields 0 cbBTC, and with `SpotDeviatesFromOracle` if the spot after the swap
+    ///      lies too far from the oracle.
     function _buy(address owner, Params memory p, uint256 amountIn, uint256 price, address rewardTo)
         internal
         returns (uint256 fee, uint256 reward, uint256 amountOut)
@@ -1005,10 +1005,10 @@ contract Rebalancer is ReentrancyGuardTransient {
         _requireSpotNear(price);
     }
 
-    /// @dev Verkoop: output naar het contract, fee over max(ontvangen, expectedOut), rest naar de owner. De fee is
-    ///      begrensd op het ontvangen bedrag. Over `expectedOut` en niet alleen over `received`, zodat de fee van
-    ///      een run op de MIN_TRADE_FLOOR na poolfees en slippage niet onder KEEPER_REWARD_EURC zakt (audit L-B).
-    ///      Revert met `SpotDeviatesFromOracle` als de spot na de swap te ver van de oracle ligt.
+    /// @dev Sell: output to the contract, fee on max(received, expectedOut), rest to the owner. The fee is
+    ///      capped at the amount received. On `expectedOut` and not only on `received`, so that the fee of a run
+    ///      at MIN_TRADE_FLOOR does not drop below KEEPER_REWARD_EURC after pool fees and slippage (audit L-B).
+    ///      Reverts with `SpotDeviatesFromOracle` if the spot after the swap lies too far from the oracle.
     function _sell(address owner, Params memory p, uint256 amountIn, uint256 price, address rewardTo)
         internal
         returns (uint256 fee, uint256 reward, uint256 amountOut)
@@ -1036,18 +1036,18 @@ contract Rebalancer is ReentrancyGuardTransient {
         EURC.safeTransfer(owner, amountOut);
     }
 
-    /// @dev Fee in EURC: FEE_BPS over `feeBase`, begrensd op `maxFee` (het EURC-bedrag waar de fee uit komt).
-    ///      Bij een koop zijn beide het bruto inputbedrag; bij een verkoop is `feeBase` max(ontvangen,
-    ///      expectedOut) en `maxFee` het ontvangen bedrag. Beloning eruit naar rewardTo, hooguit
-    ///      min(KEEPER_REWARD_EURC, fee / 2), rest naar de treasury. De helft als grens, zodat een run op de vloer de
-    ///      treasury niet leeg laat en een owner die `rewardTo` naar zichzelf zet niet zonder fee handelt (zelf-audit
-    ///      2026-09-17, L-D).
-    ///      Beide transfers zijn niet-reverterend (`trySafeTransfer`), zodat de run nooit stukloopt op de ontvanger van de fee:
-    ///      - faalt de beloning (bijv. geblacklist rewardTo), dan is `reward` 0 en gaat de hele fee naar de
+    /// @dev Fee in EURC: FEE_BPS on `feeBase`, capped at `maxFee` (the EURC amount the fee comes out of).
+    ///      For a buy both are the gross input amount; for a sell `feeBase` is max(received,
+    ///      expectedOut) and `maxFee` the amount received. Reward taken out of it to rewardTo, at most
+    ///      min(KEEPER_REWARD_EURC, fee / 2), rest to the treasury. Half as the bound, so that a run at the floor
+    ///      does not leave the treasury empty and an owner who sets `rewardTo` to themselves does not trade without
+    ///      a fee (self-audit 2026-09-17, L-D).
+    ///      Both transfers are non-reverting (`trySafeTransfer`), so that the run never breaks on the fee recipient:
+    ///      - if the reward fails (e.g. a blacklisted rewardTo), `reward` is 0 and the entire fee goes to the
     ///        treasury;
-    ///      - faalt de treasury-transfer, dan blijft dat deel in het contract (`FeeRetained`) en haalt `sweep`
-    ///        het later op.
-    ///      De fee wordt in beide gevallen volledig bij de owner ingehouden; `reward + treasury + retained == fee`.
+    ///      - if the treasury transfer fails, that part stays in the contract (`FeeRetained`) and `sweep` collects
+    ///        it later.
+    ///      In both cases the fee is withheld in full from the owner; `reward + treasury + retained == fee`.
     function _takeFee(uint256 feeBase, uint256 maxFee, address rewardTo)
         internal
         returns (uint256 fee, uint256 reward)
