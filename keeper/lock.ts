@@ -1,11 +1,11 @@
 /**
- * Lock van het keeper-script (LOCK_FILE): één run tegelijk. Los van keeper.ts, met een verwisselbaar `fs`, zodat de
- * volgorde van twee runs die tegelijk starten in een test na te spelen is.
+ * Lock of the keeper script (LOCK_FILE): one run at a time. Separate from keeper.ts, with a swappable `fs`, so that the
+ * order of two runs that start at the same time can be replayed in a test.
  */
 import * as nodeFs from "node:fs";
 import { type LockInfo, formatLock, lockIsStale, parseLock } from "./selection";
 
-/** Wat het lock van het bestandssysteem gebruikt. */
+/** What the lock uses from the file system. */
 export type LockFs = Pick<
   typeof nodeFs,
   "openSync" | "closeSync" | "writeFileSync" | "readFileSync" | "fstatSync" | "renameSync" | "linkSync" | "unlinkSync"
@@ -16,40 +16,40 @@ export type LockOptions = {
   nowSeconds: number;
   maxAgeSeconds: number;
   isAlive: (pid: number) => boolean;
-  /** Voor tests; standaard `node:fs`. */
+  /** For tests; defaults to `node:fs`. */
   fs?: LockFs;
-  /** Unieke naam voor het opzij zetten van een verlopen lock; standaard pid, poging en een willekeurig getal. */
+  /** Unique name for moving a stale lock aside; defaults to pid, attempt and a random number. */
   asideName?: (attempt: number) => string;
-  /** Na het opruimen van een verlopen lock (voor de log). */
+  /** After removing a stale lock (for the log). */
   onStaleRemoved?: (lock: LockInfo) => void;
 };
 
 const errno = (error: unknown): string | undefined => (error as NodeJS.ErrnoException).code;
 
 /**
- * Neem het lock, of geef false als een andere run het heeft (eindreview I-5, verificatie 579f763 K-3).
+ * Take the lock, or return false if another run holds it (final review I-5, verification 579f763 K-3).
  *
- * Aanmaken gaat altijd met `wx` (O_CREAT | O_EXCL): atomair, dus van twee runs lukt het er één. Het probleem zat in het
- * opruimen van een verlopen lock. Vroeger: bestaat het, lees het, is het verlopen, `unlink`, `open(wx)`. Tussen lezen en
- * `unlink` kon een andere run hetzelfde verlopen lock al opgeruimd en een nieuw lock gemaakt hebben; de `unlink`
- * verwijderde dan dat nieuwe lock en beide runs liepen.
+ * Creation always uses `wx` (O_CREAT | O_EXCL): atomic, so of two runs exactly one succeeds. The problem was in
+ * cleaning up a stale lock. Before: if it exists, read it, if it is stale, `unlink`, `open(wx)`. Between reading and
+ * `unlink` another run could already have removed the same stale lock and created a new lock; the `unlink`
+ * then removed that new lock and both runs ran.
  *
- * Nu:
- * 1. het bestaande lock lezen via één file descriptor, zodat inhoud en inode (`dev`, `ino`) bij hetzelfde bestand horen;
- * 2. is het verlopen, dan het atomair opzij zetten met `rename` naar een unieke naam. Van twee runs die hetzelfde bestand
- *    willen verplaatsen, krijgt er één het; de ander krijgt ENOENT en begint opnieuw;
- * 3. controleren dat het verplaatste bestand hetzelfde bestand is als het gelezen verlopen lock (zelfde inode én zelfde
- *    inhoud). Zo niet, dan heeft deze run tussen 1 en 2 het nieuwe lock van een andere run verplaatst: dat wordt met
- *    `link` teruggezet (`link` overschrijft nooit; bestaat er intussen een nog nieuwer lock, dan blijft dat staan) en
- *    deze run stopt;
- * 4. klopt het, dan het eigen lock met `wx` aanmaken en pas daarna het verplaatste bestand verwijderen. Zolang dat nog
- *    bestaat, kan het bestandssysteem zijn inode niet aan een nieuw lock geven, dus stap 3 kan een nieuw lock niet voor
- *    het oude aanzien.
+ * Now:
+ * 1. read the existing lock through one file descriptor, so that content and inode (`dev`, `ino`) belong to one file;
+ * 2. if it is stale, move it aside atomically with `rename` to a unique name. Of two runs that want to move the same
+ *    file, one gets it; the other gets ENOENT and starts over;
+ * 3. check that the moved file is the same file as the stale lock that was read (same inode and same
+ *    content). If not, this run moved another run's new lock between 1 and 2: it is put back with
+ *    `link` (`link` never overwrites; if an even newer lock exists in the meantime, that one stays) and
+ *    this run stops;
+ * 4. if it matches, create our own lock with `wx` and only then delete the moved file. As long as that file still
+ *    exists, the file system cannot give its inode to a new lock, so step 3 cannot mistake a new lock for
+ *    the old one.
  *
- * Er wordt dus nooit een lock verwijderd dat niet het gelezen verlopen lock is. Wat overblijft: valt precies tussen de
- * `rename` en de `link` van stap 3 (enkele systeemcalls) een derde run die het lock aanmaakt, dan houdt die het lock en
- * loopt de run waarvan het lock verplaatst werd nog door. Daarvoor moeten drie runs tegelijk starten terwijl er een
- * verlopen lock ligt. Ook dan voorkomt het contract dubbele runs; het kost hooguit gerevertte pogingen.
+ * So a lock that is not the stale lock that was read is never removed. What remains: if a third run creates the lock
+ * exactly between the `rename` and the `link` of step 3 (a few system calls), that run keeps the lock and
+ * the run whose lock was moved keeps running. That requires three runs starting at the same time while a
+ * stale lock exists. Even then the contract prevents double runs; it costs at most reverted attempts.
  */
 export const acquireLock = (path: string, options: LockOptions): boolean => {
   const fs = options.fs ?? nodeFs;
@@ -63,14 +63,14 @@ export const acquireLock = (path: string, options: LockOptions): boolean => {
     try {
       seen = readLock(fs, path);
     } catch (error) {
-      if (errno(error) === "ENOENT") continue; // net opgeruimd door een andere run: opnieuw proberen aan te maken
+      if (errno(error) === "ENOENT") continue; // just removed by another run: try to create again
       throw error;
     }
-    // Oud formaat (alleen een pid): de leeftijd komt uit de mtime (eindreview I-5).
+    // Old format (only a pid): the age comes from the mtime (final review I-5).
     const mtime = Math.floor(Number(seen.mtimeMs) / 1000);
     const lock = parseLock(seen.text, mtime);
-    // Leeg: een andere run heeft het net met `wx` aangemaakt en schrijft zo pid en starttijd. Niet verlopen, tenzij het
-    // zo oud is als een verlopen lock (een crash tussen aanmaken en schrijven).
+    // Empty: another run just created it with `wx` and is about to write pid and start time. Not stale, unless it is
+    // as old as a stale lock (a crash between creating and writing).
     if (seen.text.trim() === "" && options.nowSeconds - mtime < options.maxAgeSeconds) return false;
     if (!lockIsStale(lock, options.nowSeconds, options.maxAgeSeconds, options.isAlive)) return false;
 
@@ -78,12 +78,12 @@ export const acquireLock = (path: string, options: LockOptions): boolean => {
     try {
       fs.renameSync(path, aside);
     } catch (error) {
-      if (errno(error) === "ENOENT") continue; // een andere run verplaatste het al
+      if (errno(error) === "ENOENT") continue; // another run already moved it
       throw error;
     }
     const moved = readLock(fs, aside);
     if (moved.dev !== seen.dev || moved.ino !== seen.ino || moved.text !== seen.text) {
-      // Niet het verlopen lock maar het nieuwe lock van een andere run: terugzetten zonder iets te overschrijven.
+      // Not the stale lock but another run's new lock: put it back without overwriting anything.
       try {
         fs.linkSync(aside, path);
       } catch (error) {
@@ -103,7 +103,7 @@ export const acquireLock = (path: string, options: LockOptions): boolean => {
   return false;
 };
 
-/** `open(wx)`: true als het lock van deze run is, false als het bestand al bestaat. */
+/** `open(wx)`: true if the lock belongs to this run, false if the file already exists. */
 const tryCreate = (fs: LockFs, path: string, options: LockOptions): boolean => {
   let fd: number;
   try {
@@ -122,7 +122,7 @@ const tryCreate = (fs: LockFs, path: string, options: LockOptions): boolean => {
 
 type LockFile = { dev: bigint; ino: bigint; text: string; mtimeMs: bigint };
 
-/** Inhoud en identiteit van één bestand, via één file descriptor. */
+/** Content and identity of one file, through a single file descriptor. */
 const readLock = (fs: LockFs, path: string): LockFile => {
   const fd = fs.openSync(path, "r");
   try {

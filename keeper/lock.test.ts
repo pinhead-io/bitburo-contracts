@@ -1,6 +1,6 @@
 /**
- * Verificatie 579f763 (K-3): het lock van het keeper-script op een echt bestandssysteem (tijdelijke map), met de volgorde
- * van twee of drie runs die tegelijk starten nagespeeld via een `fs` die vóór een stap de andere run laat lopen.
+ * Verification 579f763 (K-3): the keeper script's lock on a real file system (temporary directory), with the order
+ * of two or three runs that start at the same time replayed through an `fs` that lets the other run go before a step.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -27,13 +27,13 @@ const options = (pid: number, extra: Partial<Parameters<typeof acquireLock>[1]> 
   pid,
   nowSeconds: NOW,
   maxAgeSeconds: MAX_AGE,
-  isAlive: (p: number) => p === 1 || p === 2 || p === 3, // de runs in deze test leven; pid 99 (de crash) niet
+  isAlive: (p: number) => p === 1 || p === 2 || p === 3, // the runs in this test are alive; pid 99 (the crash) is not
   ...extra,
 });
 const holder = () => parseLock(fs.readFileSync(path, "utf8"), 0).pid;
 const leftovers = () => fs.readdirSync(dir).filter((name) => name !== "keeper.lock");
 
-/** `fs` dat vlak vóór de eerste aanroep van `step` eenmalig `before` uitvoert (de andere run). */
+/** `fs` that runs `before` once, right before the first call of `step` (the other run). */
 const interleave = (step: keyof LockFs, before: () => void): LockFs => {
   let done = false;
   return new Proxy(fs, {
@@ -86,19 +86,19 @@ describe("lock (verification 579f763, K-3)", () => {
   test("the K-3 race: B read the stale lock, A cleaned it up and took the lock; B must not remove A's lock", () => {
     fs.writeFileSync(path, formatLock({ pid: 99, startedAt: NOW - 10 }));
     let a: boolean | undefined;
-    // B heeft het verlopen lock gelezen; vóór zijn opruimstap (rename) ruimt A hetzelfde lock op en neemt het lock. B
-    // verplaatst dan het lock van A, ziet aan inode en inhoud dat het niet het verlopen lock is, en zet het terug.
+    // B has read the stale lock; before its cleanup step (rename) A removes the same lock and takes the lock. B
+    // then moves A's lock, sees from inode and content that it is not the stale lock, and puts it back.
     const b = acquireLock(path, options(2, { fs: interleave("renameSync", () => (a = acquireLock(path, options(1)))) }));
     expect(a).toBe(true);
     expect(b).toBe(false);
-    expect(holder()).toBe(1); // het lock van A staat er weer
+    expect(holder()).toBe(1); // A's lock is back in place
     expect(leftovers()).toEqual([]);
-    // En B kan het daarna niet alsnog nemen: A leeft.
+    // And B cannot take it afterwards either: A is alive.
     expect(acquireLock(path, options(2))).toBe(false);
   });
 
   test("the old code in the same order: B's unlink removed A's new lock and both ran", () => {
-    // Ter vergelijking de vorige implementatie (keeper.ts vóór K-3), met dezelfde volgorde.
+    // For comparison the previous implementation (keeper.ts before K-3), with the same order.
     const oldAcquire = (pid: number, beforeUnlink: () => void = () => {}): boolean => {
       if (fs.existsSync(path)) {
         const lock = parseLock(fs.readFileSync(path, "utf8"), 0);
@@ -115,12 +115,12 @@ describe("lock (verification 579f763, K-3)", () => {
     let a: boolean | undefined;
     const b = oldAcquire(2, () => (a = oldAcquire(1)));
     expect(a).toBe(true);
-    expect(b).toBe(true); // beide runs denken dat ze het lock hebben
+    expect(b).toBe(true); // both runs think they hold the lock
   });
 
   test("both saw the stale lock and A moved it aside first: B's rename finds nothing, B retries and takes the free lock", () => {
     fs.writeFileSync(path, formatLock({ pid: 99, startedAt: NOW - 10 }));
-    // A heeft het verlopen lock net opzij gezet (rename), maar nog geen eigen lock gemaakt.
+    // A has just moved the stale lock aside (rename), but has not created its own lock yet.
     const b = acquireLock(path, options(2, { fs: interleave("renameSync", () => fs.renameSync(path, join(dir, "a-aside"))) }));
     expect(b).toBe(true);
     expect(holder()).toBe(2);
@@ -131,7 +131,7 @@ describe("lock (verification 579f763, K-3)", () => {
   test("B moved A's new lock: it is put back with link, and a newer lock is never overwritten", () => {
     fs.writeFileSync(path, formatLock({ pid: 99, startedAt: NOW - 10 }));
     let c: boolean | undefined;
-    // A neemt het lock vóór de rename van B (B verplaatst dus het lock van A), en C probeert het vlak vóór de link.
+    // A takes the lock before B's rename (so B moves A's lock), and C tries right before the link.
     const fsB = interleave("renameSync", () => acquireLock(path, options(1)));
     const fsBC = new Proxy(fsB, {
       get(target, prop) {
@@ -145,7 +145,7 @@ describe("lock (verification 579f763, K-3)", () => {
     }) as LockFs;
     const b = acquireLock(path, options(2, { fs: fsBC }));
     expect(b).toBe(false);
-    // C viel in het gat tussen rename en link: C houdt het lock, de link van B overschrijft het niet (EEXIST).
+    // C fell into the gap between rename and link: C keeps the lock, B's link does not overwrite it (EEXIST).
     expect(c).toBe(true);
     expect(holder()).toBe(3);
     expect(leftovers()).toEqual([]);
@@ -154,7 +154,7 @@ describe("lock (verification 579f763, K-3)", () => {
   test("A moved the stale lock aside but B takes the free lock before A creates its own: A stops and leaves B's lock", () => {
     fs.writeFileSync(path, formatLock({ pid: 99, startedAt: NOW - 10 }));
     let b: boolean | undefined;
-    // openSync van A: 1 = wx (bestaat), 2 = lezen, 3 = het opzij gezette bestand lezen, 4 = eigen lock (wx). B vóór 4.
+    // openSync of A: 1 = wx (exists), 2 = read, 3 = read the file moved aside, 4 = own lock (wx). B before 4.
     let calls = 0;
     const fsA = new Proxy(fs, {
       get(target, prop) {
