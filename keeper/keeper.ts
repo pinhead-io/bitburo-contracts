@@ -37,7 +37,8 @@
  *   blokkade als een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit) én een transactie vóór
  *   de eigen transactie een pool aanraakte (Swap, Mint of Burn) die zelf geen directe `execute` op de Rebalancer was.
  * - Concurrerende keepers (eindreview F-1): staat vóór de eigen gerevertte transactie een `Executed` voor dezelfde
- *   owner, dan is die owner bediend: geen blokkade, geen cool-down, geen hogere tip. Na een eigen transactie zonder
+ *   owner (in dat blok, of in een blok tussen de simulatie en de eigen transactie: verificatie 579f763, K-2), dan is
+ *   die owner bediend: geen blokkade, geen cool-down, geen hogere tip. Na een eigen transactie zonder
  *   blokkade, en aan het eind van een run zonder blokkade en zonder eigen transactie, halveert de tip tot de basis.
  * - Eén run tegelijk (LOCK_FILE), en de run leest na het retry-budget geen nieuwe kandidaten meer.
  *
@@ -136,7 +137,7 @@ import {
   rewardToError,
   runSizeSkipReason,
   scanSegments,
-  servedBefore,
+  servedSince,
   shouldReadPageAgain,
   startPriorityFee,
 } from "./selection";
@@ -497,27 +498,55 @@ const lowerFee = () => {
 let pools: readonly Address[] | undefined;
 
 /**
+ * Is `owner` na de simulatie (op blok `simulatedBlock`) en vóór de eigen transactie al door een ander uitgevoerd? In het
+ * blok van de eigen transactie (eindreview F-1) of in een blok daartussen (verificatie 579f763, K-2): `Executed`-logs
+ * voor die owner van `simulatedBlock` + 1 tot en met het blok van de receipt (`servedSince`). Bij een leesfout: niet
+ * bediend (het oude gedrag).
+ */
+const servedByOther = async (owner: Address, simulatedBlock: bigint, receipt: TransactionReceipt): Promise<boolean> => {
+  try {
+    const executed = await publicClient.getLogs({
+      address: rebalancer,
+      event: executedEvent[0],
+      args: { owner },
+      fromBlock: simulatedBlock + 1n,
+      toBlock: receipt.blockNumber,
+    });
+    return servedSince(
+      executed.map((log) => ({
+        owner: log.args.owner ?? ("0x" as Address),
+        blockNumber: log.blockNumber ?? -1n,
+        transactionIndex: log.transactionIndex ?? Infinity,
+      })),
+      owner,
+      simulatedBlock,
+      receipt,
+    );
+  } catch (error) {
+    console.warn(`Executed-logs voor ${owner} in blok ${simulatedBlock + 1n}–${receipt.blockNumber} niet te lezen: ${describeError(error)}`);
+    return false;
+  }
+};
+
+/**
  * Transacties die vóór de eigen transactie in dat blok een van beide pools aanraakten (Swap, Mint of Burn), zonder directe
- * `execute`'s van andere keepers, en de hoogste tip daarvan; en of `owner` vóór ons al door een andere keeper is uitgevoerd
- * (`Executed`-log, eindreview F-1). Bij een leesfout: `touched` onbekend (false), geen tip en niet bediend; dan loopt de
+ * `execute`'s van andere keepers, en de hoogste tip daarvan; en of `owner` sinds de simulatie al door een ander is
+ * uitgevoerd (`servedByOther`). Bij een leesfout van de pool-logs: `touched` onbekend (false) en geen tip; dan loopt de
  * fee niet op.
  */
 const blockersOf = async (
   owner: Address,
+  simulatedBlock: bigint,
   receipt: TransactionReceipt,
 ): Promise<{ touched: boolean; tip: bigint | undefined; served: boolean }> => {
+  const servedPromise = servedByOther(owner, simulatedBlock, receipt);
   try {
     pools ??= [await read<Address>("POOL_EURC_USDC"), await read<Address>("POOL_USDC_CBBTC")];
-    const [block, logs, executed] = await Promise.all([
+    const [block, logs, served] = await Promise.all([
       publicClient.getBlock({ blockHash: receipt.blockHash }),
       publicClient.getLogs({ address: [...pools], events: poolEvents, blockHash: receipt.blockHash }),
-      publicClient.getLogs({ address: rebalancer, event: executedEvent[0], args: { owner }, blockHash: receipt.blockHash }),
+      servedPromise,
     ]);
-    const served = servedBefore(
-      executed.map((log) => ({ owner: log.args.owner ?? ("0x" as Address), transactionIndex: log.transactionIndex ?? Infinity })),
-      owner,
-      receipt.transactionIndex,
-    );
     const hashes = [
       ...new Set(logs.filter((log) => (log.transactionIndex ?? Infinity) < receipt.transactionIndex).map((log) => log.transactionHash)),
     ].filter((hash): hash is Hex => hash !== null);
@@ -535,7 +564,7 @@ const blockersOf = async (
     return { touched: blocking.length > 0, tip: blockerTip(blocking, receipt.transactionIndex), served };
   } catch (error) {
     console.warn(`aanrakers in blok ${receipt.blockNumber} niet te lezen: ${describeError(error)}`);
-    return { touched: false, tip: undefined, served: false };
+    return { touched: false, tip: undefined, served: await servedPromise };
   }
 };
 
@@ -701,12 +730,18 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
       // Gerevert na een geslaagde simulatie: de staat veranderde in de tussentijd. Hersimuleer op het begin van dat
       // blok voor de reden, en kijk wie vóór ons een pool aanraakte.
       failure = new Error(`transactie ${hash} is gerevert`);
-      const [resimulation, blockers] = await Promise.all([resimulateAtBlockStart(owner, receipt), blockersOf(owner, receipt)]);
+      const [resimulation, blockers] = await Promise.all([
+        resimulateAtBlockStart(owner, receipt),
+        blockersOf(owner, latest.number, receipt),
+      ]);
       const judged = onchainRevertVerdict(resimulation, blockers.touched, blockers.served);
       verdict = judged.failure;
       if (judged.failure.servedByOther) {
-        // Eindreview F-1: een andere keeper voerde deze owner eerder in het blok uit. Bediend; geen cool-down, geen hogere tip.
-        console.log(`${owner}: al uitgevoerd door een andere keeper in blok ${receipt.blockNumber}; geen cool-down, geen hogere tip`);
+        // Eindreview F-1 en K-2: een ander voerde deze owner na onze simulatie uit, in dit blok of een eerder. Bediend;
+        // geen cool-down, geen hogere tip.
+        console.log(
+          `${owner}: al uitgevoerd door een ander (blok ${latest.number + 1n}–${receipt.blockNumber}); geen cool-down, geen hogere tip`,
+        );
         lowerFee();
         return { outcome: "skipped", block: null };
       }

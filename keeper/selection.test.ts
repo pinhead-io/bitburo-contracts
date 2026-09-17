@@ -55,6 +55,7 @@ import {
   runSizeSkipReason,
   scanSegments,
   servedBefore,
+  servedSince,
   shouldReadPageAgain,
 } from "./selection";
 import { encodeFunctionData, getAddress, parseAbi, toFunctionSelector } from "viem";
@@ -368,6 +369,35 @@ describe("competing keepers (final review F-1)", () => {
     expect(servedBefore(logs, OWNER, 3)).toBe(false);
     expect(servedBefore(logs, OTHER, 0)).toBe(false);
     expect(servedBefore([], OWNER, 10)).toBe(false);
+  });
+
+  test("verification 579f763 (K-2): a competitor that served the owner one block earlier is no failure and no cool-down", () => {
+    // The PoC: we simulate on block 99 (overrides for 100). Keeper A lands in block 100, our transaction in 101
+    // (index 0) and reverts with NotDue. The resimulation on the start of 101 sees A's run too: NotDue.
+    const simulated = 99n;
+    const own = { blockNumber: 101n, transactionIndex: 0 };
+    const logs = [{ owner: OWNER, blockNumber: 100n, transactionIndex: 7 }];
+    const served = servedSince(logs, OWNER, simulated, own);
+    expect(served).toBe(true);
+    const verdict = onchainRevertVerdict({ kind: "reverted", errorName: "NotDue" }, false, served);
+    expect(verdict.blockade).toBe(false);
+    expect(verdict.failure.servedByOther).toBe(true);
+    expect(failureAction(verdict.failure, 1_000, 1_540)).toBe("skip");
+    // Without this rule (the old servedBefore on block 101 only) the same race was a failure with a cool-down.
+    expect(onchainRevertVerdict({ kind: "reverted", errorName: "NotDue" }, false, servedBefore([], OWNER, 0)).failure.servedByOther).toBeUndefined();
+  });
+
+  test("servedSince counts only runs of the same owner after the simulated block and before our transaction", () => {
+    const own = { blockNumber: 101n, transactionIndex: 4 };
+    const at = (blockNumber: bigint, transactionIndex: number, owner: Address = OWNER) => [{ owner, blockNumber, transactionIndex }];
+    expect(servedSince(at(101n, 3), OWNER, 99n, own)).toBe(true); // same block, before us (F-1)
+    expect(servedSince(at(100n, 9), OWNER.toLowerCase() as Address, 99n, own)).toBe(true); // earlier block (K-2)
+    expect(servedSince(at(101n, 4), OWNER, 99n, own)).toBe(false); // our own index
+    expect(servedSince(at(101n, 5), OWNER, 99n, own)).toBe(false); // after us
+    expect(servedSince(at(102n, 0), OWNER, 99n, own)).toBe(false); // later block
+    expect(servedSince(at(99n, 0), OWNER, 99n, own)).toBe(false); // already in the simulated state
+    expect(servedSince(at(100n, 0, OTHER), OWNER, 99n, own)).toBe(false); // other owner
+    expect(servedSince([], OWNER, 99n, own)).toBe(false);
   });
 
   test("the tip halves after a run without blockade, down to the base, in 6 steps from 3 gwei", () => {

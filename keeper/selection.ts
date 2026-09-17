@@ -334,6 +334,30 @@ export const servedBefore = (
   executedLogs.some((log) => log.transactionIndex < ownIndex && log.owner.toLowerCase() === owner.toLowerCase());
 
 /**
+ * Verificatie 579f763 (K-2): is `owner` na de simulatie en vóór de eigen transactie al door een ander uitgevoerd, ook in
+ * een eerder blok dan dat van de eigen transactie? `servedBefore` keek alleen naar het blok van de eigen transactie.
+ * Landt keeper A in blok N en wij in N+1, dan revert onze transactie met `NotDue` en ziet de hersimulatie op het begin
+ * van N+1 de run van A ook. Dat is geen mislukking van de owner maar een verloren race; zonder deze regel kreeg de owner
+ * een cool-down, die bij elke verloren race verdubbelde tot 24 uur.
+ *
+ * `executedLogs`: `Executed`-logs voor deze owner vanaf het blok na `simulatedBlock` (het blok waarvan de simulatie de
+ * staat las; een run in dat blok zelf had de simulatie al gezien) tot en met het blok van de eigen transactie. Telt
+ * mee: een log in een eerder blok, of in hetzelfde blok met een lagere `transactionIndex`.
+ */
+export const servedSince = (
+  executedLogs: readonly { owner: Address; blockNumber: bigint; transactionIndex: number }[],
+  owner: Address,
+  simulatedBlock: bigint,
+  own: { blockNumber: bigint; transactionIndex: number },
+): boolean =>
+  executedLogs.some(
+    (log) =>
+      log.owner.toLowerCase() === owner.toLowerCase() &&
+      log.blockNumber > simulatedBlock &&
+      (log.blockNumber < own.blockNumber || (log.blockNumber === own.blockNumber && log.transactionIndex < own.transactionIndex)),
+  );
+
+/**
  * Eindreview F-1: de tip zakt weer. Na een eigen transactie die geen blokkade was (geslaagd, of bediend door een ander),
  * en aan het eind van een run zonder blokkade en zonder eigen transactie, halveert de tip, niet lager dan de basis. Van
  * het plafond van 3 gwei naar 0,05 gwei zijn dat 6 stappen: bij een run per 10 minuten zonder concurrentie hooguit een
