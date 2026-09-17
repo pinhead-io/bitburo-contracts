@@ -470,7 +470,7 @@ const readFeeState = (): FeeState | undefined => {
  * KEEPER_REWARD_EURC en de Chainlink-koersen EURC/USD (de feed van het contract) en ETH/USD. Is een koers niet te lezen,
  * dan telt de beloning als 0 en geldt alleen TIP_BUDGET_ETH: liever te weinig bieden dan te veel.
  * Het contract betaalt hooguit min(KEEPER_REWARD_EURC, fee / 2) (zelf-audit 2026-09-17, L-D). Elke run heeft een fee
- * van minstens 2 × KEEPER_REWARD_EURC (de fee van MIN_TRADE_FLOOR), dus KEEPER_REWARD_EURC / 2 is wat elke run zeker
+ * van minstens KEEPER_REWARD_EURC (de fee van MIN_TRADE_FLOOR), dus KEEPER_REWARD_EURC / 2 is wat elke run zeker
  * oplevert.
  */
 const readRewardWei = async (): Promise<bigint> => {

@@ -884,8 +884,9 @@ contract Rebalancer is ReentrancyGuardTransient {
      * @dev Rekenregel per run.
      *      1. Correctie zoals in de app: |drift| × total, alleen buiten de band.
      *      2. Budget: bij een nieuwe ronde max(total × maxCorrectionBps, minTradeEurc); bij een deel wat er van de
-     *         ronde over is, maar nooit meer dan dat budget van de huidige waarde (zelf-audit lead 11). Een deel in de
-     *         andere richting dan de ronde gebeurt niet (geen ping-pong).
+     *         ronde over is, maar nooit meer dan dat budget van de huidige waarde (zelf-audit lead 11). Het
+     *         restant wordt dan van dat kleinere budget gerekend en blijft laag, ook als de waarde later herstelt. Een
+     *         deel in de andere richting dan de ronde gebeurt niet (geen ping-pong).
      *      3. correctie = min(correctie, budget); onder minTradeEurc -> niets (ook: de ronde is klaar).
      *      4. run = min(correctie, `_maxRunEurc`). Onder MIN_TRADE_FLOOR -> `blockedBy`: de correctie wacht op
      *         ruimte in een volgend blok; een lopende ronde blijft staan tot er weer ruimte is of `interval` na de

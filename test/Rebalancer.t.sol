@@ -574,7 +574,6 @@ contract RebalancerTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
-    /// @dev L-9: een niet-geïnitialiseerde ronde (startedAt == 0) van de uptime-feed telt niet als "up".
     /// @notice Zelf-audit 2026-09-17, Info-G: een `startedAt` in de toekomst geeft `SequencerDown`, geen Panic.
     function test_execute_revertsSequencerDownWhenStartedAtInFuture() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
@@ -587,6 +586,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertFalse(due);
     }
 
+    /// @dev L-9: een niet-geïnitialiseerde ronde (startedAt == 0) van de uptime-feed telt niet als "up".
     function test_execute_revertsSequencerDownWhenStartedAtZero() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         sequencer.set(0, 0, 0);
