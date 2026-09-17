@@ -3,6 +3,7 @@ pragma solidity 0.8.37;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {IAggregatorV3} from "../src/interfaces/IAggregatorV3.sol";
@@ -41,7 +42,15 @@ contract RebalancerForkTest is Test {
             vm.skip(true);
             return;
         }
-        vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
+        // `FORK_BLOCK` pint een blok (review I-7), zodat de suite reproduceerbaar is; standaard het laatste.
+        string memory rpc = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
+        uint256 forkBlock = vm.envOr("FORK_BLOCK", uint256(0));
+        if (forkBlock == 0) vm.createSelectFork(rpc);
+        else vm.createSelectFork(rpc, forkBlock);
+        // Een fork staat op de stand ná het laatste blok, met diens timestamp. Had dat blok een tickwissel in een van
+        // de pools, dan ziet de blokcheck die als "in dit blok aangeraakt". Begin daarom in een vers blok.
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 2);
 
         r = new Rebalancer(
             Rebalancer.Deployment({
@@ -100,6 +109,34 @@ contract RebalancerForkTest is Test {
         address[] memory list = r.dueOwners(0, 10);
         assertEq(list.length, 1);
         assertEq(list[0], buyer);
+    }
+
+    /// @notice Review I-4: de echte tokens hebben de decimalen waar de constructor op controleert (EURC 6, cbBTC 8,
+    ///         USDC 6), de deploy in `setUp` met de adressen van het deployscript slaagt dus, en een token met andere
+    ///         decimalen op die adressen wordt geweigerd.
+    function test_fork_constructorChecksTokenDecimals() public {
+        assertEq(IERC20Metadata(address(EURC)).decimals(), 6, "EURC");
+        assertEq(IERC20Metadata(address(CBBTC)).decimals(), 8, "cbBTC");
+        assertEq(IERC20Metadata(USDC).decimals(), 6, "USDC");
+        assertEq(address(r.EURC()), address(EURC));
+
+        Rebalancer.Deployment memory d = Rebalancer.Deployment({
+            eurc: address(EURC),
+            cbbtc: address(CBBTC),
+            usdc: USDC,
+            router: ROUTER,
+            feedCbbtcUsd: FEED_CBBTC_USD,
+            feedEurcUsd: FEED_EURC_USD,
+            sequencerFeed: SEQUENCER,
+            poolEurcUsdc: POOL_EURC_USDC,
+            poolUsdcCbbtc: POOL_USDC_CBBTC,
+            treasury: treasury
+        });
+        vm.mockCall(address(CBBTC), abi.encodeWithSignature("decimals()"), abi.encode(uint8(18)));
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedTokenDecimals.selector, address(CBBTC)));
+        new Rebalancer(d);
+        vm.clearMockedCalls();
+        new Rebalancer(d);
     }
 
     /// @notice Testgat oracle 3: beide feeds zijn on-chain 8 decimalen, dragen de verwachte beschrijving en zijn
@@ -178,7 +215,12 @@ contract RebalancerForkTest is Test {
         uint256 g = gasleft();
         r.execute(buyer, keeper);
         uint256 buyGas = g - gasleft();
+        uint64 buyTime = uint64(vm.getBlockTimestamp());
 
+        // De koop kan de tick van een pool veranderen; dan weigert de blokcheck een tweede run in hetzelfde blok
+        // (PoolTouchedThisBlock). De verkoop gaat daarom in het volgende blok, zoals een wekker dat ook doet.
+        vm.roll(block.number + 1);
+        vm.warp(vm.getBlockTimestamp() + 2);
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(seller, false, 0, 0, 0, treasury, 0, 0, 0, 0);
         g = gasleft();
@@ -186,8 +228,8 @@ contract RebalancerForkTest is Test {
         uint256 sellGas = g - gasleft();
 
         console.log("gas koop:", buyGas, "gas verkoop:", sellGas);
-        assertEq(r.lastExecutedAt(buyer), uint64(block.timestamp));
-        assertEq(r.lastExecutedAt(seller), uint64(block.timestamp));
+        assertEq(r.lastExecutedAt(buyer), buyTime);
+        assertEq(r.lastExecutedAt(seller), uint64(vm.getBlockTimestamp()));
         assertLt(buyGas, 1_000_000, "koop past niet meer in het begrote gas");
         assertLt(sellGas, 1_000_000, "verkoop past niet meer in het begrote gas");
     }
@@ -264,7 +306,9 @@ contract RebalancerForkTest is Test {
         uint256 total = 2_000_000 * price / 1e8;
         (bool due, int256 delta) = r.isDue(seller);
         assertTrue(due);
-        assertEq(delta, -int256(total / 10), "cap 10% van de totale waarde");
+        // L-C: de delta is de waarde van de naar boven afgeronde sats, dus hooguit 1 sat boven de cap van 10%.
+        uint256 sats = (total / 10 * 1e8 + price - 1) / price;
+        assertEq(delta, -int256(sats * price / 1e8), "cap 10% van de totale waarde, als verkochte sats");
 
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(seller, false, 0, 0, 0, keeper, 0, 0, 0, 0);
@@ -277,9 +321,12 @@ contract RebalancerForkTest is Test {
         assertApproxEqRel(received, btcSold * price / 1e8 * 9975 / 10_000, 0.01e18);
         assertEq(EURC.balanceOf(keeper), 50_000, "beloning");
         assertGt(EURC.balanceOf(treasury), 0, "treasury-fee");
-        // fee = 25 bps over het ontvangen bedrag = reward + treasury.
+        // fee = 25 bps over max(ontvangen, verwachte opbrengst tegen de oracle) = reward + treasury (audit L-B).
         uint256 fee = EURC.balanceOf(keeper) + EURC.balanceOf(treasury);
-        assertEq(fee, (received + fee) * 25 / 10_000);
+        uint256 feeBase = received + fee;
+        uint256 expectedOut = btcSold * price / 1e8;
+        if (expectedOut > feeBase) feeBase = expectedOut;
+        assertEq(fee, feeBase * 25 / 10_000);
         assertEq(EURC.balanceOf(address(r)), 0);
         assertEq(CBBTC.balanceOf(address(r)), 0);
 

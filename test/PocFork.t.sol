@@ -23,7 +23,11 @@ contract PocFork is Test {
         if (!vm.envOr("RUN_FORK", true)) {
             vm.skip(true);
         }
-        vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")));
+        // `FORK_BLOCK` pint een blok (review I-7), zodat de suite reproduceerbaar is; standaard het laatste.
+        string memory rpc = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
+        uint256 forkBlock = vm.envOr("FORK_BLOCK", uint256(0));
+        if (forkBlock == 0) vm.createSelectFork(rpc);
+        else vm.createSelectFork(rpc, forkBlock);
         r = new Rebalancer(
             Rebalancer.Deployment({
                 eurc: address(EURC),
@@ -66,7 +70,7 @@ contract PocFork is Test {
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 1,
+                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
                 maxCorrectionBps: 1000,
                 minTradeEurc: 1,
                 interval: 1 hours,
@@ -81,7 +85,7 @@ contract PocFork is Test {
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 1,
+                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
                 maxCorrectionBps: 1,
                 minTradeEurc: 20e6,
                 interval: 1 hours,
@@ -96,7 +100,7 @@ contract PocFork is Test {
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 1,
+                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
                 maxCorrectionBps: 1000,
                 minTradeEurc: 20e6,
                 interval: 1 hours,
@@ -158,12 +162,12 @@ contract PocFork is Test {
         _sellEurc(atk, lo);
         console.log("spot na push:", r.spot(), "afwijking bps:", (r.spot() - oracle) * 10_000 / oracle);
 
-        // 2) De run zelf duwt de spot verder. De verharding controleert `_requireSpotNear` ook ná de
-        //    swap, dus voorschuiving en eigen prijsimpact moeten samen binnen de tolerantie blijven.
-        //    De oorspronkelijke PoC kwam hier wél doorheen en logde de winst van de aanvaller.
+        // 2) De push ligt in hetzelfde blok en verandert de tick van EURC/USDC (Uniswap schrijft dan een observatie),
+        //    dus de run revert al vóór de swap op de blokcheck (audit M-1). Vóór de blokcheck strandde hij op het
+        //    blokvenster, daarvóór op de spotcheck ná de swap; de oorspronkelijke PoC kwam hier wél doorheen en logde
+        //    de winst van de aanvaller.
         uint256 btcBefore = CBBTC.balanceOf(buyer);
-        //    De gerapporteerde spot is die ná de swap, dus alleen op het fouttype asserteren.
-        vm.expectPartialRevert(Rebalancer.SpotDeviatesFromOracle.selector);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, POOL_EURC_USDC));
         r.execute(buyer, atk);
 
         assertEq(CBBTC.balanceOf(buyer), btcBefore, "buyer heeft toch gekocht op een geduwde koers");
