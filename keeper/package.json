@@ -1,9 +1,9 @@
 {
   "name": "bitburo-keeper-script",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Open keeper-script: roept Rebalancer.execute(owner, rewardTo) aan voor elke owner die due is. Iedereen mag dit draaien.",
+  "description": "Open keeper script: calls Rebalancer.execute(owner, minAmountOut) for every due owner that appointed this keeper.",
   "scripts": {
     "keeper": "bun run keeper.ts",
     "test": "bun test",
