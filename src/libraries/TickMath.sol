@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.37;
 
-/// @title TickMath (alleen getSqrtPriceAtTick)
-/// @notice Overgenomen uit Uniswap v4-core `src/libraries/TickMath.sol` (commit
-///         46c6834698c48bc4a463a86d8420f4eb1d7f3b75). Dat bestand valt onder de MIT-licentie (SPDX-header van het
-///         bestand; `licenses/MIT_LICENSE` en README-sectie "License" van die repo). Niet de GPL-versie uit v3-core.
-///         Alleen `getSqrtPriceAtTick` en de tickgrenzen; de revert via `CustomRevert` is vervangen door een gewone
-///         `revert InvalidTick(tick)`. De rekenregels zijn ongewijzigd.
+/// @title TickMath (getSqrtPriceAtTick only)
+/// @notice Taken from Uniswap v4-core `src/libraries/TickMath.sol` (commit
+///         46c6834698c48bc4a463a86d8420f4eb1d7f3b75). That file is under the MIT license (SPDX header of the
+///         file; `licenses/MIT_LICENSE` and README section "License" of that repo). Not the GPL version from v3-core.
+///         Only `getSqrtPriceAtTick` and the tick bounds; the revert via `CustomRevert` has been replaced by a plain
+///         `revert InvalidTick(tick)`. The calculation rules are unchanged.
 ///
 ///         Copyright 2023 Universal Navigation Inc.
 ///

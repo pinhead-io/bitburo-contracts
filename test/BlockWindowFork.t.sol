@@ -23,8 +23,8 @@ interface IUniswapV3PoolActions {
         returns (uint128, uint128);
 }
 
-/// @dev Aanvaller die alles in één transactie doet: pools duwen, `execute` voor één of meer owners, terugruilen, en
-///      optioneel zijn eigen LP-positie opheffen.
+/// @dev Attacker that does everything in one transaction: push pools, `execute` for one or more owners, swap back, and
+///      optionally remove its own LP position.
 contract WindowAttacker {
     struct Push {
         address pool;
@@ -36,7 +36,7 @@ contract WindowAttacker {
     uint160 internal constant MAX_LIMIT = 1461446703485210103287273052203988822378723970341;
 
     address private _pool;
-    /// @dev Aantal geslaagde `execute`'s in de laatste `attack`.
+    /// @dev Number of successful `execute`s in the last `attack`.
     uint256 public succeeded;
     bytes public lastRevert;
 
@@ -97,9 +97,9 @@ contract WindowAttacker {
     }
 }
 
-/// @notice Fork-tests (Base) voor het blokvenster van audit M-1: winst van een atomaire zelf-sandwich, twee owners in
-///         één blok, een eerlijke correctie in delen, en de aanvaller met een groot LP-aandeel. Overslaan met
-///         RUN_FORK=false. `FORK_BLOCK` pint een blok (sneller herhalen dankzij de RPC-cache); standaard het laatste.
+/// @notice Fork tests (Base) for the block window of audit M-1: profit of an atomic self-sandwich, two owners in
+///         one block, an honest correction in chunks, and the attacker with a large LP share. Skip with
+///         RUN_FORK=false. `FORK_BLOCK` pins a block (faster reruns thanks to the RPC cache); defaults to the latest.
 contract BlockWindowForkTest is Test {
     IERC20 internal constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 internal constant CBBTC = IERC20(0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf);
@@ -145,19 +145,19 @@ contract BlockWindowForkTest is Test {
         deal(address(EURC), address(atk), 50_000_000e6);
         deal(address(USDC), address(atk), 50_000_000e6);
         deal(address(CBBTC), address(atk), 500e8);
-        // Begin in een vers blok: de laatste observatie van de pools is dan ouder dan dit blok.
+        // Start in a fresh block: the last observation of the pools is then older than this block.
         _nextBlock();
     }
 
-    // ─── Hulpfuncties ───────────────────────────────────────────────────────────────────────────────────────
+    // ─── Helpers ────────────────────────────────────────────────────────────────────────────────────────────
 
     function _nextBlock() internal {
         vm.roll(block.number + 1);
         vm.warp(vm.getBlockTimestamp() + 2);
     }
 
-    /// @dev Houdt beide feeds vers na een `vm.warp` (zelfde antwoord, `updatedAt` = nu), optioneel cbBTC/USD
-    ///      `lagBps` te hoog (een feed die binnen zijn deviation-drempel van 0,3% achterloopt).
+    /// @dev Keeps both feeds fresh after a `vm.warp` (same answer, `updatedAt` = now), optionally cbBTC/USD
+    ///      `lagBps` too high (a feed lagging within its deviation threshold of 0.3%).
     function _freshFeeds(uint256 lagBps) internal {
         vm.clearMockedCalls();
         address[2] memory feeds = [FEED_CBBTC_USD, FEED_EURC_USD];
@@ -177,7 +177,7 @@ contract BlockWindowForkTest is Test {
         (s,,,,,,) = IUniswapV3Pool(pool).slot0();
     }
 
-    /// @dev Owner met een correctie van `correctionEurc` in de richting `isBuy` (doel 80% cbBTC, band 5%,
+    /// @dev Owner with a correction of `correctionEurc` in direction `isBuy` (target 80% cbBTC, band 5%,
     ///      maxCorrection 100%).
     function _fund(address owner, bool isBuy, uint256 correctionEurc) internal {
         deal(address(EURC), owner, 0);
@@ -201,7 +201,7 @@ contract BlockWindowForkTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev Waarde van de aanvaller in EURC-basiseenheden: USDC via de vaste pool-1-koers `s1`, cbBTC via `price`.
+    /// @dev Value of the attacker in EURC base units: USDC via the fixed pool 1 price `s1`, cbBTC via `price`.
     function _value(address who, uint160 s1, uint256 price) internal view returns (int256) {
         uint256 usdcAsEurc = Math.mulDiv(Math.mulDiv(USDC.balanceOf(who), 1 << 96, s1), 1 << 96, s1);
         return int256(EURC.balanceOf(who) + usdcAsEurc + Math.mulDiv(CBBTC.balanceOf(who), price, 1e8));
@@ -211,21 +211,21 @@ contract BlockWindowForkTest is Test {
         return EURC.balanceOf(owner) + Math.mulDiv(CBBTC.balanceOf(owner), price, 1e8);
     }
 
-    /// @dev Push in `pool` in de richting van de run (`isBuy`: beide pools omlaag) over `bpsTimes10` / 10 bp
-    ///      prijsbeweging vanaf de huidige koers; negatief = tegen de run in.
+    /// @dev Push in `pool` in the direction of the run (`isBuy`: both pools down) by `bpsTimes10` / 10 bp
+    ///      price move from the current price; negative = against the run.
     function _push(address pool, bool isBuy, int256 bpsTimes10) internal view returns (WindowAttacker.Push memory p) {
         uint160 s = _sqrt(pool);
         bool down = isBuy == (bpsTimes10 > 0);
         uint256 abs = uint256(bpsTimes10 > 0 ? bpsTimes10 : -bpsTimes10);
-        // sqrt(1 ± x) ≈ 1 ± x/2; bij een paar bp is de fout verwaarloosbaar (x²/8).
+        // sqrt(1 ± x) ≈ 1 ± x/2; at a few bp the error is negligible (x²/8).
         p.pool = pool;
         p.zeroForOne = down;
         p.limit = uint160(down ? Math.mulDiv(s, 200_000 - abs, 200_000) : Math.mulDiv(s, 200_000 + abs, 200_000));
     }
 
-    /// @dev Push binnen de huidige tick in de richting van de run: `ppm` miljoenste van de ruimte tot de ongunstige
-    ///      tickrand (bij kopen P(tick), bij verkopen P(tick + 1)). Zo'n swap schrijft geen observatie. `ok = false`
-    ///      als er geen ruimte is.
+    /// @dev Push within the current tick in the direction of the run: `ppm` millionths of the room to the unfavourable
+    ///      tick edge (buying P(tick), selling P(tick + 1)). Such a swap writes no observation. `ok = false`
+    ///      if there is no room.
     function _pushInTick(address pool, bool isBuy, uint256 ppm)
         internal
         view
@@ -246,7 +246,7 @@ contract BlockWindowForkTest is Test {
         ok = p.limit != s;
     }
 
-    /// @dev Verandert deze push de tick (en schrijft hij dus een observatie)? Op de rand zelf: onbepaald, dan false.
+    /// @dev Does this push change the tick (and so write an observation)? On the edge itself: undetermined, then false.
     function _crossesTick(WindowAttacker.Push memory p) internal view returns (bool) {
         (, int24 t,,,,,) = IUniswapV3Pool(p.pool).slot0();
         return p.zeroForOne ? p.limit < TickMath.getSqrtPriceAtTick(t) : p.limit >= TickMath.getSqrtPriceAtTick(t + 1);
@@ -254,8 +254,8 @@ contract BlockWindowForkTest is Test {
 
     struct Outcome {
         bool ok;
-        int256 extra; // winst aanvaller min de beloningen die ook een eerlijke aanroeper had gekregen
-        uint256 runEurc; // omvang van de run(s) van het slachtoffer, in EURC
+        int256 extra; // attacker profit minus the rewards an honest caller would also have received
+        uint256 runEurc; // size of the victim's run(s), in EURC
     }
 
     function _attack(address[] memory victims, WindowAttacker.Push[] memory pushes, uint256 price, uint160 s1)
@@ -281,9 +281,9 @@ contract BlockWindowForkTest is Test {
     }
 }
 
-/// @notice (a) en (b): winst van de aanvaller over een raster van pushes.
+/// @notice (a) and (b): attacker profit over a grid of pushes.
 contract BlockWindowAttackForkTest is BlockWindowForkTest {
-    /// @dev Pushes in tiende bp: binnen de tick (0,5 bp), over een paar ticks, tot de vensterrand en erover.
+    /// @dev Pushes in tenths of a bp: within the tick (0.5 bp), across a few ticks, up to the window edge and beyond.
     function _grid() internal pure returns (int256[11] memory g) {
         g = [int256(5), 10, 20, 30, 40, 50, 55, 60, 70, 100, 300];
     }
@@ -292,16 +292,16 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
         uint256 attempts;
         uint256 succeeded;
         uint256 succeededBeyondWindow;
-        uint256 refusedTouched; // push over de tickgrens, geweigerd met PoolTouchedThisBlock
+        uint256 refusedTouched; // push across the tick boundary, rejected with PoolTouchedThisBlock
         int256 worstExtra;
         uint256 worstRun;
     }
 
-    /// @dev Raster voor één richting en feedstand. `poolSel`: 1 = alleen EURC/USDC, 2 = alleen USDC/cbBTC,
-    ///      3 = beide. Runs: 100 EURC, 500 EURC en een correctie van 8.000 EURC (de run loopt dan tegen de
-    ///      liquiditeitsgrens aan). Naast het raster in bp twee pushes binnen de tick (50% en 99% van de ruimte tot
-    ///      de rand): alleen die kunnen sinds de blokcheck nog slagen. Elke push over de tickgrens moet geweigerd
-    ///      worden met PoolTouchedThisBlock.
+    /// @dev Grid for one direction and feed state. `poolSel`: 1 = only EURC/USDC, 2 = only USDC/cbBTC,
+    ///      3 = both. Runs: 100 EURC, 500 EURC and a correction of 8,000 EURC (the run then hits the
+    ///      liquidity limit). Besides the bp grid, two pushes within the tick (50% and 99% of the room to
+    ///      the edge): since the block check only those can still succeed. Every push across the tick boundary must be
+    ///      rejected with PoolTouchedThisBlock.
     function _sweep(bool isBuy, uint256 lagBps, Stats memory st) internal {
         _freshFeeds(lagBps);
         uint256 price = r.quote();
@@ -314,7 +314,7 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
                 for (uint256 j; j < g.length + 3; j++) {
                     vm.revertToState(snap);
                     _fund(victim, isBuy, runs[k]);
-                    // Na het raster: een push tegen de run in (3 bp), dan twee pushes binnen de tick.
+                    // After the grid: a push against the run (3 bp), then two pushes within the tick.
                     int256 bps = j < g.length ? g[j] : j == g.length ? int256(-30) : int256(0);
                     WindowAttacker.Push[] memory ps = new WindowAttacker.Push[](poolSel == 3 ? 2 : 1);
                     bool pushOk = true;
@@ -332,9 +332,9 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
                     Outcome memory o = _attack(vs, ps, price, s1);
                     st.attempts++;
                     if (crosses) {
-                        assertFalse(o.ok, "push over de tickgrens kwam door");
+                        assertFalse(o.ok, "push across the tick boundary got through");
                         assertEq(
-                            bytes4(atk.lastRevert()), Rebalancer.PoolTouchedThisBlock.selector, "verkeerde weigering"
+                            bytes4(atk.lastRevert()), Rebalancer.PoolTouchedThisBlock.selector, "wrong rejection reason"
                         );
                         st.refusedTouched++;
                     }
@@ -348,10 +348,10 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
                     console.log(
                         string.concat(
                             "GRID,",
-                            isBuy ? "koop" : "verkoop",
+                            isBuy ? "buy" : "sell",
                             ",lagBps=",
                             vm.toString(lagBps),
-                            ",correctie=",
+                            ",correction=",
                             vm.toString(runs[k] / 1e6),
                             ",pool=",
                             vm.toString(poolSel),
@@ -363,7 +363,7 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
                             vm.toString(o.extra)
                         )
                     );
-                    assertLe(o.extra, 0, "aanvaller maakt winst met een atomaire zelf-sandwich");
+                    assertLe(o.extra, 0, "attacker profits from an atomic self-sandwich");
                 }
             }
         }
@@ -372,39 +372,39 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
 
     function _report(string memory label, Stats memory st) internal pure {
         console.log(label);
-        console.log("  pogingen:", st.attempts, " geslaagd:", st.succeeded);
-        console.log("  over de tickgrens geweigerd (PoolTouchedThisBlock):", st.refusedTouched);
-        console.log("  geslaagd met push > 6 bp:", st.succeededBeyondWindow, " run bij hoogste winst:", st.worstRun);
-        console.log("  hoogste extra winst (EURC 6 dec):");
+        console.log("  attempts:", st.attempts, " succeeded:", st.succeeded);
+        console.log("  rejected across the tick boundary (PoolTouchedThisBlock):", st.refusedTouched);
+        console.log("  succeeded with push > 6 bp:", st.succeededBeyondWindow, " run at highest profit:", st.worstRun);
+        console.log("  highest extra profit (EURC 6 dec):");
         console.logInt(st.worstExtra);
     }
 
-    /// @notice (a) Koop: winst ≤ 0 bij elke geslaagde push, bij kleine runs en runs op de liquiditeitsgrens, met
-    ///         actuele feeds en met cbBTC/USD 0,3% te hoog. Pushes over de tickgrens worden geweigerd. (Vroeger eiste
-    ///         deze test meer dan 20 geslaagde pushes; sinds de blokcheck slagen alleen nog pushes binnen de tick.)
+    /// @notice (a) Buy: profit ≤ 0 at every successful push, for small runs and runs at the liquidity limit, with
+    ///         current feeds and with cbBTC/USD 0.3% too high. Pushes across the tick boundary are rejected. (This
+    ///         test used to require over 20 successful pushes; since the block check only pushes within the tick pass.)
     function test_fork_attackGrid_buy() public {
         Stats memory st;
         _sweep(true, 0, st);
         _sweep(true, 30, st);
-        _report("koop", st);
-        assertGt(st.succeeded, 0, "geen enkele push slaagde: de test bewijst dan weinig");
-        assertGt(st.refusedTouched, 0, "geen push over de tickgrens getoetst");
-        assertEq(st.succeededBeyondWindow, 0, "push buiten het venster kwam door");
+        _report("buy", st);
+        assertGt(st.succeeded, 0, "not a single push succeeded: the test then proves little");
+        assertGt(st.refusedTouched, 0, "no push across the tick boundary tested");
+        assertEq(st.succeededBeyondWindow, 0, "push outside the window got through");
     }
 
-    /// @notice (a) Verkoop, zelfde raster.
+    /// @notice (a) Sell, same grid.
     function test_fork_attackGrid_sell() public {
         Stats memory st;
         _sweep(false, 0, st);
         _sweep(false, 30, st);
-        _report("verkoop", st);
-        assertGt(st.succeeded, 0, "geen enkele push slaagde: de test bewijst dan weinig");
-        assertGt(st.refusedTouched, 0, "geen push over de tickgrens getoetst");
-        assertEq(st.succeededBeyondWindow, 0, "push buiten het venster kwam door");
+        _report("sell", st);
+        assertGt(st.succeeded, 0, "not a single push succeeded: the test then proves little");
+        assertGt(st.refusedTouched, 0, "no push across the tick boundary tested");
+        assertEq(st.succeededBeyondWindow, 0, "push outside the window got through");
     }
 
-    /// @notice (b) Twee owners in hetzelfde blok na één push (lead 2): de runs delen het venster, en de aanvaller
-    ///         maakt geen winst, ook niet als beide runs slagen.
+    /// @notice (b) Two owners in the same block after one push (lead 2): the runs share the window, and the attacker
+    ///         makes no profit, even if both runs succeed.
     function test_fork_twoOwnersSameBlockAfterOnePush() public {
         for (uint256 d; d < 2; d++) {
             bool isBuy = d == 0;
@@ -436,12 +436,12 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
                     console.log(
                         string.concat(
                             "TWO,",
-                            isBuy ? "koop" : "verkoop",
-                            ",correctie=",
+                            isBuy ? "buy" : "sell",
+                            ",correction=",
                             vm.toString(sizes[k] / 1e6),
                             ",push_bp_x10=",
                             vm.toString(pushes[j]),
-                            ",geslaagd=",
+                            ",succeeded=",
                             vm.toString(n),
                             ",run=",
                             vm.toString(o.runEurc),
@@ -449,18 +449,18 @@ contract BlockWindowAttackForkTest is BlockWindowForkTest {
                             vm.toString(o.extra)
                         )
                     );
-                    if (n > 0) assertLe(o.extra, 0, "aanvaller maakt winst met twee owners in een blok");
+                    if (n > 0) assertLe(o.extra, 0, "attacker profits with two owners in one block");
                 }
             }
-            console.log(isBuy ? "koop" : "verkoop", "beide geslaagd:", bothOk);
-            console.log("  een van beide geslaagd:", oneOk);
-            assertGt(bothOk + oneOk, 0, "geen enkele run geslaagd: de test bewijst niets");
+            console.log(isBuy ? "buy" : "sell", "both succeeded:", bothOk);
+            console.log("  one of the two succeeded:", oneOk);
+            assertGt(bothOk + oneOk, 0, "not a single run succeeded: the test proves nothing");
             vm.revertToState(snap);
         }
     }
 }
 
-/// @notice (c) Een eerlijke correctie van ~8.000 EURC loopt in delen van 10 minuten volledig af.
+/// @notice (c) An honest correction of ~8,000 EURC completes fully in chunks 10 minutes apart.
 contract BlockWindowChunksForkTest is BlockWindowForkTest {
     struct Flow {
         uint256 chunks;
@@ -486,10 +486,10 @@ contract BlockWindowChunksForkTest is BlockWindowForkTest {
             (bool ok, bytes memory reason) = address(r).call(abi.encodeCall(r.execute, (victim, address(this))));
             uint256 used = g - gasleft();
             if (!ok) {
-                console.log("deel reverte, selector:");
+                console.log("chunk reverted, selector:");
                 console.logBytes(reason);
             }
-            assertTrue(ok, "eerlijk deel reverte");
+            assertTrue(ok, "honest chunk reverted");
             f.chunks++;
             f.traded += uint256(delta > 0 ? delta : -delta);
             if (f.chunks == 1) f.gasFirst = used;
@@ -498,7 +498,7 @@ contract BlockWindowChunksForkTest is BlockWindowForkTest {
             console.log(
                 string.concat(
                     "CHUNK,",
-                    isBuy ? "koop" : "verkoop",
+                    isBuy ? "buy" : "sell",
                     ",n=",
                     vm.toString(f.chunks),
                     ",delta=",
@@ -507,12 +507,12 @@ contract BlockWindowChunksForkTest is BlockWindowForkTest {
                     vm.toString(used),
                     ",rest=",
                     vm.toString(uint256(left)),
-                    ",rondeKoop=",
+                    ",roundBuy=",
                     rb ? "1" : "0"
                 )
             );
             f.endTime = vm.getBlockTimestamp();
-            // Arbitrage in een volgend blok zet beide pools terug op de stand van vóór het deel.
+            // Arbitrage in a next block resets both pools to their state before the chunk.
             _nextBlock();
             _restore(P1, s1);
             _restore(P2, s2);
@@ -521,20 +521,20 @@ contract BlockWindowChunksForkTest is BlockWindowForkTest {
             _freshFeeds(0);
         }
         (bool stillDue,) = r.isDue(victim);
-        assertFalse(stillDue, "na 30 delen nog steeds due");
+        assertFalse(stillDue, "still due after 30 chunks");
         (, uint128 rest) = r.rounds(victim);
-        assertEq(rest, 0, "ronde niet afgesloten");
-        // Klaar: binnen de band (80% ± 5%).
+        assertEq(rest, 0, "round not closed");
+        // Done: within the band (80% ± 5%).
         uint256 total = _ownerValue(victim, price);
         uint256 fractionBps = Math.mulDiv(Math.mulDiv(CBBTC.balanceOf(victim), price, 1e8), 10_000, total);
-        console.log(isBuy ? "koop" : "verkoop", "delen:", f.chunks);
-        console.log("  doorlooptijd (s):", f.endTime - f.startTime, " verhandeld (EURC 6 dec):", f.traded);
-        console.log("  cbBTC-aandeel na afloop (bps):", fractionBps);
-        console.log("  gas eerste deel:", f.gasFirst, " hoogste gas per deel:", f.gasMax);
-        console.log("  kosten gebruiker (EURC 6 dec, incl. fee):", valueBefore - total);
-        assertGe(fractionBps, 7500, "correctie niet afgerond: onder de band");
-        assertLe(fractionBps, 8500, "correctie niet afgerond: boven de band");
-        assertGt(f.chunks, 1, "correctie ging in een keer: de test bewijst de delen niet");
+        console.log(isBuy ? "buy" : "sell", "chunks:", f.chunks);
+        console.log("  duration (s):", f.endTime - f.startTime, " traded (EURC 6 dec):", f.traded);
+        console.log("  cbBTC share afterwards (bps):", fractionBps);
+        console.log("  gas first chunk:", f.gasFirst, " highest gas per chunk:", f.gasMax);
+        console.log("  user cost (EURC 6 dec, incl. fee):", valueBefore - total);
+        assertGe(fractionBps, 7500, "correction not completed: below the band");
+        assertLe(fractionBps, 8500, "correction not completed: above the band");
+        assertGt(f.chunks, 1, "correction went in one go: the test does not prove the chunks");
     }
 
     function _restore(address pool, uint160 target) internal {
@@ -552,9 +552,9 @@ contract BlockWindowChunksForkTest is BlockWindowForkTest {
     }
 }
 
-/// @notice (d) De LP-uitzondering: een aanvaller met een groot deel van de actieve liquiditeit in de EURC/USDC-pool
-///         krijgt een deel van zijn eigen poolfee terug. Sinds de blokcheck kan hij in het blok van de run alleen nog
-///         binnen de begintick duwen.
+/// @notice (d) The LP exception: an attacker with a large share of the active liquidity in the EURC/USDC pool
+///         gets part of its own pool fee back. Since the block check it can, in the block of the run, only push
+///         within the starting tick.
 contract BlockWindowLpForkTest is BlockWindowForkTest {
     function _lpCase(bool isBuy, uint256 phiPct, uint256 size) internal returns (int256 bestExtra, uint256 bestRun) {
         _freshFeeds(0);
@@ -570,7 +570,7 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
         _freshFeeds(0);
         uint256 snap = vm.snapshotState();
         bestExtra = type(int256).min;
-        // Push binnen de tick, in miljoenste van de ruimte tot de ongunstige rand (0 = geen push).
+        // Push within the tick, in millionths of the room to the unfavourable edge (0 = no push).
         uint256[5] memory pushes = [uint256(0), 250_000, 500_000, 900_000, 999_000];
         {
             int256 base;
@@ -587,7 +587,7 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
                 vs[0] = victim;
                 Outcome memory o = _attack(vs, ps, price, s1);
                 if (!o.ok) {
-                    require(j > 0, "basisrun zonder push faalt");
+                    require(j > 0, "base run without push fails");
                     continue;
                 }
                 atk.exitLp(P1, tl, tu, liq);
@@ -600,10 +600,10 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
                 console.log(
                     string.concat(
                         "LP,",
-                        isBuy ? "koop" : "verkoop",
+                        isBuy ? "buy" : "sell",
                         ",phiPct=",
                         vm.toString(phiPct),
-                        ",correctie=",
+                        ",correction=",
                         vm.toString(size / 1e6),
                         ",push_bp_x10=",
                         vm.toString(pushes[j]),
@@ -613,7 +613,7 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
                         vm.toString(extra)
                     )
                 );
-                // Relatief tot de run: extra × 10.000 / run in tienden van een bp vergelijken.
+                // Relative to the run: compare extra × 10,000 / run in tenths of a bp.
                 if (
                     bestExtra == type(int256).min || extra * 1e6 / int256(o.runEurc) > bestExtra * 1e6 / int256(bestRun)
                 ) {
@@ -625,9 +625,9 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
         vm.revertToState(snap);
     }
 
-    /// @notice Review I-2: gas van `dueOwners` voor een pagina van 50 owners die allemaal due zijn (25 koop, 25
-    ///         verkoop), op de echte pools, met koude storage (zoals een losse eth_call). Controleert ook dat de
-    ///         pagina precies de owners bevat waarvoor `isDue` true geeft.
+    /// @notice Review I-2: gas of `dueOwners` for a page of 50 owners that are all due (25 buy, 25
+    ///         sell), on the real pools, with cold storage (like a standalone eth_call). Also checks that the
+    ///         page contains exactly the owners for which `isDue` returns true.
     function test_fork_dueOwnersGasPerPage() public {
         address[] memory owners = new address[](50);
         for (uint256 i; i < 50; i++) {
@@ -644,19 +644,19 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
         uint256 g = gasleft();
         address[] memory due = r.dueOwners(0, 50);
         uint256 used = g - gasleft();
-        console.log("gas dueOwners, pagina van 50 due owners:", used);
-        assertEq(due.length, 50, "niet alle 50 owners due");
+        console.log("gas dueOwners, page of 50 due owners:", used);
+        assertEq(due.length, 50, "not all 50 owners due");
         for (uint256 i; i < 50; i++) {
             (bool isDueNow,) = r.isDue(owners[i]);
-            assertTrue(isDueNow, "isDue wijkt af van dueOwners");
-            assertEq(due[i], owners[i], "volgorde of inhoud van de pagina");
+            assertTrue(isDueNow, "isDue differs from dueOwners");
+            assertEq(due[i], owners[i], "order or content of the page");
         }
     }
 
-    /// @notice Meet de beste extra winst van een LP-aanvaller (aandeel 50%, 80%, 95% van de actieve liquiditeit, gemint
-    ///         in een eerder blok) bij de huidige protocolfee, met pushes binnen de begintick, voor correcties van 500,
-    ///         10.000 en 20.000 EURC. Eis (door Arjan geaccepteerd): < 0,5 bp van de run. De uitkomst schuift per blok
-    ///         met de poolstand; gemeten tot +0,18 bp (koop van 10.000 EURC, aandeel 95%, blok 51.402.700).
+    /// @notice Measures the best extra profit of an LP attacker (share 50%, 80%, 95% of the active liquidity, minted in
+    ///         an earlier block) at the current protocol fee, with pushes within the starting tick, for corrections
+    ///         of 500, 10,000 and 20,000 EURC. Requirement (accepted by Arjan): < 0.5 bp of the run. The outcome shifts
+    ///         per block with pool state; measured up to +0.18 bp (buy of 10,000 EURC, share 95%, block 51,402,700).
     function test_fork_lpAttackerProfitAtCurrentProtocolFee() public {
         uint256 snap0 = vm.snapshotState();
         uint256[3] memory phis = [uint256(50), 80, 95];
@@ -666,14 +666,14 @@ contract BlockWindowLpForkTest is BlockWindowForkTest {
                 for (uint256 k; k < sizes.length; k++) {
                     vm.revertToState(snap0);
                     (int256 extra, uint256 run) = _lpCase(d == 0, phis[i], sizes[k]);
-                    console.log(d == 0 ? "koop" : "verkoop", "phi %", phis[i]);
-                    console.log("  correctie (EURC):", sizes[k] / 1e6, " run (EURC 6 dec):", run);
-                    console.log("  beste extra winst (EURC 6 dec):");
+                    console.log(d == 0 ? "buy" : "sell", "phi %", phis[i]);
+                    console.log("  correction (EURC):", sizes[k] / 1e6, " run (EURC 6 dec):", run);
+                    console.log("  best extra profit (EURC 6 dec):");
                     console.logInt(extra);
-                    assertGt(run, 0, "geen enkele push slaagde: de test bewijst niets");
-                    console.log("  extra winst (bp x100 van de run):");
+                    assertGt(run, 0, "not a single push succeeded: the test proves nothing");
+                    console.log("  extra profit (bp x100 of the run):");
                     console.logInt(extra * 1_000_000 / int256(run));
-                    assertLt(extra * 20_000, int256(run), "LP-aanvaller haalt 0,5 bp of meer van de run");
+                    assertLt(extra * 20_000, int256(run), "LP attacker takes 0.5 bp or more of the run");
                 }
             }
         }

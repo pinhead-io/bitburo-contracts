@@ -14,11 +14,11 @@ import {MockRouter} from "./mocks/MockRouter.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
 import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 
-// ─── Gedeelde opzet ────────────────────────────────────────────────────────────────────────────────────────
+// ─── Shared setup ──────────────────────────────────────────────────────────────────────────────────────────
 
 abstract contract RebalancerTestBase is Test {
     uint256 internal constant START = 1_800_000_000;
-    uint256 internal constant PRICE = 80_000e6; // EURC-basiseenheden per cbBTC
+    uint256 internal constant PRICE = 80_000e6; // EURC base units per cbBTC
     uint256 internal constant BPS = 10_000;
 
     MockERC20 internal eurc;
@@ -28,8 +28,8 @@ abstract contract RebalancerTestBase is Test {
     MockAggregator internal feedEurc;
     MockAggregator internal sequencer;
     MockRouter internal router;
-    MockUniswapV3Pool internal poolEurcUsdc; // token0 = EURC, token1 = USDC, zoals op Base
-    MockUniswapV3Pool internal poolUsdcCbbtc; // token0 = USDC, token1 = cbBTC, zoals op Base
+    MockUniswapV3Pool internal poolEurcUsdc; // token0 = EURC, token1 = USDC, as on Base
+    MockUniswapV3Pool internal poolUsdcCbbtc; // token0 = USDC, token1 = cbBTC, as on Base
     MockUniswapV3Factory internal factory;
     Rebalancer internal r;
 
@@ -77,15 +77,15 @@ abstract contract RebalancerTestBase is Test {
         });
     }
 
-    /// @dev Zet feeds én pools zo dat `quote()` en `spot()` (op afronding na) `price` EURC per cbBTC geven,
-    ///      met EURC/USD = 1.
+    /// @dev Sets feeds and pools so that `quote()` and `spot()` (up to rounding) give `price` EURC per cbBTC,
+    ///      with EURC/USD = 1.
     function _setPrice(uint256 price) internal {
         feedBtc.set(int256(price * 1e8 / 1e6), block.timestamp, block.timestamp);
         feedEurc.set(1e8, block.timestamp, block.timestamp);
         _setSpot(price);
     }
 
-    /// @dev Alleen de pools: EURC/USDC op 1:1, USDC/cbBTC op `price` USDC-basiseenheden per cbBTC.
+    /// @dev Only the pools: EURC/USDC at 1:1, USDC/cbBTC at `price` USDC base units per cbBTC.
     function _setSpot(uint256 price) internal {
         poolEurcUsdc.setPrice(1e6, 1e6);
         poolUsdcCbbtc.setPrice(price, 1e8);
@@ -161,7 +161,7 @@ contract RebalancerTest is RebalancerTestBase {
         r.setParams(p);
         p.targetBps = 9500;
         r.setParams(p);
-        // Ondergrens is sinds MIN_BAND_BPS 125 (was 1): een band onder het maximale verlies per run mag niet meer.
+        // Since MIN_BAND_BPS the lower bound is 125 (was 1): a band below the maximum loss per run is not allowed.
         p.bandBps = 125;
         r.setParams(p);
         p.bandBps = 9999;
@@ -209,7 +209,7 @@ contract RebalancerTest is RebalancerTestBase {
         _expectInvalid(p);
     }
 
-    /// @notice MIN_BAND_BPS = FEE_BPS + MAX_SLIPPAGE_BPS: 124 revert, 125 mag.
+    /// @notice MIN_BAND_BPS = FEE_BPS + MAX_SLIPPAGE_BPS: 124 reverts, 125 is allowed.
     function test_setParams_minBandBps() public {
         assertEq(r.MIN_BAND_BPS(), r.FEE_BPS() + r.MAX_SLIPPAGE_BPS());
         Rebalancer.Params memory p = _defaultParams();
@@ -226,13 +226,13 @@ contract RebalancerTest is RebalancerTestBase {
         Rebalancer.Params memory p = _defaultParams();
         p.maxCorrectionBps = 0;
         _expectInvalid(p);
-        p.maxCorrectionBps = 9; // onder MIN_CORRECTION_BPS
+        p.maxCorrectionBps = 9; // below MIN_CORRECTION_BPS
         _expectInvalid(p);
         p.maxCorrectionBps = 10_001;
         _expectInvalid(p);
     }
 
-    /// @dev H-2 / L-1: de dust-configuratie uit de audit (minTrade 1, cap 1 bps) is niet meer te zetten.
+    /// @dev H-2 / L-1: the dust configuration from the audit (minTrade 1, cap 1 bps) can no longer be set.
     function test_setParams_rejectsMinTradeBelowFloor() public {
         Rebalancer.Params memory p = _defaultParams();
         p.minTradeEurc = 0;
@@ -243,7 +243,7 @@ contract RebalancerTest is RebalancerTestBase {
         _expectInvalid(p);
         assertEq(r.MIN_TRADE_FLOOR(), 20e6);
         assertEq(r.MIN_CORRECTION_BPS(), 10);
-        // De fee van de kleinste toegestane run is 0,05 EURC; de beloning is daarvan hooguit de helft (zelf-audit L-D).
+        // The fee of the smallest allowed run is 0.05 EURC; the reward is at most half of that (self-audit L-D).
         assertEq(uint256(r.MIN_TRADE_FLOOR()) * r.FEE_BPS() / BPS, r.KEEPER_REWARD_EURC());
     }
 
@@ -259,7 +259,7 @@ contract RebalancerTest is RebalancerTestBase {
         Rebalancer.Params memory p = _defaultParams();
         p.maxSlippageBps = 0;
         _expectInvalid(p);
-        p.maxSlippageBps = 30; // oude ondergrens, nu onder MIN_SLIPPAGE_BPS (60)
+        p.maxSlippageBps = 30; // old lower bound, now below MIN_SLIPPAGE_BPS (60)
         _expectInvalid(p);
         p.maxSlippageBps = 59;
         _expectInvalid(p);
@@ -313,7 +313,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.owners(0, 0).length, 0);
     }
 
-    /// @dev L-A: `offset + limit` overflowde bij `offset >= 1` en `limit = type(uint256).max` (Panic 0x11).
+    /// @dev L-A: `offset + limit` overflowed with `offset >= 1` and `limit = type(uint256).max` (Panic 0x11).
     function test_owners_andDueOwners_maxLimitNeverOverflows() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         _setUser(bob, 1000e6, 0, _defaultParams());
@@ -343,7 +343,7 @@ contract RebalancerTest is RebalancerTestBase {
     // execute: happy paths ───────────────────────────────────────────────────────────────────────────────
 
     function test_execute_buy_exactAmounts() public {
-        // 1.000 EURC, 0 cbBTC: drift 80%, cap 10% -> 100 EURC.
+        // 1,000 EURC, 0 cbBTC: drift 80%, cap 10% -> 100 EURC.
         _setUser(alice, 1000e6, 0, _defaultParams());
 
         uint256 amountIn = 100e6;
@@ -373,7 +373,7 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_sell_exactAmounts() public {
-        // 0 EURC, 0,0125 cbBTC (= 1.000 EURC): drift 20%, cap 10% -> 100 EURC = 125_000 sats.
+        // 0 EURC, 0.0125 cbBTC (= 1,000 EURC): drift 20%, cap 10% -> 100 EURC = 125_000 sats.
         _setUser(alice, 0, 1_250_000, _defaultParams());
 
         uint256 amountIn = 125_000;
@@ -402,10 +402,10 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_rewardCappedByFee() public {
-        // Vroeger kon verkoop-slippage de fee onder de beloning duwen: 150 EURC in cbBTC, cap 10% = 15 < vloer 20
-        // -> verkoop 25_000 sats (20 EURC); router levert 1% minder (19,8 EURC), fee was 49_500. Sinds L-B telt
-        // de fee over max(ontvangen, verwacht) = 20 EURC -> 50_000. Sinds zelf-audit L-D is de beloning hooguit de
-        // helft van de fee: 25_000 naar de keeper, 25_000 naar de treasury. De begrenzing zelf staat in
+        // Previously sell slippage could push the fee below the reward: 150 EURC in cbBTC, cap 10% = 15 < floor 20
+        // -> sell 25_000 sats (20 EURC); router delivers 1% less (19.8 EURC), fee was 49_500. Since L-B the fee is
+        // taken over max(received, expected) = 20 EURC -> 50_000. Since self-audit L-D the reward is at most half
+        // of the fee: 25_000 to the keeper, 25_000 to the treasury. The cap itself is covered in
         // test_takeFee_cappedAtMaxFee.
         _setUser(alice, 0, 187_500, _defaultParams());
         router.setSlippageBps(100);
@@ -446,7 +446,7 @@ contract RebalancerTest is RebalancerTestBase {
         eurc.approve(address(r), 40e6);
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
-        assertEq(delta, 40e6); // L-C: wat execute werkelijk handelt, niet de correctie van 100 EURC
+        assertEq(delta, 40e6); // L-C: what execute actually trades, not the correction of 100 EURC
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(alice, true, 40e6, 0, 0, address(0), 0, 0, 0, 0);
         r.execute(alice, address(0));
@@ -462,7 +462,7 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_boundedByBalance() public {
-        // De correctie is wiskundig nooit groter dan het saldo; controleer dat het saldo de bovengrens is.
+        // The correction is mathematically never larger than the balance; check that the balance is the upper bound.
         Rebalancer.Params memory p = _defaultParams();
         p.targetBps = 9500;
         p.maxCorrectionBps = 10_000;
@@ -493,7 +493,7 @@ contract RebalancerTest is RebalancerTestBase {
         _setPrice(PRICE);
         r.execute(alice, keeper);
         assertEq(r.lastExecutedAt(alice), uint64(START + 1 days));
-        // Tweede run: total = 900 + 124_687 sats * 80_000 = 900e6 + 99_749_600 -> cap 10% = 99_974_960.
+        // Second run: total = 900 + 124_687 sats * 80_000 = 900e6 + 99_749_600 -> cap 10% = 99_974_960.
         assertEq(eurc.balanceOf(alice), 900e6 - 99_974_960);
     }
 
@@ -528,7 +528,7 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_revertsNothingToDoWithinBand() public {
-        // 200 EURC + 0,01 cbBTC (800 EURC): fractie exact 80%.
+        // 200 EURC + 0.01 cbBTC (800 EURC): fraction exactly 80%.
         _setUser(alice, 200e6, 1_000_000, _defaultParams());
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         r.execute(alice, keeper);
@@ -540,14 +540,14 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_revertsNothingToDoAtBandEdge() public {
-        // drift precies 5% = band -> niets (<=).
+        // drift exactly 5% = band -> nothing (<=).
         _setUser(alice, 250e6, 937_500, _defaultParams());
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         r.execute(alice, keeper);
     }
 
     function test_execute_revertsNothingToDoBelowMinTrade() public {
-        // 30 EURC + 70 EURC cbBTC: correctie 10 EURC < min 20.
+        // 30 EURC + 70 EURC cbBTC: correction 10 EURC < min 20.
         _setUser(alice, 30e6, 87_500, _defaultParams());
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         r.execute(alice, keeper);
@@ -574,7 +574,7 @@ contract RebalancerTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
-    /// @notice Zelf-audit 2026-09-17, Info-G: een `startedAt` in de toekomst geeft `SequencerDown`, geen Panic.
+    /// @notice Self-audit 2026-09-17, Info-G: a `startedAt` in the future gives `SequencerDown`, not a Panic.
     function test_execute_revertsSequencerDownWhenStartedAtInFuture() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         sequencer.set(0, vm.getBlockTimestamp() + 1, vm.getBlockTimestamp() + 1);
@@ -586,7 +586,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertFalse(due);
     }
 
-    /// @dev L-9: een niet-geïnitialiseerde ronde (startedAt == 0) van de uptime-feed telt niet als "up".
+    /// @dev L-9: an uninitialized round (startedAt == 0) of the uptime feed does not count as "up".
     function test_execute_revertsSequencerDownWhenStartedAtZero() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         sequencer.set(0, 0, 0);
@@ -635,7 +635,7 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_revertsStaleFeedEurc() public {
-        // M-2: uurfeed (0x9867…01e0) met 15 minuten marge.
+        // M-2: hourly feed (0x9867…01e0) with a 15-minute margin.
         assertEq(r.MAX_AGE_EURC(), 4500);
         _setUser(alice, 1000e6, 0, _defaultParams());
         feedEurc.set(1e8, START, START - 4501);
@@ -659,8 +659,8 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_revertsWhenQuoteRoundsToZero() public {
-        // cbBTC/USD = 1e-8 en EURC/USD = 1: 1 * 1e6 / 1e8 = 0. Beide answers zijn > 0, dus alleen de
-        // productcheck vangt dit.
+        // cbBTC/USD = 1e-8 and EURC/USD = 1: 1 * 1e6 / 1e8 = 0. Both answers are > 0, so only the
+        // product check catches this.
         _setUser(alice, 1000e6, 0, _defaultParams());
         feedBtc.set(1, START, START);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.InvalidFeedAnswer.selector, address(feedBtc)));
@@ -674,7 +674,7 @@ contract RebalancerTest is RebalancerTestBase {
     // spot-vs-oracle ────────────────────────────────────────────────────────────────────────────────────
 
     function test_spot_matchesFeedsAcrossBothPools() public {
-        // Zelfde koers, andere weg: EURC/USD 1,16 en USDC/cbBTC 92.800 USDC -> 80.000 EURC per cbBTC.
+        // Same price, different route: EURC/USD 1.16 and USDC/cbBTC 92,800 USDC -> 80,000 EURC per cbBTC.
         assertApproxEqAbs(r.spot(), PRICE, 1);
         feedEurc.set(1.16e8, START, START);
         feedBtc.set(92_800e8, START, START);
@@ -686,7 +686,7 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_spot_pairsWithReversedTokenOrder() public {
-        // Pools met omgekeerde token0/token1 geven dezelfde spot.
+        // Pools with reversed token0/token1 give the same spot.
         MockUniswapV3Pool reversedEurc = new MockUniswapV3Pool(address(usdc), address(eurc));
         MockUniswapV3Pool reversedBtc = new MockUniswapV3Pool(address(cbbtc), address(usdc));
         reversedEurc.setPrice(1e6, 1e6);
@@ -723,7 +723,7 @@ contract RebalancerTest is RebalancerTestBase {
         (due,) = r.isDue(alice);
         assertFalse(due);
 
-        // Precies op de grens (0,5%) mag wel; de sqrt-afronding maakt de spot hooguit 1 eenheid lager.
+        // Exactly at the limit (0.5%) is allowed; the sqrt rounding makes the spot at most 1 unit lower.
         _setSpot(PRICE * (BPS + 50) / BPS);
         (due,) = r.isDue(alice);
         assertTrue(due);
@@ -732,15 +732,15 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_spotCheckIgnoresPoolFeesOnly() public {
-        // Alleen de EURC/USDC-pool 0,4% verschoven: onder de grens, run gaat door.
+        // Only the EURC/USDC pool shifted by 0.4%: below the limit, the run goes ahead.
         _setUser(alice, 1000e6, 0, _defaultParams());
         poolEurcUsdc.setPrice(1e6, 1.004e6);
         r.execute(alice, keeper);
         assertEq(eurc.balanceOf(alice), 900e6);
     }
 
-    /// @dev Testgat oracle 4: alleen de EURC/USDC-pool meer dan 0,5% verschoven (de dunne pool, de echte
-    ///      aanvalsroute) blokkeert de run ook.
+    /// @dev Test gap oracle 4: only the EURC/USDC pool shifted by more than 0.5% (the thin pool, the real
+    ///      attack route) also blocks the run.
     function test_execute_revertsWhenOnlyEurcPoolDeviates() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         poolEurcUsdc.setPrice(1e6, 1.006e6);
@@ -756,53 +756,53 @@ contract RebalancerTest is RebalancerTestBase {
         r.execute(alice, keeper);
     }
 
-    /// @dev Testgat oracle 5 (ORC-3): feed en spot bewegen los van elkaar. Feed +0,3% en spot -0,3% is samen
-    ///      0,6% en blokkeert; feed +0,3% met spot +0,1% (nieuwe EURC-feed, deviatie 0,1%) niet.
+    /// @dev Test gap oracle 5 (ORC-3): feed and spot move independently. Feed +0.3% and spot -0.3% is 0.6%
+    ///      combined and blocks; feed +0.3% with spot +0.1% (new EURC feed, deviation 0.1%) does not.
     function test_execute_feedAndSpotDivergeIndependently() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         feedBtc.set(int256(PRICE * 1e8 / 1e6) * 1003 / 1000, START, START);
         _setSpot(PRICE * 997 / 1000);
         (bool due,) = r.isDue(alice);
-        assertFalse(due, "0,6% uit elkaar: geblokkeerd");
+        assertFalse(due, "0.6% apart: blocked");
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.SpotDeviatesFromOracle.selector, r.spot(), r.quote()));
         r.execute(alice, keeper);
 
         _setSpot(PRICE * 1001 / 1000);
         (due,) = r.isDue(alice);
-        assertTrue(due, "0,2% uit elkaar: toegestaan");
+        assertTrue(due, "0.2% apart: allowed");
         r.execute(alice, keeper);
     }
 
-    /// @dev M-1: de spot wordt ook ná de swap gecontroleerd. Een run waarvan de eigen prijsimpact (of een
-    ///      voorschuiving plus impact) de spot buiten 0,5% van de oracle brengt, revert alsnog en boekt niets.
+    /// @dev M-1: the spot is also checked after the swap. A run whose own price impact (or a
+    ///      front-run shift plus impact) moves the spot outside 0.5% of the oracle still reverts and books nothing.
     function test_execute_revertsWhenSpotDeviatesAfterSwap() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
-        // Vooraf +0,4% (toegestaan); de swap zelf schuift de pool naar +0,6%.
+        // Beforehand +0.4% (allowed); the swap itself moves the pool to +0.6%.
         poolEurcUsdc.setPrice(1e6, 1.004e6);
         router.setPoolShift(poolEurcUsdc, 1e6, 1.006e6);
         (bool due,) = r.isDue(alice);
-        assertTrue(due, "vooraf binnen de grens");
+        assertTrue(due, "within the limit beforehand");
         vm.expectPartialRevert(Rebalancer.SpotDeviatesFromOracle.selector);
         r.execute(alice, keeper);
         assertEq(r.lastExecutedAt(alice), 0);
-        assertEq(eurc.balanceOf(alice), 1000e6, "niets geboekt");
+        assertEq(eurc.balanceOf(alice), 1000e6, "nothing booked");
 
-        // Verkoopkant: zelfde regel.
+        // Sell side: same rule.
         _setUser(bob, 0, 1_250_000, _defaultParams());
         router.setPoolShift(poolEurcUsdc, 1.006e6, 1e6);
         vm.expectPartialRevert(Rebalancer.SpotDeviatesFromOracle.selector);
         r.execute(bob, keeper);
         assertEq(cbbtc.balanceOf(bob), 1_250_000);
 
-        // Impact die binnen beide grenzen blijft mag wel: 0,40% -> 0,44% is binnen 0,5% van de oracle en binnen
-        // MAX_BLOCK_MOVE_BPS van de koers aan het begin van het blok. (0,4% -> 0,5% zou nu op het blokvenster stranden.)
+        // Impact that stays within both limits is allowed: 0.40% -> 0.44% is within 0.5% of the oracle and within
+        // MAX_BLOCK_MOVE_BPS of the price at the start of the block. (0.4% -> 0.5% would now fail on the block window.)
         router.setPoolShift(poolEurcUsdc, 1e6, 1.0044e6);
         r.execute(alice, keeper);
         assertEq(eurc.balanceOf(alice), 900e6);
     }
 
-    /// @dev Testgat oracle 9: extreme sqrtPriceX96 (MIN/MAX_SQRT_RATIO van Uniswap) geeft geen Panic naar
-    ///      buiten via isDue/dueOwners; execute revert netjes.
+    /// @dev Test gap oracle 9: extreme sqrtPriceX96 (Uniswap's MIN/MAX_SQRT_RATIO) causes no Panic towards
+    ///      the outside via isDue/dueOwners; execute reverts cleanly.
     function test_spot_extremeSqrtPriceNeverPanicsInViews() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         uint160[2] memory extremes =
@@ -825,17 +825,17 @@ contract RebalancerTest is RebalancerTestBase {
         assertTrue(dueAgain);
     }
 
-    /// @dev Lead 10: bij sqrtPriceX96 < 2^48 was ratioX96 = sqrtPriceX96² / 2^96 gelijk aan 0 en deelde `_spotOut`
-    ///      door 0 (Panic 0x12). Met ratioX128 blijft de spot berekenbaar; de run revert netjes op de spotcheck.
+    /// @dev Lead 10: with sqrtPriceX96 < 2^48, ratioX96 = sqrtPriceX96² / 2^96 was equal to 0 and `_spotOut` divided
+    ///      by 0 (Panic 0x12). With ratioX128 the spot stays computable; the run reverts cleanly on the spot check.
     function test_spot_smallSqrtPriceDoesNotDivideByZero() public {
         uint160 small = uint160(1 << 40);
-        assertEq(Math.mulDiv(small, small, 1 << 96), 0, "opzet: de oude ratioX96 is 0");
+        assertEq(Math.mulDiv(small, small, 1 << 96), 0, "setup: the old ratioX96 is 0");
         _setUser(alice, 1000e6, 0, _defaultParams());
 
-        // USDC/cbBTC-pool: cbBTC is token1, dus usdcPerBtc = 1e8 * 2^128 / 2^16; EURC/USDC staat op 1:1.
+        // USDC/cbBTC pool: cbBTC is token1, so usdcPerBtc = 1e8 * 2^128 / 2^16; EURC/USDC is at 1:1.
         poolUsdcCbbtc.setSqrtPriceX96(small);
         assertEq(r.spot(), 1e8 << 112);
-        // EURC/USDC-pool: USDC is token1, dus EURC = usdcPerBtc * 2^128 / 2^16.
+        // EURC/USDC pool: USDC is token1, so EURC = usdcPerBtc * 2^128 / 2^16.
         _setSpot(PRICE);
         poolEurcUsdc.setSqrtPriceX96(small);
         assertEq(r.spot(), Math.mulDiv(PRICE, 1 << 128, 1 << 16));
@@ -848,12 +848,12 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(delta, 0);
     }
 
-    /// @dev Testgat oracle 8 (ORC-7): bij een EURC-depeg (feed 0,90 USD, pool volgt) stijgt de koers in EURC,
-    ///      stijgt het cbBTC-aandeel en verkoopt de volgende run cbBTC voor de gedepegde EURC. Ontwerpkeuze
-    ///      (EURC als numeraire); hier vastgelegd zodat het niet ongemerkt verandert.
+    /// @dev Test gap oracle 8 (ORC-7): on an EURC depeg (feed 0.90 USD, pool follows) the price in EURC rises,
+    ///      the cbBTC share rises and the next run sells cbBTC for the depegged EURC. Design choice
+    ///      (EURC as numeraire); pinned here so that it does not change unnoticed.
     function test_isDue_eurcDepegTurnsHoldIntoSell() public {
-        // 2.000 EURC + 0,1 cbBTC: exact 80/20 bij EURC/USD = 1, band 1,25% (MIN_BAND_BPS; was 1%, dat mag niet meer).
-        // De depeg duwt het aandeel naar ~81,6%, dus ook buiten deze band.
+        // 2,000 EURC + 0.1 cbBTC: exactly 80/20 at EURC/USD = 1, band 1.25% (MIN_BAND_BPS; was 1%, no longer allowed).
+        // The depeg pushes the share to ~81.6%, so also outside this band.
         Rebalancer.Params memory p = _defaultParams();
         p.bandBps = 125;
         _setUser(alice, 2000e6, 10_000_000, p);
@@ -863,15 +863,15 @@ contract RebalancerTest is RebalancerTestBase {
         feedEurc.set(0.9e8, START, START);
         poolEurcUsdc.setPrice(1e6, 0.9e6);
         uint256 price = r.quote();
-        assertEq(price, Math.mulDiv(80_000e8, 1e6, 0.9e8), "koers in EURC stijgt ~11%");
+        assertEq(price, Math.mulDiv(80_000e8, 1e6, 0.9e8), "price in EURC rises ~11%");
         assertEq(r.quoteChecked(), price);
         int256 delta;
         (due, delta) = r.isDue(alice);
         assertTrue(due);
-        assertLt(delta, 0, "verkoopt cbBTC voor gedepegde EURC");
+        assertLt(delta, 0, "sells cbBTC for depegged EURC");
     }
 
-    // sweep en rewardTo ────────────────────────────────────────────────────────────────────────────────
+    // sweep and rewardTo ────────────────────────────────────────────────────────────────────────────────
 
     function test_sweep_sendsFullBalanceToTreasury() public {
         eurc.mint(address(r), 123e6);
@@ -884,13 +884,13 @@ contract RebalancerTest is RebalancerTestBase {
         r.sweep(cbbtc);
         assertEq(cbbtc.balanceOf(address(r)), 0);
         assertEq(cbbtc.balanceOf(treasury), 4_567);
-        // Leeg saldo: geen transfer, geen revert.
+        // Empty balance: no transfer, no revert.
         r.sweep(eurc);
         assertEq(eurc.balanceOf(treasury), 123e6);
     }
 
-    /// @dev M-6: een geblacklist TREASURY laat de rebalance doorgaan; het treasury-deel van de fee blijft in het
-    ///      contract (FeeRetained) en `sweep` haalt het op zodra de blacklist is opgeheven.
+    /// @dev M-6: a blacklisted TREASURY lets the rebalance go ahead; the treasury share of the fee stays in the
+    ///      contract (FeeRetained) and `sweep` collects it once the blacklist is lifted.
     function test_execute_continuesWhenTreasuryBlacklistedAndSweepRecoversFee() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         eurc.setBlacklisted(treasury, true);
@@ -902,14 +902,14 @@ contract RebalancerTest is RebalancerTestBase {
         emit Rebalancer.Executed(alice, true, 100e6, 250_000, 50_000, keeper, amountOut, PRICE, 1000e6, 0);
         r.execute(alice, keeper);
 
-        assertEq(eurc.balanceOf(alice), 900e6, "run is doorgegaan");
+        assertEq(eurc.balanceOf(alice), 900e6, "run went ahead");
         assertEq(cbbtc.balanceOf(alice), amountOut);
-        assertEq(eurc.balanceOf(keeper), 50_000, "beloning gewoon betaald");
+        assertEq(eurc.balanceOf(keeper), 50_000, "reward paid as usual");
         assertEq(eurc.balanceOf(treasury), 0);
-        assertEq(eurc.balanceOf(address(r)), 200_000, "treasury-deel blijft in het contract");
+        assertEq(eurc.balanceOf(address(r)), 200_000, "treasury share stays in the contract");
         assertEq(r.lastExecutedAt(alice), uint64(START));
 
-        // Zolang de treasury geblacklist is, kan sweep het niet kwijt; daarna wel.
+        // While the treasury is blacklisted, sweep cannot move it out; afterwards it can.
         vm.expectRevert("Blacklistable: account is blacklisted");
         r.sweep(eurc);
         eurc.setBlacklisted(treasury, false);
@@ -918,7 +918,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(treasury), 200_000);
     }
 
-    /// @dev M-6, verkoopkant en rewardTo == address(0): de volledige fee blijft achter, de owner krijgt exact
+    /// @dev M-6, sell side and rewardTo == address(0): the full fee stays behind, the owner gets exactly
     ///      received - fee.
     function test_execute_sellRetainsWholeFeeWhenTreasuryBlacklisted() public {
         _setUser(alice, 0, 1_250_000, _defaultParams());
@@ -930,19 +930,19 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(address(r)), 250_000);
         assertEq(eurc.balanceOf(treasury), 0);
 
-        // Een volgende run telt het achtergebleven saldo niet mee als "ontvangen".
+        // A later run does not count the leftover balance as "received".
         vm.warp(START + 1 days);
         _setPrice(PRICE);
         eurc.setBlacklisted(treasury, false);
         _setUser(bob, 0, 1_250_000, _defaultParams());
         r.execute(bob, address(0));
         assertEq(eurc.balanceOf(bob), 99_750_000);
-        assertEq(eurc.balanceOf(address(r)), 250_000, "restant van alice staat er nog");
-        assertEq(eurc.balanceOf(treasury), 250_000, "fee van bob is wel aangekomen");
+        assertEq(eurc.balanceOf(address(r)), 250_000, "alice's remainder is still there");
+        assertEq(eurc.balanceOf(treasury), 250_000, "bob's fee did arrive");
     }
 
-    /// @dev M-6: een geblacklist rewardTo kost de aanroeper zijn beloning, niet de owner zijn run; de hele fee
-    ///      gaat dan naar de treasury en het event meldt reward 0.
+    /// @dev M-6: a blacklisted rewardTo costs the caller its reward, not the owner its run; the whole fee
+    ///      then goes to the treasury and the event reports reward 0.
     function test_execute_rewardFallsBackToTreasuryWhenRewardToBlacklisted() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         eurc.setBlacklisted(keeper, true);
@@ -955,8 +955,8 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(address(r)), 0);
     }
 
-    /// @dev M-6: met TREASURY als rewardTo falen beloning én treasury-transfer zodra de treasury geblacklist
-    ///      is, en blijft de hele fee in het contract. De run wordt wél geboekt en `sweep` haalt de fee later op.
+    /// @dev M-6: with TREASURY as rewardTo, both the reward and the treasury transfer fail once the treasury
+    ///      is blacklisted, and the whole fee stays in the contract. The run is still booked; `sweep` gets it later.
     function test_execute_continuesWhenTreasuryBlacklisted() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         eurc.setBlacklisted(treasury, true);
@@ -967,9 +967,9 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(address(r)), 250_000);
     }
 
-    /// @dev Testgat execute 7: `sweep` roept willekeurige code aan met msg.sender = Rebalancer. `balanceOf` gaat
-    ///      via STATICCALL (view in IERC20), dus een nep-token kan zelfs geen owner registreren: de poging revert
-    ///      en er verandert niets.
+    /// @dev Test gap execute 7: `sweep` calls arbitrary code with msg.sender = Rebalancer. `balanceOf` goes
+    ///      via STATICCALL (view in IERC20), so a fake token cannot even register an owner: the attempt reverts
+    ///      and nothing changes.
     function test_sweep_maliciousTokenCannotChangeState() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         MaliciousSweepToken evil = new MaliciousSweepToken(r);
@@ -981,9 +981,9 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(treasury), 0);
     }
 
-    /// @dev Testgat execute 7 (EX-09), de schrijvende kant: `transfer` van een nep-token draait wél met
-    ///      schrijfrechten. Terug de run van een due owner in via `execute` stuit op de reentrancy-guard; het enige
-    ///      dat lukt is het nep-token zelf als owner registreren (`_owners` vervuilen), zonder saldo of effect.
+    /// @dev Test gap execute 7 (EX-09), the writing side: `transfer` of a fake token does run with
+    ///      write access. Re-entering a due owner's run via `execute` hits the reentrancy guard; the only thing
+    ///      that works is registering the fake token itself as owner (polluting `_owners`), without balance or effect.
     function test_sweep_maliciousTokenReentryCanOnlyRegisterItself() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         ReentrantSweepToken evil = new ReentrantSweepToken(r, alice);
@@ -993,24 +993,24 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(
             bytes4(evil.executeRevertData()),
             ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector,
-            "execute kwam binnen"
+            "execute was entered"
         );
         assertEq(eurc.balanceOf(alice), 1000e6);
         assertEq(r.lastExecutedAt(alice), 0);
         assertEq(r.ownerCount(), 2);
-        assertEq(r.owners(1, 1)[0], address(evil), "nep-token staat als owner geregistreerd");
+        assertEq(r.owners(1, 1)[0], address(evil), "fake token is registered as owner");
         (bool due,) = r.isDue(address(evil));
-        assertFalse(due, "zonder saldo nooit due");
+        assertFalse(due, "never due without balance");
         assertEq(eurc.balanceOf(address(r)), 0);
 
-        // De echte owner loopt daarna gewoon.
+        // The real owner then runs as usual.
         r.execute(alice, keeper);
         assertEq(eurc.balanceOf(alice), 900e6);
     }
 
-    /// @notice Zelf-audit 2026-09-17, L-D: een owner die `execute` voor zichzelf aanroept met `rewardTo` = zichzelf
-    ///         en alleen runs op de vloer doet (`maxCorrectionBps` 10, `minTradeEurc` 20 EURC, wallet 20.000 EURC),
-    ///         betaalt toch de helft van de fee aan de treasury. Vroeger ging de hele fee terug naar de owner.
+    /// @notice Self-audit 2026-09-17, L-D: an owner who calls `execute` for itself with `rewardTo` = itself
+    ///         and only does runs at the floor (`maxCorrectionBps` 10, `minTradeEurc` 20 EURC, wallet 20,000 EURC),
+    ///         still pays half of the fee to the treasury. Previously the whole fee went back to the owner.
     function test_execute_selfRewardAtFloorStillPaysTreasuryHalf() public {
         Rebalancer.Params memory p = _defaultParams();
         p.maxCorrectionBps = 10;
@@ -1024,12 +1024,12 @@ contract RebalancerTest is RebalancerTestBase {
                 _setPrice(PRICE);
             }
             (, int256 delta) = r.isDue(alice);
-            assertEq(delta, int256(20e6), "run op de vloer");
+            assertEq(delta, int256(20e6), "run at the floor");
             vm.prank(alice);
             r.execute(alice, alice);
         }
-        assertEq(eurc.balanceOf(treasury), runs * 25_000, "treasury krijgt per run de helft van 0,05 EURC");
-        assertEq(20_000e6 - eurc.balanceOf(alice), runs * (20e6 - 25_000), "owner betaalt netto de helft van de fee");
+        assertEq(eurc.balanceOf(treasury), runs * 25_000, "treasury gets half of 0.05 EURC per run");
+        assertEq(20_000e6 - eurc.balanceOf(alice), runs * (20e6 - 25_000), "owner pays half of the fee net");
     }
 
     function test_execute_rewardToSelfGoesToTreasury() public {
@@ -1043,8 +1043,8 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(treasury), 250_000);
     }
 
-    /// @dev L-2: spot op +0,5% (toegestaan) en 0,1% poolfees is samen 0,6% t.o.v. de oracle; met de nieuwe
-    ///      ondergrens van 60 bps is zo'n run precies nog uitvoerbaar. Met 30 bps zou hij structureel reverten.
+    /// @dev L-2: spot at +0.5% (allowed) plus 0.1% pool fees is 0.6% combined versus the oracle; with the new
+    ///      lower bound of 60 bps such a run is still just executable. With 30 bps it would revert structurally.
     function test_execute_minSlippageCoversSpotDeviationPlusPoolFees() public {
         Rebalancer.Params memory p = _defaultParams();
         p.maxSlippageBps = r.MIN_SLIPPAGE_BPS();
@@ -1063,10 +1063,10 @@ contract RebalancerTest is RebalancerTestBase {
         r.execute(bob, keeper);
     }
 
-    /// @dev L-1: levert de router 0 cbBTC op (alleen mogelijk als amountOutMinimum door afronding 0 is), dan
-    ///      revert de koop in plaats van EURC weg te geven. Hier geforceerd met een absurde koers.
+    /// @dev L-1: if the router delivers 0 cbBTC (only possible if amountOutMinimum is 0 due to rounding), the
+    ///      buy reverts instead of giving EURC away. Forced here with an absurd price.
     function test_execute_revertsNoOutputWhenBuyYieldsZero() public {
-        uint256 hugePrice = 1e16; // 10 miljard EURC per cbBTC: 99,75 EURC koopt 0 sats
+        uint256 hugePrice = 1e16; // 10 billion EURC per cbBTC: 99.75 EURC buys 0 sats
         _setPrice(hugePrice);
         router.setPrice(hugePrice);
         _setUser(alice, 1000e6, 0, _defaultParams());
@@ -1098,31 +1098,31 @@ contract RebalancerTest is RebalancerTestBase {
         router.setSlippageBps(100);
         r.execute(alice, keeper);
         assertEq(cbbtc.balanceOf(address(r)), 0);
-        // L-B: fee over max(ontvangen 99 EURC, verwacht 100 EURC), dus over de oraclewaarde.
+        // L-B: fee over max(received 99 EURC, expected 100 EURC), so over the oracle value.
         assertEq(eurc.balanceOf(keeper) + eurc.balanceOf(treasury), 100e6 * 25 / BPS);
         assertEq(eurc.balanceOf(alice), 99e6 - 100e6 * 25 / BPS);
     }
 
-    /// @dev L-B, rekenvoorbeeld uit de audit: verkoop ter waarde van 20,000160 EURC, ontvangen 19,980159 EURC
-    ///      (10 bps router-slippage). Vroeger was de fee 25 bps over `received` = 49.950, onder de beloning, en
-    ///      kreeg de aanroeper alles. Nu is de fee 25 bps over de oraclewaarde = 50.000: precies de beloning, zoals
-    ///      MIN_TRADE_FLOOR belooft. Iets boven de vloer (20,01 EURC) krijgt de treasury ook iets; vroeger niet.
+    /// @dev L-B, worked example from the audit: sale worth 20.000160 EURC, received 19.980159 EURC
+    ///      (10 bps router slippage). Previously the fee was 25 bps over `received` = 49,950, below the reward, and
+    ///      the caller got everything. Now the fee is 25 bps over the oracle value = 50,000: exactly the reward, as
+    ///      MIN_TRADE_FLOOR promises. Just above the floor (20.01 EURC) the treasury now gets a share too.
     function test_execute_sellFeeFloorUsesExpectedOut() public {
-        _sellAtValue(alice, 80_000_640_000, keeper); // 25.000 sats × 80.000,64 = 20,000160 EURC
-        assertEq(eurc.balanceOf(keeper), 25_000, "beloning is de helft van de fee (L-D)");
-        assertEq(eurc.balanceOf(treasury), 25_000, "treasury krijgt de andere helft");
+        _sellAtValue(alice, 80_000_640_000, keeper); // 25,000 sats × 80,000.64 = 20.000160 EURC
+        assertEq(eurc.balanceOf(keeper), 25_000, "reward is half of the fee (L-D)");
+        assertEq(eurc.balanceOf(treasury), 25_000, "treasury gets the other half");
         assertEq(eurc.balanceOf(alice), 19_980_159 - 50_000);
         assertGt(19_980_159 * 25 / BPS, 0);
-        assertLt(19_980_159 * 25 / BPS, 50_000, "opzet: oude fee lag onder de beloning");
+        assertLt(19_980_159 * 25 / BPS, 50_000, "setup: old fee was below the reward");
 
         address keeper2 = makeAddr("keeper2");
-        _sellAtValue(bob, 80_040_000_000, keeper2); // 25.000 sats × 80.040 = 20,010000 EURC, ontvangen 19,989990
-        assertEq(eurc.balanceOf(keeper2), 25_012, "beloning = fee / 2 (fee 50.025)");
+        _sellAtValue(bob, 80_040_000_000, keeper2); // 25,000 sats × 80,040 = 20.010000 EURC, received 19.989990
+        assertEq(eurc.balanceOf(keeper2), 25_012, "reward = fee / 2 (fee 50,025)");
         assertEq(eurc.balanceOf(treasury), 25_000 + 25_013);
-        assertLe(19_989_990 * 25 / BPS, 50_000, "opzet: oude fee gaf de treasury 0");
+        assertLe(19_989_990 * 25 / BPS, 50_000, "setup: old fee gave the treasury 0");
     }
 
-    /// @dev Verkoop van precies 25.000 sats (allowance) tegen `price`, met 10 bps router-slippage.
+    /// @dev Sale of exactly 25,000 sats (allowance) at `price`, with 10 bps router slippage.
     function _sellAtValue(address user, uint256 price, address rewardTo) internal {
         _setPrice(price);
         router.setPrice(price);
@@ -1134,19 +1134,19 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(cbbtc.balanceOf(user), 1_250_000 - 25_000);
     }
 
-    /// @dev L-B: de fee is begrensd op het ontvangen bedrag. Onbereikbaar via de router (minOut ligt hooguit
-    ///      MAX_SLIPPAGE_BPS onder expectedOut), dus hier via een harness die `_takeFee` rechtstreeks aanroept.
+    /// @dev L-B: the fee is capped at the received amount. Unreachable via the router (minOut is at most
+    ///      MAX_SLIPPAGE_BPS below expectedOut), so here via a harness that calls `_takeFee` directly.
     function test_takeFee_cappedAtMaxFee() public {
         RebalancerFeeHarness h = new RebalancerFeeHarness(_deployment());
         eurc.mint(address(h), 1_000e6);
         (uint256 fee, uint256 reward) = h.takeFee(1_000e6, 1_000, keeper);
-        assertEq(fee, 1_000, "begrensd op maxFee");
-        assertEq(reward, 500, "beloning begrensd op de helft van de fee");
+        assertEq(fee, 1_000, "capped at maxFee");
+        assertEq(reward, 500, "reward capped at half of the fee");
         assertEq(eurc.balanceOf(keeper), 500);
         (fee, reward) = h.takeFee(1_000e6, type(uint256).max, address(0));
         assertEq(fee, 2_500_000);
         assertEq(reward, 0);
-        assertEq(eurc.balanceOf(treasury), 500 + 2_500_000, "helft van de eerste fee plus de hele tweede");
+        assertEq(eurc.balanceOf(treasury), 500 + 2_500_000, "half of the first fee plus the whole second");
     }
 
     function test_execute_revertsWhenTokenPaused() public {
@@ -1162,8 +1162,8 @@ contract RebalancerTest is RebalancerTestBase {
         vm.expectRevert("Blacklistable: account is blacklisted");
         r.execute(alice, keeper);
         assertEq(r.lastExecutedAt(alice), 0);
-        // Een revert houdt de owner due: het contract onthoudt mislukte pogingen niet. De wekkers simuleren
-        // daarom eerst en houden zelf een cool-down per owner bij.
+        // A revert keeps the owner due: the contract does not remember failed attempts. The keepers therefore
+        // simulate first and track a cool-down per owner themselves.
         (bool due,) = r.isDue(alice);
         assertTrue(due);
         assertEq(r.dueOwners(0, 10).length, 1);
@@ -1223,7 +1223,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertFalse(due);
         assertEq(delta, 0);
 
-        // updatedAt in de toekomst -> StaleFeed in _readFeed, ook opgevangen.
+        // updatedAt in the future -> StaleFeed in _readFeed, also caught.
         feedBtc.set(80_000e8, START, START + 1);
         (due, delta) = r.isDue(alice);
         assertFalse(due);
@@ -1265,12 +1265,12 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(delta, -100e6);
     }
 
-    /// @dev L-C: de delta is wat `execute` werkelijk verkoopt (begrensd op de allowance), niet de correctie van
-    ///      100 EURC. Vroeger legde deze test het oude gedrag vast (delta -100 EURC).
+    /// @dev L-C: the delta is what `execute` actually sells (capped at the allowance), not the correction of
+    ///      100 EURC. Previously this test pinned the old behaviour (delta -100 EURC).
     function test_isDue_deltaIsAllowanceBoundedAmount() public {
         _setUser(alice, 0, 1_250_000, _defaultParams());
         vm.prank(alice);
-        cbbtc.approve(address(r), 30_000); // 24 EURC: boven de vloer, ver onder de correctie
+        cbbtc.approve(address(r), 30_000); // 24 EURC: above the floor, far below the correction
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
         assertEq(delta, -24e6);
@@ -1280,19 +1280,19 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(cbbtc.balanceOf(alice), 1_250_000 - 30_000);
     }
 
-    /// @dev L-C, voorbeeld uit de audit: wallet 10.000 EURC, correctie 1.000 EURC, allowance 20 EURC. `isDue`
-    ///      meldde 1.000 EURC terwijl `execute` 20 EURC handelt; nu meldt het 20 EURC.
+    /// @dev L-C, example from the audit: wallet 10,000 EURC, correction 1,000 EURC, allowance 20 EURC. `isDue`
+    ///      reported 1,000 EURC while `execute` trades 20 EURC; now it reports 20 EURC.
     function test_isDue_deltaMatchesExecutedAmountWhenAllowanceBinds() public {
         _setUser(alice, 10_000e6, 0, _defaultParams());
         (, int256 unbounded) = r.isDue(alice);
-        assertEq(unbounded, 1_000e6, "opzet: correctie 1.000 EURC");
+        assertEq(unbounded, 1_000e6, "setup: correction 1,000 EURC");
         vm.prank(alice);
         eurc.approve(address(r), 20e6);
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
         assertEq(delta, 20e6);
         r.execute(alice, keeper);
-        assertEq(eurc.balanceOf(alice), 10_000e6 - uint256(delta), "execute handelt precies de gemelde delta");
+        assertEq(eurc.balanceOf(alice), 10_000e6 - uint256(delta), "execute trades exactly the reported delta");
     }
 
     // dueOwners ─────────────────────────────────────────────────────────────────────────────────────────
@@ -1302,15 +1302,15 @@ contract RebalancerTest is RebalancerTestBase {
         for (uint256 i = 0; i < 6; i++) {
             users[i] = makeAddr(string(abi.encodePacked("due", i)));
         }
-        _setUser(users[0], 1000e6, 0, _defaultParams()); // due: kopen
-        _setUser(users[1], 200e6, 1_000_000, _defaultParams()); // binnen band
-        _setUser(users[2], 0, 1_250_000, _defaultParams()); // due: verkopen
+        _setUser(users[0], 1000e6, 0, _defaultParams()); // due: buy
+        _setUser(users[1], 200e6, 1_000_000, _defaultParams()); // within band
+        _setUser(users[2], 0, 1_250_000, _defaultParams()); // due: sell
         Rebalancer.Params memory inactive = _defaultParams();
         inactive.active = false;
-        _setUser(users[3], 1000e6, 0, inactive); // inactief
-        _setUser(users[4], 1000e6, 0, _defaultParams()); // net uitgevoerd -> niet due
+        _setUser(users[3], 1000e6, 0, inactive); // inactive
+        _setUser(users[4], 1000e6, 0, _defaultParams()); // just executed -> not due
         r.execute(users[4], keeper);
-        _setUser(users[5], 1000e6, 0, _defaultParams()); // due, maar allowance 0
+        _setUser(users[5], 1000e6, 0, _defaultParams()); // due, but allowance 0
         vm.prank(users[5]);
         eurc.approve(address(r), 0);
 
@@ -1320,7 +1320,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(due[1], users[2]);
         for (uint256 i = 0; i < 6; i++) {
             (bool isDueNow,) = r.isDue(users[i]);
-            assertEq(isDueNow, i == 0 || i == 2, "dueOwners wijkt af van isDue");
+            assertEq(isDueNow, i == 0 || i == 2, "dueOwners differs from isDue");
         }
 
         due = r.dueOwners(0, 2);
@@ -1348,9 +1348,9 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.dueOwners(0, 10).length, 0);
     }
 
-    /// @dev Testgat execute 2 en mandaat 1: een wekker die pagina voor pagina door `dueOwners` loopt (zoals
-    ///      keeper.ts, hier met pagina's van 5) bereikt elke due owner, ook nummer 6 en verder. Kleine wallets
-    ///      met toegestane params (10 EURC, onder de vloer) staan ertussen, zijn nooit due en verdringen niemand.
+    /// @dev Test gap execute 2 and mandate 1: a keeper that walks through `dueOwners` page by page (like
+    ///      keeper.ts, here with pages of 5) reaches every due owner, including number 6 and beyond. Small wallets
+    ///      with allowed params (10 EURC, below the floor) sit in between, are never due and crowd out no one.
     function test_dueOwners_pagingReachesEveryDueOwner() public {
         uint256 count = 12;
         uint256 pageSize = 5;
@@ -1371,13 +1371,13 @@ contract RebalancerTest is RebalancerTestBase {
             }
         }
 
-        assertEq(executed, count / 2, "niet elke due owner bereikt");
+        assertEq(executed, count / 2, "not every due owner reached");
         for (uint256 i = 0; i < count; i++) {
             bool isSmallWallet = i % 2 == 0;
             assertEq(r.lastExecutedAt(users[i]), isSmallWallet ? 0 : uint64(START));
         }
-        assertEq(eurc.balanceOf(users[count - 1]), 900e6, "de laatste owner is ook uitgevoerd");
-        assertEq(r.dueOwners(0, count).length, 0, "na de ronde is niemand meer due");
+        assertEq(eurc.balanceOf(users[count - 1]), 900e6, "the last owner was executed too");
+        assertEq(r.dueOwners(0, count).length, 0, "after the round nobody is due anymore");
     }
 
     // quote ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -1423,9 +1423,9 @@ contract RebalancerTest is RebalancerTestBase {
         r.retire();
         vm.expectRevert(Rebalancer.ContractRetired.selector);
         r.execute(alice, keeper);
-        assertEq(eurc.balanceOf(alice), 1000e6, "geen fondsen bewogen");
+        assertEq(eurc.balanceOf(alice), 1000e6, "no funds moved");
         assertEq(r.lastExecutedAt(alice), 0);
-        // De allowance staat nog bij de gebruiker; er is alleen niets meer dat hem kan gebruiken.
+        // The allowance is still set by the user; there is just nothing left that can use it.
         assertEq(eurc.allowance(alice, address(r)), type(uint256).max);
     }
 
@@ -1439,7 +1439,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertFalse(due);
         assertEq(delta, 0);
         assertEq(r.dueOwners(0, 10).length, 0);
-        // De registratie zelf blijft leesbaar.
+        // The registration itself stays readable.
         assertEq(r.ownerCount(), 2);
     }
 
@@ -1464,7 +1464,7 @@ contract RebalancerTest is RebalancerTestBase {
         vm.prank(treasury);
         r.retire();
 
-        // Intrekken werkt, ook voor iemand die nog nooit instellingen had.
+        // Revoking works, even for someone who never had settings.
         Rebalancer.Params memory p = _defaultParams();
         p.active = false;
         vm.expectEmit(true, false, false, true, address(r));
@@ -1477,7 +1477,7 @@ contract RebalancerTest is RebalancerTestBase {
         r.setParams(p);
         assertEq(r.ownerCount(), 2);
 
-        // Een actief mandaat zetten (nieuw of opnieuw) revert.
+        // Setting an active mandate (new or again) reverts.
         p.active = true;
         vm.expectRevert(Rebalancer.ContractRetired.selector);
         vm.prank(alice);
@@ -1486,7 +1486,7 @@ contract RebalancerTest is RebalancerTestBase {
         vm.prank(keeper);
         r.setParams(p);
 
-        // Inactieve instellingen worden nog steeds gevalideerd.
+        // Inactive settings are still validated.
         p.active = false;
         p.bandBps = 0;
         vm.expectRevert(Rebalancer.InvalidParams.selector);
@@ -1497,7 +1497,7 @@ contract RebalancerTest is RebalancerTestBase {
     function test_retire_sweepStillWorks() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         eurc.setBlacklisted(treasury, true);
-        r.execute(alice, keeper); // 0,20 EURC treasury-deel blijft achter (FeeRetained)
+        r.execute(alice, keeper); // 0.20 EURC treasury share stays behind (FeeRetained)
         assertEq(eurc.balanceOf(address(r)), 200_000);
         vm.prank(treasury);
         r.retire();
@@ -1546,13 +1546,13 @@ contract RebalancerTest is RebalancerTestBase {
             vm.expectRevert(abi.encodeWithSelector(Rebalancer.NotAContract.selector, eoa));
             new Rebalancer(d);
         }
-        // De treasury mag een EOA zijn.
+        // The treasury may be an EOA.
         d = _deployment();
         d.treasury = eoa;
         new Rebalancer(d);
     }
 
-    /// @dev L-4: beide feeds moeten 8 decimalen hebben; de omrekening deelt ze op elkaar.
+    /// @dev L-4: both feeds must have 8 decimals; the conversion divides them by each other.
     function test_constructor_rejectsFeedWithWrongDecimals() public {
         MockAggregator feed18 = new MockAggregator(18, "EURC / USD");
         Rebalancer.Deployment memory d = _deployment();
@@ -1566,7 +1566,7 @@ contract RebalancerTest is RebalancerTestBase {
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedFeedDecimals.selector, address(feed6)));
         new Rebalancer(d);
 
-        // Allebei 18 is ook fout: de constante is 8, niet "gelijk aan elkaar".
+        // Both at 18 is also wrong: the constant is 8, not "equal to each other".
         MockAggregator btc18 = new MockAggregator(18, "cbBTC / USD");
         d = _deployment();
         d.feedCbbtcUsd = address(btc18);
@@ -1575,7 +1575,7 @@ contract RebalancerTest is RebalancerTestBase {
         new Rebalancer(d);
     }
 
-    /// @dev Review I-4: EURC 6, cbBTC 8 en USDC 6 decimalen; de eenheden en ondergrenzen zijn daarop vastgelegd.
+    /// @dev Review I-4: EURC 6, cbBTC 8 and USDC 6 decimals; the units and lower bounds are fixed on that basis.
     function test_constructor_rejectsTokenWithWrongDecimals() public {
         address[3] memory tokens = [address(eurc), address(cbbtc), address(usdc)];
         uint8[3] memory wrong = [uint8(18), 6, 8];
@@ -1585,11 +1585,11 @@ contract RebalancerTest is RebalancerTestBase {
             new Rebalancer(_deployment());
             vm.clearMockedCalls();
         }
-        // Met de juiste decimalen gaat het door.
+        // With the correct decimals it goes through.
         new Rebalancer(_deployment());
     }
 
-    /// @dev Review I-4: een token zonder `decimals()` is geen geldig token voor dit contract; de deploy revert.
+    /// @dev Review I-4: a token without `decimals()` is not a valid token for this contract; the deploy reverts.
     function test_constructor_rejectsTokenWithoutDecimals() public {
         vm.mockCallRevert(address(usdc), abi.encodeWithSignature("decimals()"), "");
         vm.expectRevert();
@@ -1608,8 +1608,8 @@ contract RebalancerTest is RebalancerTestBase {
         new Rebalancer(d);
     }
 
-    /// @dev Lead 1: een pool met de juiste tokens maar een andere fee-tier dan POOL_FEE wordt geweigerd, ook als de
-    ///      factory hem onder 500 zou registreren.
+    /// @dev Lead 1: a pool with the correct tokens but a fee tier other than POOL_FEE is rejected, even if the
+    ///      factory would register it under 500.
     function test_constructor_rejectsPoolWithWrongFee() public {
         MockUniswapV3Pool wrongFee = new MockUniswapV3Pool(address(eurc), address(usdc));
         wrongFee.setFee(3000);
@@ -1628,8 +1628,8 @@ contract RebalancerTest is RebalancerTestBase {
         new Rebalancer(d);
     }
 
-    /// @dev Review L-1: de runomvang rekent met hooguit één tickgrens in het venster, en dat klopt alleen bij
-    ///      tickSpacing 10. Een pool met een andere tickSpacing wordt geweigerd.
+    /// @dev Review L-1: the run size assumes at most one tick boundary in the window, and that only holds for
+    ///      tickSpacing 10. A pool with a different tickSpacing is rejected.
     function test_constructor_rejectsPoolWithWrongTickSpacing() public {
         poolEurcUsdc.setTickSpacing(1);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedTickSpacing.selector, address(poolEurcUsdc)));
@@ -1640,8 +1640,8 @@ contract RebalancerTest is RebalancerTestBase {
         new Rebalancer(_deployment());
     }
 
-    /// @dev Lead 1: een pool met de juiste tokens en fee die niet de pool van de factory van de router is (een
-    ///      nagebouwde pool, of een pool van een andere factory) wordt geweigerd.
+    /// @dev Lead 1: a pool with the correct tokens and fee that is not the pool of the router's factory (a
+    ///      replica pool, or a pool from another factory) is rejected.
     function test_constructor_rejectsPoolNotFromRouterFactory() public {
         MockUniswapV3Pool lookalike = new MockUniswapV3Pool(address(eurc), address(usdc));
         Rebalancer.Deployment memory d = _deployment();
@@ -1655,40 +1655,40 @@ contract RebalancerTest is RebalancerTestBase {
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolNotFromRouterFactory.selector, address(lookalikeBtc)));
         new Rebalancer(d);
 
-        // De echte pools, maar de router wijst naar een andere factory waarin ze niet staan.
+        // The real pools, but the router points to another factory in which they are not registered.
         MockUniswapV3Factory otherFactory = new MockUniswapV3Factory();
         router.setFactory(address(otherFactory));
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolNotFromRouterFactory.selector, address(poolEurcUsdc)));
         new Rebalancer(_deployment());
 
-        // Router zonder factory.
+        // Router without factory.
         router.setFactory(address(0));
         vm.expectRevert(Rebalancer.ZeroAddress.selector);
         new Rebalancer(_deployment());
 
-        // Terug naar de juiste factory: de deploy slaagt.
+        // Back to the correct factory: the deploy succeeds.
         router.setFactory(address(factory));
         new Rebalancer(_deployment());
     }
 
-    // Referentievectoren (PHP AutoTradeStrategy::rebalanceAmount) ──────────────────────────────────────
+    // Reference vectors (PHP AutoTradeStrategy::rebalanceAmount) ───────────────────────────────────────
 
     struct Vector {
-        uint256 cash; // EURC-basiseenheden
-        uint256 position; // EURC-basiseenheden
+        uint256 cash; // EURC base units
+        uint256 position; // EURC base units
         uint16 targetBps;
         uint16 bandBps;
         uint16 capBps;
         uint64 minTrade;
-        int256 amount; // gesigneerd, EURC-basiseenheden; + kopen, - verkopen
+        int256 amount; // signed, EURC base units; + buy, - sell
     }
 
-    /// @dev Koers 100 EURC per cbBTC, zodat 1 sat == 1 EURC-basiseenheid en de positie exact omgezet wordt.
+    /// @dev Price 100 EURC per cbBTC, so that 1 sat == 1 EURC base unit and the position converts exactly.
     uint256 internal constant VECTOR_PRICE = 100e6;
 
-    /// @dev Vectoren uit de PHP-referentie, met `minTrade` op de contractvloer van 20 EURC. Daardoor wijken v[4],
-    ///      v[6] en v[12] af van de oorspronkelijke PHP-set (minTrade 5): v[4] is ×10 geschaald, en bij v[6] en
-    ///      v[12] is de cap-vloer nu 20 in plaats van 10 (cap = max(total × 10%, minTrade)).
+    /// @dev Vectors from the PHP reference, with `minTrade` at the contract floor of 20 EURC. As a result v[4],
+    ///      v[6] and v[12] differ from the original PHP set (minTrade 5): v[4] is scaled ×10, and for v[6] and
+    ///      v[12] the cap floor is now 20 instead of 10 (cap = max(total × 10%, minTrade)).
     function _vectors() internal pure returns (Vector[15] memory v) {
         v[0] = Vector(200e6, 800e6, 8000, 500, 1000, 20e6, 0);
         v[1] = Vector(500e6, 500e6, 8000, 500, 1000, 20e6, 100e6);
@@ -1723,7 +1723,7 @@ contract RebalancerTest is RebalancerTestBase {
                 maxSlippageBps: 100
             });
             uint256 btc = v[i].position * 1e8 / VECTOR_PRICE;
-            assertEq(Math.mulDiv(btc, VECTOR_PRICE, 1e8), v[i].position, "positie niet exact omzetbaar");
+            assertEq(Math.mulDiv(btc, VECTOR_PRICE, 1e8), v[i].position, "position not exactly convertible");
             _setUser(user, v[i].cash, btc, p);
 
             (bool due, int256 delta) = r.isDue(user);
@@ -1733,8 +1733,8 @@ contract RebalancerTest is RebalancerTestBase {
                 continue;
             }
             assertTrue(due, string(abi.encodePacked("vector ", vm.toString(i), ": not due")));
-            assertEq(delta > 0, v[i].amount > 0, string(abi.encodePacked("vector ", vm.toString(i), ": richting")));
-            assertApproxEqAbs(delta, v[i].amount, 2, string(abi.encodePacked("vector ", vm.toString(i), ": bedrag")));
+            assertEq(delta > 0, v[i].amount > 0, string(abi.encodePacked("vector ", vm.toString(i), ": direction")));
+            assertApproxEqAbs(delta, v[i].amount, 2, string(abi.encodePacked("vector ", vm.toString(i), ": amount")));
         }
     }
 
@@ -1751,8 +1751,8 @@ contract RebalancerTest is RebalancerTestBase {
         uint256 allowanceBtc,
         bool withReward
     ) public {
-        cash = bound(cash, 0, 1e15); // <= 1 miljard EURC
-        btc = bound(btc, 0, 1e13); // <= 100.000 cbBTC
+        cash = bound(cash, 0, 1e15); // <= 1 billion EURC
+        btc = bound(btc, 0, 1e13); // <= 100,000 cbBTC
         Rebalancer.Params memory p = Rebalancer.Params({
             active: true,
             targetBps: uint16(bound(targetSteps, 5, 95)) * 100,
@@ -1783,52 +1783,52 @@ contract RebalancerTest is RebalancerTestBase {
             return;
         }
         uint256 absDelta = delta > 0 ? uint256(delta) : uint256(-delta);
-        // Bij verkopen is de delta de naar boven afgeronde sats-hoeveelheid tegen de koers: tot 1 sat boven de cap.
-        assertLe(absDelta, capEurc + PRICE / 1e8, "correctie boven cap");
-        assertGe(absDelta, p.minTradeEurc, "correctie onder minTrade");
+        // When selling, the delta is the rounded-up sats amount at the price: up to 1 sat above the cap.
+        assertLe(absDelta, capEurc + PRICE / 1e8, "correction above cap");
+        assertGe(absDelta, p.minTradeEurc, "correction below minTrade");
 
         uint256 treasuryBefore = eurc.balanceOf(treasury);
         uint256 keeperBefore = eurc.balanceOf(keeper);
         r.execute(alice, rewardTo);
 
-        assertEq(eurc.balanceOf(address(r)), 0, "EURC-restsaldo");
-        assertEq(cbbtc.balanceOf(address(r)), 0, "cbBTC-restsaldo");
+        assertEq(eurc.balanceOf(address(r)), 0, "EURC residual balance");
+        assertEq(cbbtc.balanceOf(address(r)), 0, "cbBTC residual balance");
         assertEq(r.lastExecutedAt(alice), uint64(block.timestamp));
 
         uint256 feePaid = (eurc.balanceOf(treasury) - treasuryBefore) + (eurc.balanceOf(keeper) - keeperBefore);
         if (delta > 0) {
             uint256 amountIn = cash - eurc.balanceOf(alice);
-            assertLe(amountIn, capEurc, "amountIn boven cap");
-            assertLe(amountIn, absDelta, "amountIn boven correctie");
-            assertLe(amountIn, Math.min(cash, allowanceEurc), "amountIn boven saldo/allowance");
-            assertGe(amountIn, p.minTradeEurc, "amountIn onder minTrade");
+            assertLe(amountIn, capEurc, "amountIn above cap");
+            assertLe(amountIn, absDelta, "amountIn above correction");
+            assertLe(amountIn, Math.min(cash, allowanceEurc), "amountIn above balance/allowance");
+            assertGe(amountIn, p.minTradeEurc, "amountIn below minTrade");
             uint256 fee = Math.mulDiv(amountIn, 25, BPS);
             assertEq(feePaid, fee, "fee != reward + treasury");
             assertEq(eurc.balanceOf(address(router)), amountIn - fee, "swapIn + fee != amountIn");
-            assertEq(cbbtc.balanceOf(alice) - btc, Math.mulDiv(amountIn - fee, 1e8, PRICE), "output naar owner");
+            assertEq(cbbtc.balanceOf(alice) - btc, Math.mulDiv(amountIn - fee, 1e8, PRICE), "output to owner");
             if (withReward) assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, fee / 2));
             else assertEq(eurc.balanceOf(keeper), keeperBefore);
         } else {
             uint256 btcIn = btc - cbbtc.balanceOf(alice);
             uint256 valueIn = Math.mulDiv(btcIn, PRICE, 1e8);
-            // wantBtc wordt naar boven afgerond (M-5): hooguit 1 sat aan waarde boven cap/correctie.
+            // wantBtc is rounded up (M-5): at most 1 sat of value above cap/correction.
             uint256 oneSat = PRICE / 1e8;
-            assertLe(valueIn, capEurc + oneSat, "verkoopwaarde boven cap");
-            assertLe(valueIn, absDelta + oneSat, "verkoopwaarde boven correctie");
-            assertLe(btcIn, Math.min(btc, allowanceBtc), "btcIn boven saldo/allowance");
-            assertGe(valueIn, p.minTradeEurc, "verkoopwaarde onder minTrade");
+            assertLe(valueIn, capEurc + oneSat, "sale value above cap");
+            assertLe(valueIn, absDelta + oneSat, "sale value above correction");
+            assertLe(btcIn, Math.min(btc, allowanceBtc), "btcIn above balance/allowance");
+            assertGe(valueIn, p.minTradeEurc, "sale value below minTrade");
             uint256 fee = Math.mulDiv(valueIn, 25, BPS);
             assertEq(feePaid, fee, "fee != reward + treasury");
-            assertEq(eurc.balanceOf(alice) - cash, valueIn - fee, "output naar owner");
+            assertEq(eurc.balanceOf(alice) - cash, valueIn - fee, "output to owner");
             assertEq(cbbtc.balanceOf(address(router)), btcIn);
             if (withReward) assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, fee / 2));
             else assertEq(eurc.balanceOf(keeper), keeperBefore);
         }
     }
 
-    /// @dev Testgat math 1 (M-01): bij een willekeurig, niet-rond koersgetal en volle allowance is een owner due
-    ///      precies als de begrensde correctie de minTrade haalt, met die correctie als delta; is hij due, dan
-    ///      slaagt `execute` ook (geen NothingToDo door afronding in de omrekening naar sats).
+    /// @dev Test gap math 1 (M-01): with an arbitrary, non-round price and full allowance an owner is due
+    ///      exactly when the capped correction reaches minTrade, with that correction as delta; if it is due,
+    ///      `execute` also succeeds (no NothingToDo from rounding in the conversion to sats).
     function testFuzz_isDue_matchesCorrectionAtAnyPrice(
         uint256 price,
         uint256 cash,
@@ -1867,15 +1867,15 @@ contract RebalancerTest is RebalancerTestBase {
         bool expectDue = correction >= p.minTradeEurc;
 
         (bool due, int256 delta) = r.isDue(alice);
-        assertEq(due, expectDue, "due wijkt af van correctie >= minTrade");
+        assertEq(due, expectDue, "due differs from correction >= minTrade");
         if (!expectDue) {
             assertEq(delta, 0);
             vm.expectRevert(Rebalancer.NothingToDo.selector);
             r.execute(alice, keeper);
             return;
         }
-        // L-C: de delta is het werkelijke inputbedrag. Bij verkopen is dat de naar boven afgeronde sats-hoeveelheid
-        // (hooguit het saldo) tegen de koers, dus tot 1 sat aan waarde boven de correctie.
+        // L-C: the delta is the actual input amount. When selling, that is the rounded-up sats amount
+        // (at most the balance) at the price, so up to 1 sat of value above the correction.
         int256 expectedDelta;
         if (isBuy) {
             expectedDelta = int256(correction);
@@ -1935,8 +1935,8 @@ contract RebalancerHandler is Test {
     bool public contractHeldBalance;
     uint256 public executes;
     uint256 public executesSucceeded;
-    /// @dev Ghost-tellers per revert-reden (testgat math 7): NothingToDo is verwacht, "Too little received" of een
-    ///      spot-afwijking wijst op liveness-uitval.
+    /// @dev Ghost counters per revert reason (test gap math 7): NothingToDo is expected, "Too little received" or a
+    ///      spot deviation points to a liveness failure.
     uint256 public revertsNothingToDo;
     uint256 public revertsInactive;
     uint256 public revertsNotDue;
@@ -1946,8 +1946,8 @@ contract RebalancerHandler is Test {
     uint256 public revertsBlockMove;
     uint256 public revertsPoolTouched;
     uint256 public revertsOther;
-    /// @dev Ronde-ghosts (audit M-1): budget en richting van de lopende ronde per owner, en wat er in die ronde al
-    ///      verhandeld is. Een run is een nieuwe ronde als `interval` sinds de vorige run verstreken is, anders een deel.
+    /// @dev Round ghosts (audit M-1): budget and direction of the current round per owner, and what has already been
+    ///      traded in that round. A run is a new round if `interval` has passed since the last run, otherwise a chunk.
     mapping(address actor => uint256) public ghostRoundBudget;
     mapping(address actor => uint256) public ghostRoundSpent;
     mapping(address actor => uint256) public ghostRoundRuns;
@@ -1956,7 +1956,7 @@ contract RebalancerHandler is Test {
     bool public roundDirectionFlipped;
     bool public chunkWithoutRound;
     uint256 public chunksSucceeded;
-    /// @dev Retire-ghosts: is er na `retire` nog een `Executed`-event gezien (in welke handler-actie dan ook)?
+    /// @dev Retire ghosts: has an `Executed` event still been seen after `retire` (in any handler action)?
     uint256 public retires;
     bool public executedAfterRetire;
 
@@ -2018,7 +2018,7 @@ contract RebalancerHandler is Test {
         Rebalancer.Params memory p = Rebalancer.Params({
             active: active,
             targetBps: uint16(bound(target, 5, 95)) * 100,
-            bandBps: uint16(bound(band, 125, 9999)), // MIN_BAND_BPS; lagere banden weigert setParams nu
+            bandBps: uint16(bound(band, 125, 9999)), // MIN_BAND_BPS; setParams now rejects lower bands
             maxCorrectionBps: uint16(bound(cap, 10, 10_000)),
             minTradeEurc: uint64(bound(minTrade, 20e6, 100e6)),
             interval: 1 hours,
@@ -2051,22 +2051,22 @@ contract RebalancerHandler is Test {
         _refreshFeeds();
     }
 
-    /// @dev Kleine stappen: een volgend blok (2 s) of precies CHUNK_INTERVAL, zodat delen van rondes geraakt worden.
+    /// @dev Small steps: a next block (2 s) or exactly CHUNK_INTERVAL, so that chunks of rounds are hit.
     function warpShort(bool chunkInterval) external afterCall {
         vm.roll(block.number + 1);
         vm.warp(block.timestamp + (chunkInterval ? 10 minutes : 2));
         _refreshFeeds();
     }
 
-    /// @dev Eindige liquiditeit in een van beide pools, zodat runs in delen gaan (of 0 = weer onbegrensd).
+    /// @dev Finite liquidity in one of the two pools, so that runs go in chunks (or 0 = unlimited again).
     function setLiquidity(bool eurcPool, uint128 liquidity) external afterCall {
         uint128 value = liquidity % 4 == 0 ? type(uint128).max : uint128(bound(liquidity, 1e11, 1e14));
         if (eurcPool) poolEurcUsdc.setLiquidity(value);
         else poolUsdcCbbtc.setLiquidity(uint128(Math.min(uint256(value) * 1e3, type(uint128).max)));
     }
 
-    /// @dev Een swap van iemand anders in dit blok (tot ±10 bp). Verandert die de tick, dan raakt hij de blokcheck
-    ///      (PoolTouchedThisBlock); binnen de tick het blokvenster.
+    /// @dev A swap by someone else in this block (up to ±10 bp). If it changes the tick, it hits the block check
+    ///      (PoolTouchedThisBlock); within the tick, the block window.
     function pushInBlock(bool eurcPool, uint16 bps, bool up) external afterCall {
         bps = uint16(bound(bps, 0, 10));
         MockUniswapV3Pool pool = eurcPool ? poolEurcUsdc : poolUsdcCbbtc;
@@ -2084,8 +2084,8 @@ contract RebalancerHandler is Test {
         router.setPrice(price);
     }
 
-    /// @dev Testgat oracle 10: alleen de pools verschuiven (feed blijft staan), tot ±1%, zodat de spot-check ook in
-    ///      de invariant-suite geraakt wordt.
+    /// @dev Test gap oracle 10: shift only the pools (feed stays put), up to ±1%, so that the spot check is also hit
+    ///      in the invariant suite.
     function shiftSpot(uint16 bps, bool up) external afterCall {
         bps = uint16(bound(bps, 0, 100));
         (, int256 a,,,) = feedBtc.latestRoundData();
@@ -2094,13 +2094,13 @@ contract RebalancerHandler is Test {
         poolUsdcCbbtc.setPrice(shifted, 1e8);
     }
 
-    /// @dev Iedereen mag vegen; het contract mag daardoor nooit saldo overhouden en de treasury daalt nooit.
+    /// @dev Anyone may sweep; therefore the contract must never keep a balance and the treasury never decreases.
     function sweep(bool eurcToken) external afterCall {
         r.sweep(eurcToken ? eurc : cbbtc);
     }
 
-    /// @dev De treasury zet het contract stil. Eén keer per run; daarna mag geen execute meer slagen. Gegate op
-    ///      de seed (1 op 8), zodat de meeste runs de gewone paden blijven raken en een derde retired eindigt.
+    /// @dev The treasury halts the contract. Once per run; after that no execute may succeed. Gated on
+    ///      the seed (1 in 8), so that most runs keep hitting the normal paths and a third end retired.
     function retire(uint256 seed) external afterCall {
         if (r.retired() || seed % 8 != 0) return;
         vm.prank(treasury);
@@ -2139,7 +2139,7 @@ contract RebalancerHandler is Test {
                 ghostRoundSpent[owner] += spent;
                 ghostRoundRuns[owner]++;
             }
-            // Verkopen ronden hooguit 1 sat naar boven af per run (M-5).
+            // Sells round up by at most 1 sat per run (M-5).
             if (ghostRoundSpent[owner] > ghostRoundBudget[owner] + ghostRoundRuns[owner] * (price / 1e8 + 1)) {
                 roundBudgetExceeded = true;
             }
@@ -2155,7 +2155,7 @@ contract RebalancerHandler is Test {
             else if (sel == bytes4(keccak256("Error(string)"))) revertsSlippage++;
             else revertsOther++;
         }
-        // Alleen execute mag saldi van actors veranderen: leg het nieuwe saldo vast.
+        // Only execute may change actor balances: record the new balance.
         for (uint256 i = 0; i < actors.length; i++) {
             ghostEurc[actors[i]] = eurc.balanceOf(actors[i]);
             ghostBtc[actors[i]] = cbbtc.balanceOf(actors[i]);
@@ -2179,32 +2179,32 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
         targetContract(address(handler));
     }
 
-    /// @dev Tokens verlaten (of bereiken) een owner-wallet alleen via execute of een handler-deposit.
+    /// @dev Tokens leave (or reach) an owner wallet only via execute or a handler deposit.
     function invariant_ownerBalancesOnlyMoveThroughExecute() public view {
         for (uint256 i = 0; i < handler.actorCount(); i++) {
             address a = handler.actors(i);
-            assertEq(eurc.balanceOf(a), handler.ghostEurc(a), "EURC bewoog buiten execute om");
-            assertEq(cbbtc.balanceOf(a), handler.ghostBtc(a), "cbBTC bewoog buiten execute om");
+            assertEq(eurc.balanceOf(a), handler.ghostEurc(a), "EURC moved outside execute");
+            assertEq(cbbtc.balanceOf(a), handler.ghostBtc(a), "cbBTC moved outside execute");
         }
     }
 
     function invariant_contractNeverHoldsBalance() public view {
-        assertFalse(handler.contractHeldBalance(), "contract hield saldo na een call");
+        assertFalse(handler.contractHeldBalance(), "contract kept a balance after a call");
         assertEq(eurc.balanceOf(address(r)), 0);
         assertEq(cbbtc.balanceOf(address(r)), 0);
     }
 
     function invariant_treasuryMonotonic() public view {
-        assertFalse(handler.treasuryDecreased(), "treasury-saldo daalde");
+        assertFalse(handler.treasuryDecreased(), "treasury balance decreased");
         assertGe(eurc.balanceOf(treasury), handler.lastTreasury());
     }
 
-    /// @dev Zonder router-slippage en met de spot binnen ±1% mag een execute alleen falen op NothingToDo, Inactive,
-    ///      NotDue, de spot-check, de blokcheck, het blokvenster of ContractRetired; "Too little received" of iets anders zou
-    ///      liveness-uitval zijn.
+    /// @dev Without router slippage and with the spot within ±1%, an execute may only fail on NothingToDo, Inactive,
+    ///      NotDue, spot check, block check, block window or ContractRetired; "Too little received" or anything
+    ///      else would be a liveness failure.
     function invariant_executeFailsOnlyForKnownReasons() public view {
-        assertEq(handler.revertsSlippage(), 0, "router-slippage zonder oorzaak");
-        assertEq(handler.revertsOther(), 0, "onbekende revert-reden");
+        assertEq(handler.revertsSlippage(), 0, "router slippage without cause");
+        assertEq(handler.revertsOther(), 0, "unknown revert reason");
         assertEq(
             handler.executes(),
             handler.executesSucceeded() + handler.revertsNothingToDo() + handler.revertsInactive()
@@ -2213,48 +2213,48 @@ contract RebalancerInvariantTest is StdInvariant, RebalancerTestBase {
         );
     }
 
-    /// @dev Laat per run zien welke paden geraakt zijn (met -vv), zodat een groene suite niet op lege paden rust.
+    /// @dev Shows per run which paths were hit (with -vv), so that a green suite does not rest on empty paths.
     function afterInvariant() public view virtual {
-        console.log("execute geslaagd:", handler.executesSucceeded(), " waarvan delen:", handler.chunksSucceeded());
+        console.log("execute succeeded:", handler.executesSucceeded(), " of which chunks:", handler.chunksSucceeded());
         console.log("revert BlockMoveExceeded:", handler.revertsBlockMove(), " NotDue:", handler.revertsNotDue());
-        console.log("execute totaal:", handler.executes(), " NothingToDo:", handler.revertsNothingToDo());
+        console.log("execute total:", handler.executes(), " NothingToDo:", handler.revertsNothingToDo());
         console.log("revert spot:", handler.revertsSpot(), " retired:", handler.revertsRetired());
         console.log(
             "revert inactive:", handler.revertsInactive(), " PoolTouchedThisBlock:", handler.revertsPoolTouched()
         );
     }
 
-    /// @dev Audit M-1: de runs van één ronde (eerste run plus delen) blijven samen binnen het budget van die ronde
-    ///      (maxCorrectionBps van de waarde bij de eerste run, minstens minTradeEurc).
+    /// @dev Audit M-1: the runs of one round (first run plus chunks) together stay within that round's budget
+    ///      (maxCorrectionBps of the value at the first run, at least minTradeEurc).
     function invariant_roundBudgetNeverExceeded() public view {
-        assertFalse(handler.roundBudgetExceeded(), "ronde verhandelde meer dan haar budget");
+        assertFalse(handler.roundBudgetExceeded(), "round traded more than its budget");
     }
 
-    /// @dev Audit M-1: een deel gaat altijd in de richting van de ronde en alleen als er een ronde loopt.
+    /// @dev Audit M-1: a chunk always goes in the direction of the round, and only while a round is running.
     function invariant_chunkKeepsRoundDirection() public view {
-        assertFalse(handler.roundDirectionFlipped(), "deel in de andere richting dan de ronde");
-        assertFalse(handler.chunkWithoutRound(), "deel zonder lopende ronde");
+        assertFalse(handler.roundDirectionFlipped(), "chunk in the opposite direction of the round");
+        assertFalse(handler.chunkWithoutRound(), "chunk without a running round");
     }
 
-    /// @dev Na retire vindt geen Executed-event meer plaats, en de vlag gaat nooit meer terug.
+    /// @dev After retire no Executed event occurs anymore, and the flag never goes back.
     function invariant_noExecutedAfterRetire() public view {
-        assertFalse(handler.executedAfterRetire(), "Executed na retire");
-        assertLe(handler.retires(), 1, "retire slaagde meer dan eens");
-        assertEq(r.retired(), handler.retires() == 1, "retired-vlag wijkt af van de handler");
+        assertFalse(handler.executedAfterRetire(), "Executed after retire");
+        assertLe(handler.retires(), 1, "retire succeeded more than once");
+        assertEq(r.retired(), handler.retires() == 1, "retired flag differs from the handler");
         if (r.retired()) {
-            assertEq(r.dueOwners(0, handler.actorCount()).length, 0, "dueOwners niet leeg na retire");
+            assertEq(r.dueOwners(0, handler.actorCount()).length, 0, "dueOwners not empty after retire");
         }
     }
 }
 
-/// @dev Dezelfde invariants zonder `retire` in de handler. In diepe runs zet `retire` (1 op 8 per aanroep) het contract
-///      bijna altijd vroeg stil, waardoor rondes en delen nauwelijks geraakt worden. Valt onder
+/// @dev The same invariants without `retire` in the handler. In deep runs `retire` (1 in 8 per call) almost always
+///      halts the contract early, so that rounds and chunks are barely hit. Falls under
 ///      `--match-contract RebalancerInvariantTest`.
 contract RebalancerInvariantTestNoRetire is RebalancerInvariantTest {
     function setUp() public override {
         super.setUp();
-        // Startstand: elke actor actief, met saldo en volle allowance, en een EURC/USDC-pool met eindige liquiditeit
-        // (~375 EURC per run), zodat grotere correcties in delen gaan.
+        // Initial state: every actor active, with balance and full allowance, and an EURC/USDC pool with finite
+        // liquidity (~375 EURC per run), so that larger corrections go in chunks.
         uint16[3] memory caps = [uint16(10_000), 1000, 300];
         for (uint256 i = 0; i < handler.actorCount(); i++) {
             address a = handler.actors(i);
@@ -2277,7 +2277,7 @@ contract RebalancerInvariantTestNoRetire is RebalancerInvariantTest {
     }
 }
 
-/// @dev Maakt `_takeFee` aanroepbaar voor de begrenzingstest.
+/// @dev Makes `_takeFee` callable for the cap test.
 contract RebalancerFeeHarness is Rebalancer {
     constructor(Deployment memory d) Rebalancer(d) {}
 
@@ -2286,7 +2286,7 @@ contract RebalancerFeeHarness is Rebalancer {
     }
 }
 
-/// @dev Nep-token voor `sweep`: `balanceOf` roept met msg.sender = Rebalancer diens `setParams` aan.
+/// @dev Fake token for `sweep`: `balanceOf` calls Rebalancer's `setParams` with msg.sender = Rebalancer.
 contract MaliciousSweepToken {
     Rebalancer private immutable _r;
 
@@ -2314,8 +2314,8 @@ contract MaliciousSweepToken {
     }
 }
 
-/// @dev Nep-token voor `sweep` met een schrijvende `transfer`: probeert de run van `victim` binnen te komen en
-///      registreert zichzelf daarna als owner.
+/// @dev Fake token for `sweep` with a writing `transfer`: tries to get into the run of `victim` and
+///      then registers itself as owner.
 contract ReentrantSweepToken {
     Rebalancer private immutable _r;
     address private immutable _victim;

@@ -8,7 +8,7 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {IAggregatorV3} from "../src/interfaces/IAggregatorV3.sol";
 
-/// @dev Alleen voor de cadans-test: `getRoundData` staat niet in de minimale interface van het contract.
+/// @dev Only for the cadence test: `getRoundData` is not in the contract's minimal interface.
 interface IChainlinkRounds {
     function getRoundData(uint80 roundId)
         external
@@ -16,15 +16,15 @@ interface IChainlinkRounds {
         returns (uint80 roundId_, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
 }
 
-/// @notice Integratie tegen Base mainnet (fork). Overslaan met RUN_FORK=false.
+/// @notice Integration against Base mainnet (fork). Skip with RUN_FORK=false.
 contract RebalancerForkTest is Test {
     IERC20 internal constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 internal constant CBBTC = IERC20(0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf);
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
     address internal constant FEED_CBBTC_USD = 0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D;
-    /// @dev EURC/USD met heartbeat 1 uur en deviatie 0,1% (Chainlink-referentiedirectory voor Base); de oude
-    ///      24-uursfeed 0xDAe3…8250 staat daar niet meer in (audit M-2).
+    /// @dev EURC/USD with heartbeat 1 hour and deviation 0.1% (Chainlink reference directory for Base); the old
+    ///      24-hour feed 0xDAe3…8250 is no longer listed there (audit M-2).
     address internal constant FEED_EURC_USD = 0x9867186e52d2F1C2c565CDA6E747101Fa56501e0;
     address internal constant SEQUENCER = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
     address internal constant POOL_EURC_USDC = 0x7279c08A36333e12c3Fc81747963264c100D66fB;
@@ -42,13 +42,13 @@ contract RebalancerForkTest is Test {
             vm.skip(true);
             return;
         }
-        // `FORK_BLOCK` pint een blok (review I-7), zodat de suite reproduceerbaar is; standaard het laatste.
+        // `FORK_BLOCK` pins a block (review I-7), so the suite is reproducible; defaults to the latest.
         string memory rpc = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
         uint256 forkBlock = vm.envOr("FORK_BLOCK", uint256(0));
         if (forkBlock == 0) vm.createSelectFork(rpc);
         else vm.createSelectFork(rpc, forkBlock);
-        // Een fork staat op de stand ná het laatste blok, met diens timestamp. Had dat blok een tickwissel in een van
-        // de pools, dan ziet de blokcheck die als "in dit blok aangeraakt". Begin daarom in een vers blok.
+        // A fork is at the state after the latest block, with its timestamp. If that block had a tick change in one of
+        // the pools, the block check sees it as "touched in this block". So start in a fresh block.
         vm.roll(block.number + 1);
         vm.warp(block.timestamp + 2);
 
@@ -68,19 +68,19 @@ contract RebalancerForkTest is Test {
         );
     }
 
-    /// @notice Meet de afwijking tussen pool-spot en feedkoers; hoort normaal ruim onder 1% te liggen.
+    /// @notice Measures the deviation between pool spot and feed price; should normally be well below 1%.
     function test_fork_spotMatchesOracle() public view {
         uint256 oracle = r.quote();
         uint256 spotPrice = r.spot();
         uint256 diff = spotPrice > oracle ? spotPrice - oracle : oracle - spotPrice;
         console.log("oracle EURC/cbBTC (6 dec):", oracle);
         console.log("spot   EURC/cbBTC (6 dec):", spotPrice);
-        console.log("afwijking in bps:", diff * 10_000 / oracle);
-        assertApproxEqRel(spotPrice, oracle, 0.01e18, "spot wijkt meer dan 1% af van de feeds");
+        console.log("deviation in bps:", diff * 10_000 / oracle);
+        assertApproxEqRel(spotPrice, oracle, 0.01e18, "spot deviates more than 1% from the feeds");
         assertEq(r.quoteChecked(), oracle);
     }
 
-    /// @notice Schuift de cbBTC/USD-feed 1% op: de spot wijkt dan te ver af, execute revert en isDue is false.
+    /// @notice Shifts the cbBTC/USD feed by 1%: the spot then deviates too far, execute reverts and isDue is false.
     function test_fork_spotDeviationBlocksRun() public {
         _fund(buyer, 1000e6, 0);
         (bool due,) = r.isDue(buyer);
@@ -95,7 +95,7 @@ contract RebalancerForkTest is Test {
         );
         uint256 oracle = r.quote();
         uint256 spotPrice = r.spot();
-        assertLt(spotPrice * 10_000, oracle * (10_000 - 50), "opzet: spot moet meer dan 0,5% onder de feed liggen");
+        assertLt(spotPrice * 10_000, oracle * (10_000 - 50), "setup: spot must be more than 0.5% below the feed");
 
         (due,) = r.isDue(buyer);
         assertFalse(due);
@@ -111,9 +111,9 @@ contract RebalancerForkTest is Test {
         assertEq(list[0], buyer);
     }
 
-    /// @notice Review I-4: de echte tokens hebben de decimalen waar de constructor op controleert (EURC 6, cbBTC 8,
-    ///         USDC 6), de deploy in `setUp` met de adressen van het deployscript slaagt dus, en een token met andere
-    ///         decimalen op die adressen wordt geweigerd.
+    /// @notice Review I-4: the real tokens have the decimals the constructor checks for (EURC 6, cbBTC 8,
+    ///         USDC 6), so the deploy in `setUp` with the deploy script's addresses succeeds, and a token with other
+    ///         decimals at those addresses is rejected.
     function test_fork_constructorChecksTokenDecimals() public {
         assertEq(IERC20Metadata(address(EURC)).decimals(), 6, "EURC");
         assertEq(IERC20Metadata(address(CBBTC)).decimals(), 8, "cbBTC");
@@ -139,8 +139,8 @@ contract RebalancerForkTest is Test {
         new Rebalancer(d);
     }
 
-    /// @notice Testgat oracle 3: beide feeds zijn on-chain 8 decimalen, dragen de verwachte beschrijving en zijn
-    ///         verser dan MAX_AGE_*; de sequencer-feed heeft een geïnitialiseerde ronde.
+    /// @notice Test gap oracle 3: both feeds have 8 decimals on-chain, carry the expected description and are
+    ///         fresher than MAX_AGE_*; the sequencer feed has an initialized round.
     function test_fork_feedsAreFreshAndMatchConstants() public view {
         IAggregatorV3 eurcFeed = IAggregatorV3(FEED_EURC_USD);
         IAggregatorV3 btcFeed = IAggregatorV3(FEED_CBBTC_USD);
@@ -153,11 +153,11 @@ contract RebalancerForkTest is Test {
         (, int256 btcAnswer,, uint256 btcUpdatedAt,) = btcFeed.latestRoundData();
         assertGt(eurcAnswer, 0);
         assertGt(btcAnswer, 0);
-        // Toets aan de tolerantie van het contract, niet aan de nominale heartbeat: een late ronde (gemeten 3.632 s)
-        // ligt boven 1 uur maar ruim onder MAX_AGE_EURC.
-        assertLe(block.timestamp - eurcUpdatedAt, r.MAX_AGE_EURC(), "EURC-feed ouder dan MAX_AGE_EURC");
+        // Test against the contract's tolerance, not the nominal heartbeat: a late round (measured 3,632 s)
+        // is above 1 hour but well below MAX_AGE_EURC.
+        assertLe(block.timestamp - eurcUpdatedAt, r.MAX_AGE_EURC(), "EURC feed older than MAX_AGE_EURC");
         assertLe(block.timestamp - btcUpdatedAt, r.MAX_AGE_CBBTC());
-        // EURC/USD hoort rond 1,0–1,3 te liggen (8 decimalen).
+        // EURC/USD should be around 1.0–1.3 (8 decimals).
         assertGt(eurcAnswer, 0.9e8);
         assertLt(eurcAnswer, 1.5e8);
 
@@ -166,9 +166,9 @@ contract RebalancerForkTest is Test {
         assertGt(seqStartedAt, 0);
     }
 
-    /// @notice Testgat oracle 3, de cadans: over de laatste rondes van beide feeds ligt tussen twee opeenvolgende
-    ///         updates nooit meer dan MAX_AGE_*. Zo zijn de constanten getoetst aan de werkelijke heartbeat en niet
-    ///         alleen aan de leeftijd van de laatste ronde.
+    /// @notice Test gap oracle 3, the cadence: over the latest rounds of both feeds there is never more than MAX_AGE_*
+    ///         between two consecutive updates. This tests the constants against the actual heartbeat and not
+    ///         only against the age of the latest round.
     function test_fork_feedCadenceWithinMaxAge() public view {
         _assertCadence(FEED_CBBTC_USD, r.MAX_AGE_CBBTC());
         _assertCadence(FEED_EURC_USD, r.MAX_AGE_EURC());
@@ -179,33 +179,33 @@ contract RebalancerForkTest is Test {
         (uint80 roundId,,, uint256 newerUpdatedAt,) = IAggregatorV3(feed).latestRoundData();
         uint256 checked;
         uint256 largestGap;
-        // Ronde-id = (phaseId << 64) | ronde binnen de fase; binnen één fase aflopen.
+        // Round id = (phaseId << 64) | round within the phase; walk back within one phase.
         while (checked < rounds && uint64(roundId) > 1) {
             roundId--;
             (,,, uint256 updatedAt,) = IChainlinkRounds(feed).getRoundData(roundId);
             uint256 gap = newerUpdatedAt - updatedAt;
             if (gap > largestGap) largestGap = gap;
-            assertLe(gap, maxAge, "gat tussen twee rondes groter dan MAX_AGE");
+            assertLe(gap, maxAge, "gap between two rounds larger than MAX_AGE");
             newerUpdatedAt = updatedAt;
             checked++;
         }
-        console.log(IAggregatorV3(feed).description(), "grootste gat (s):", largestGap);
-        assertEq(checked, rounds, "te weinig rondes in de huidige fase om de cadans te toetsen");
+        console.log(IAggregatorV3(feed).description(), "largest gap (s):", largestGap);
+        assertEq(checked, rounds, "too few rounds in the current phase to test the cadence");
     }
 
-    /// @notice M-1: de spot na de swap ligt binnen de tolerantie; een run van 100 EURC/0,002 cbBTC haalt de
-    ///         post-swap-check ruim en boekt niets extra's.
+    /// @notice M-1: the spot after the swap is within the tolerance; a run of 100 EURC/0.002 cbBTC passes the
+    ///         post-swap check comfortably and books nothing extra.
     function test_fork_postSwapSpotWithinTolerance() public {
         _fund(buyer, 1000e6, 0);
         r.execute(buyer, keeper);
         uint256 oracle = r.quote();
         uint256 spotAfter = r.spot();
         uint256 diff = spotAfter > oracle ? spotAfter - oracle : oracle - spotAfter;
-        assertLe(diff * 10_000, oracle * 50, "spot na de swap buiten 0,5%");
+        assertLe(diff * 10_000, oracle * 50, "spot after the swap outside 0.5%");
         assertEq(r.quoteChecked(), oracle);
     }
 
-    /// @notice Meet het gas van een echte koop en verkoop, zodat een wekker weet wat hij moet begroten.
+    /// @notice Measures the gas of a real buy and sell, so a keeper knows what to budget.
     function test_fork_buyAndSellGasCost() public {
         _fund(buyer, 1000e6, 0);
         _fund(seller, 0, 2_000_000);
@@ -217,8 +217,8 @@ contract RebalancerForkTest is Test {
         uint256 buyGas = g - gasleft();
         uint64 buyTime = uint64(vm.getBlockTimestamp());
 
-        // De koop kan de tick van een pool veranderen; dan weigert de blokcheck een tweede run in hetzelfde blok
-        // (PoolTouchedThisBlock). De verkoop gaat daarom in het volgende blok, zoals een wekker dat ook doet.
+        // The buy can change the tick of a pool; then the block check rejects a second run in the same block
+        // (PoolTouchedThisBlock). So the sell goes in the next block, as a keeper would do too.
         vm.roll(block.number + 1);
         vm.warp(vm.getBlockTimestamp() + 2);
         vm.expectEmit(true, false, false, false, address(r));
@@ -227,11 +227,11 @@ contract RebalancerForkTest is Test {
         r.execute(seller, keeper);
         uint256 sellGas = g - gasleft();
 
-        console.log("gas koop:", buyGas, "gas verkoop:", sellGas);
+        console.log("gas buy:", buyGas, "gas sell:", sellGas);
         assertEq(r.lastExecutedAt(buyer), buyTime);
         assertEq(r.lastExecutedAt(seller), uint64(vm.getBlockTimestamp()));
-        assertLt(buyGas, 1_000_000, "koop past niet meer in het begrote gas");
-        assertLt(sellGas, 1_000_000, "verkoop past niet meer in het begrote gas");
+        assertLt(buyGas, 1_000_000, "buy no longer fits in the budgeted gas");
+        assertLt(sellGas, 1_000_000, "sell no longer fits in the budgeted gas");
     }
 
     function _params() internal pure returns (Rebalancer.Params memory) {
@@ -279,15 +279,15 @@ contract RebalancerForkTest is Test {
         emit Rebalancer.Executed(buyer, true, 100e6, 250_000, 50_000, keeper, 0, 0, 1000e6, 0);
         r.execute(buyer, keeper);
 
-        assertEq(EURC.balanceOf(buyer), 900e6, "100 EURC verplaatst");
-        assertGt(CBBTC.balanceOf(buyer), 0, "owner ontvangt cbBTC");
-        assertEq(EURC.balanceOf(keeper), 50_000, "beloning");
-        assertEq(EURC.balanceOf(treasury), 200_000, "treasury-fee");
+        assertEq(EURC.balanceOf(buyer), 900e6, "100 EURC moved");
+        assertGt(CBBTC.balanceOf(buyer), 0, "owner receives cbBTC");
+        assertEq(EURC.balanceOf(keeper), 50_000, "reward");
+        assertEq(EURC.balanceOf(treasury), 200_000, "treasury fee");
         assertEq(EURC.balanceOf(address(r)), 0);
         assertEq(CBBTC.balanceOf(address(r)), 0);
         assertEq(r.lastExecutedAt(buyer), uint64(block.timestamp));
 
-        // Ontvangen cbBTC ligt binnen 1% van de feedkoers (99,75 EURC na fee).
+        // Received cbBTC is within 1% of the feed price (99.75 EURC after fee).
         uint256 expected = 99_750_000 * 1e8 / r.quote();
         assertApproxEqRel(CBBTC.balanceOf(buyer), expected, 0.01e18);
 
@@ -300,28 +300,28 @@ contract RebalancerForkTest is Test {
     }
 
     function test_fork_sellRun() public {
-        _fund(seller, 0, 2_000_000); // 0,02 cbBTC
+        _fund(seller, 0, 2_000_000); // 0.02 cbBTC
 
         uint256 price = r.quote();
         uint256 total = 2_000_000 * price / 1e8;
         (bool due, int256 delta) = r.isDue(seller);
         assertTrue(due);
-        // L-C: de delta is de waarde van de naar boven afgeronde sats, dus hooguit 1 sat boven de cap van 10%.
+        // L-C: the delta is the value of the rounded-up sats, so at most 1 sat above the 10% cap.
         uint256 sats = (total / 10 * 1e8 + price - 1) / price;
-        assertEq(delta, -int256(sats * price / 1e8), "cap 10% van de totale waarde, als verkochte sats");
+        assertEq(delta, -int256(sats * price / 1e8), "cap 10% of the total value, as sold sats");
 
         vm.expectEmit(true, false, false, false, address(r));
         emit Rebalancer.Executed(seller, false, 0, 0, 0, keeper, 0, 0, 0, 0);
         r.execute(seller, keeper);
 
         uint256 btcSold = 2_000_000 - CBBTC.balanceOf(seller);
-        assertApproxEqAbs(btcSold, 200_000, 1, "10% van de positie verkocht");
+        assertApproxEqAbs(btcSold, 200_000, 1, "10% of the position sold");
         uint256 received = EURC.balanceOf(seller);
-        assertGt(received, 0, "owner ontvangt EURC");
+        assertGt(received, 0, "owner receives EURC");
         assertApproxEqRel(received, btcSold * price / 1e8 * 9975 / 10_000, 0.01e18);
-        assertEq(EURC.balanceOf(keeper), 50_000, "beloning");
-        assertGt(EURC.balanceOf(treasury), 0, "treasury-fee");
-        // fee = 25 bps over max(ontvangen, verwachte opbrengst tegen de oracle) = reward + treasury (audit L-B).
+        assertEq(EURC.balanceOf(keeper), 50_000, "reward");
+        assertGt(EURC.balanceOf(treasury), 0, "treasury fee");
+        // fee = 25 bps over max(received, expected proceeds at the oracle price) = reward + treasury (audit L-B).
         uint256 fee = EURC.balanceOf(keeper) + EURC.balanceOf(treasury);
         uint256 feeBase = received + fee;
         uint256 expectedOut = btcSold * price / 1e8;

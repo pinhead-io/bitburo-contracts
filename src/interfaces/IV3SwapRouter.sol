@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.37;
 
-/// @notice De twee aanroepen op Uniswap SwapRouter02 die de Rebalancer doet. Zelf geschreven voor dit contract (review
-///         I-3); alleen namen, veldvolgorde en ABI-typen liggen vast.
+/// @notice The two calls on Uniswap SwapRouter02 that the Rebalancer makes. Written from scratch for this contract
+///         (review I-3); only names, field order and ABI types are fixed.
 interface IV3SwapRouter {
-    /// @dev Swap over een pad met een vaste input. SwapRouter02 kent hier geen `deadline`-veld, anders dan de eerste
-    ///      SwapRouter. `path` is token, fee (3 bytes), token, fee, token, aaneengesloten.
+    /// @dev Swap along a path with a fixed input. Unlike the first SwapRouter, SwapRouter02 has no `deadline` field
+    ///      here. `path` is token, fee (3 bytes), token, fee, token, concatenated.
     struct ExactInputParams {
         bytes path;
         address recipient;
@@ -13,9 +13,9 @@ interface IV3SwapRouter {
         uint256 amountOutMinimum;
     }
 
-    /// @return amountOut Wat `recipient` van het laatste token ontvangt.
+    /// @return amountOut What `recipient` receives of the last token.
     function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
 
-    /// @dev De Uniswap v3-factory waarvan de router de pools gebruikt.
+    /// @dev The Uniswap v3 factory whose pools the router uses.
     function factory() external view returns (address);
 }

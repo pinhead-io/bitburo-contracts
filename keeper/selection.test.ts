@@ -75,8 +75,8 @@ describe("runSizeSkipReason", () => {
   test("skips runs below the minimum in both directions", () => {
     expect(runSizeSkipReason(20n * EURC_UNIT, 20)).toBeNull();
     expect(runSizeSkipReason(-20n * EURC_UNIT, 20)).toBeNull();
-    expect(runSizeSkipReason(19_999_999n, 20)).toBe("run te klein (19.999999 EURC < 20 EURC)");
-    expect(runSizeSkipReason(-100n, 20)).toContain("te klein");
+    expect(runSizeSkipReason(19_999_999n, 20)).toBe("run too small (19.999999 EURC < 20 EURC)");
+    expect(runSizeSkipReason(-100n, 20)).toContain("too small");
   });
 
   test("has no upper bound: the open keeper has no gas cap", () => {
@@ -89,7 +89,7 @@ describe("runSizeSkipReason", () => {
 
   test("a fractional minimum does not throw and rounds up", () => {
     expect(runSizeSkipReason(20_500_000n, 20.5)).toBeNull();
-    expect(runSizeSkipReason(20_499_999n, 20.5)).toContain("te klein");
+    expect(runSizeSkipReason(20_499_999n, 20.5)).toContain("too small");
   });
 });
 
@@ -97,7 +97,7 @@ describe("block window reverts", () => {
   test("only the block check and block window errors count as temporary", () => {
     expect(isBlockWindowRevert("PoolTouchedThisBlock")).toBe(true);
     expect(isBlockWindowRevert("BlockMoveExceeded")).toBe(true);
-    // Bestaat niet meer in het contract sinds de blokcheck.
+    // No longer exists in the contract since the block check.
     expect(isBlockWindowRevert("BlockStartUnknown")).toBe(false);
     expect(isBlockWindowRevert("SpotDeviatesFromOracle")).toBe(false);
     expect(isBlockWindowRevert("NotDue")).toBe(false);
@@ -112,13 +112,13 @@ describe("block window reverts", () => {
     expect(failureAction("PoolTouchedThisBlock", 1_540, deadline)).toBe("skip");
     expect(failureAction("BlockMoveExceeded", 1_000, deadline)).toBe("retry");
     expect(failureAction("BlockMoveExceeded", 2_000, deadline)).toBe("skip");
-    // Budget 0: nooit een nieuwe poging.
+    // Budget 0: never a new attempt.
     expect(failureAction("BlockMoveExceeded", 1_000, retryDeadline(1_000, 0))).toBe("skip");
   });
 
   test("the budget is time, not a number of attempts: many blocked blocks keep retrying", () => {
     const deadline = retryDeadline(0, 540);
-    // Elke 2 s een blok: 269 geblokkeerde blokken achter elkaar blijven "retry".
+    // A block every 2 s: 269 blocked blocks in a row stay "retry".
     for (let t = 0; t < 540; t += 2) {
       expect(failureAction("PoolTouchedThisBlock", t, deadline)).toBe("retry");
     }
@@ -142,7 +142,7 @@ describe("block window reverts", () => {
     expect(isTemporaryFailure({ errorName: undefined, resimulationPassed: true })).toBe(true);
     expect(failureAction({ errorName: undefined, resimulationPassed: true }, 0, 540)).toBe("retry");
     expect(failureAction({ errorName: undefined, resimulationPassed: true }, 540, 540)).toBe("skip");
-    // Geeft de hersimulatie een echte fout, dan telt die.
+    // If the re-simulation gives a real error, that one counts.
     expect(isTemporaryFailure({ errorName: "SpotDeviatesFromOracle", resimulationPassed: false })).toBe(false);
   });
 });
@@ -153,22 +153,22 @@ describe("on-chain revert verdict (L-3)", () => {
       failure: { errorName: undefined, resimulationPassed: true },
       blockade: true,
     });
-    // Bijvoorbeeld een feed-update eerder in het blok, zonder pool-log van een aanraker vóór ons: geen hogere tip, wel
-    // tijdelijk (geen cool-down). Een andere keeper laat wél Swap-logs achter; die gevallen staan hieronder.
+    // For example a feed update earlier in the block, without a pool log of a toucher before us: no higher tip, but
+    // temporary (no cool-down). Another keeper does leave Swap logs; those cases are below.
     const noTouch = onchainRevertVerdict({ kind: "passed" }, false);
     expect(noTouch.blockade).toBe(false);
     expect(failureAction(noTouch.failure, 0, 540)).toBe("retry");
   });
 
   test("an Executed log for the same owner before us: served by another keeper, no blockade, no retry, no cool-down (F-1)", () => {
-    // Keeper A voerde de owner eerder in het blok uit: zijn swaps staan als pool-logs vóór ons (touched = true), en de
-    // hersimulatie op het begin van het blok slaagt. Toch geen blokkade.
+    // Keeper A executed the owner earlier in the block: its swaps are pool logs before us (touched = true), and the
+    // re-simulation at the start of the block passes. Still no blockade.
     const v = onchainRevertVerdict({ kind: "passed" }, true, true);
     expect(v.blockade).toBe(false);
     expect(v.failure.servedByOther).toBe(true);
     expect(failureAction(v.failure, 0, 540)).toBe("skip");
     expect(failureAction(v.failure, 1_000, 540)).toBe("skip");
-    // Ook als de hersimulatie iets anders zegt: bediend gaat voor.
+    // Also when the re-simulation says something else: served takes precedence.
     expect(onchainRevertVerdict({ kind: "reverted", errorName: "SpotDeviatesFromOracle" }, true, true).failure.servedByOther).toBe(true);
   });
 
@@ -198,7 +198,7 @@ describe("re-reading a dueOwners page (review I-1)", () => {
   });
 
   test("a page is read at least twice, then only while a read still finds someone new", () => {
-    // Eerste lezing leeg (bijvoorbeeld een pool aangeraakt in dat blok): toch een tweede lezing.
+    // First read empty (for example a pool touched in that block): still a second read.
     expect(shouldReadPageAgain(0, 1, 4)).toBe(true);
     expect(shouldReadPageAgain(2, 1, 4)).toBe(true);
     expect(shouldReadPageAgain(0, 2, 4)).toBe(false);
@@ -234,9 +234,9 @@ describe("next-block overrides (L-3)", () => {
     const overrides = { number: 0x3104000n, time: 0x6aab1000n };
     const word = (v: bigint) => v.toString(16).padStart(64, "0");
     expect(overridesApplied(`0x${word(0x6aab1000n)}${word(0x3104000n)}`, overrides)).toBe(true);
-    // Node negeert de override: de echte waarden.
+    // Node ignores the override: the real values.
     expect(overridesApplied(`0x${word(0x6aab0227n)}${word(0x3103fffn)}`, overrides)).toBe(false);
-    // Alleen de tijd toegepast.
+    // Only the time applied.
     expect(overridesApplied(`0x${word(0x6aab1000n)}${word(0x3103fffn)}`, overrides)).toBe(false);
     expect(overridesApplied("0x", overrides)).toBe(false);
     expect(overridesApplied(undefined, overrides)).toBe(false);
@@ -251,8 +251,8 @@ describe("priority fee (L-3)", () => {
     expect(parseGwei("0.05")).toBe(50_000_000n);
     expect(parseGwei("3")).toBe(3n * GWEI);
     expect(parseGwei("0.000000001")).toBe(1n);
-    expect(() => parseGwei("0.0000000001")).toThrow("geen geldig aantal gwei");
-    expect(() => parseGwei("-1")).toThrow("geen geldig aantal gwei");
+    expect(() => parseGwei("0.0000000001")).toThrow("not a valid gwei amount");
+    expect(() => parseGwei("-1")).toThrow("not a valid gwei amount");
     expect(formatGwei(50_000_000n)).toBe("0.05");
     expect(formatGwei(3n * GWEI)).toBe("3");
   });
@@ -268,13 +268,13 @@ describe("priority fee (L-3)", () => {
   });
 
   test("a known blocker tip is outbid by at least 10% when that is more than doubling", () => {
-    // Aanraker op 1 gwei, keeper op 0,05: direct 1,1 gwei (+1 wei), niet 0,1.
+    // Toucher at 1 gwei, keeper at 0.05: straight to 1.1 gwei (+1 wei), not 0.1.
     expect(nextPriorityFee(policy.base, GWEI, policy)).toBe(1_100_000_001n);
-    // Aanraker lager dan het dubbele van de eigen tip: verdubbelen.
+    // Toucher lower than double our own tip: double.
     expect(nextPriorityFee(parseGwei("0.4"), parseGwei("0.2"), policy)).toBe(parseGwei("0.8"));
-    // Tip 0 van de aanraker (goedkoopste blokkade): toch verdubbelen.
+    // Tip 0 from the toucher (cheapest blockade): still double.
     expect(nextPriorityFee(policy.base, 0n, policy)).toBe(parseGwei("0.1"));
-    // Nooit boven het plafond, ook niet tegen een aanraker op 10 gwei.
+    // Never above the cap, not even against a toucher at 10 gwei.
     expect(nextPriorityFee(policy.base, 10n * GWEI, policy)).toBe(policy.max);
   });
 
@@ -283,14 +283,14 @@ describe("priority fee (L-3)", () => {
   });
 
   test("maxFeePerGas is twice the base fee plus the tip", () => {
-    // Base fee 0,005 gwei (minimum op Base) en tip 0,05 gwei.
+    // Base fee 0.005 gwei (minimum on Base) and tip 0.05 gwei.
     expect(maxFeePerGas(5_000_000n, 50_000_000n)).toBe(60_000_000n);
   });
 
   test("effective tip of an included transaction", () => {
     const baseFee = 5_000_000n;
     expect(effectiveTip({ maxPriorityFeePerGas: 1_000_000n, maxFeePerGas: 100_000_000n }, baseFee)).toBe(1_000_000n);
-    // maxFeePerGas begrenst de tip.
+    // maxFeePerGas caps the tip.
     expect(effectiveTip({ maxPriorityFeePerGas: 1n * GWEI, maxFeePerGas: 6_000_000n }, baseFee)).toBe(1_000_000n);
     // Legacy: gasPrice - base fee.
     expect(effectiveTip({ gasPrice: 7_000_000n }, baseFee)).toBe(2_000_000n);
@@ -313,7 +313,7 @@ describe("priority fee (L-3)", () => {
     expect(startPriorityFee(undefined, 10_000, policy, 3600)).toBe(policy.base);
     expect(startPriorityFee(state, 10_000 + 3599, policy, 3600)).toBe(2n * GWEI);
     expect(startPriorityFee(state, 10_000 + 3600, policy, 3600)).toBe(policy.base);
-    // Buiten het beleid (bijvoorbeeld een lager plafond na een configwijziging): begrensd.
+    // Outside the policy (for example a lower cap after a config change): capped.
     expect(startPriorityFee({ ...state, priorityFeeWei: (10n * GWEI).toString() }, 10_000, policy, 3600)).toBe(policy.max);
     expect(startPriorityFee({ ...state, priorityFeeWei: "1" }, 10_000, policy, 3600)).toBe(policy.base);
   });
@@ -328,12 +328,12 @@ describe("priority fee (L-3)", () => {
   test("after a blockade the next send waits a random 1 to 59 blocks, 30 on average", () => {
     expect(nextSendBlock(1_000n, 30, 0)).toBe(1_001n);
     expect(nextSendBlock(1_000n, 30, 0.999_999)).toBe(1_059n);
-    // Uniform over 59 blokken: het midden is 30.
+    // Uniform over 59 blocks: the middle is 30.
     expect(nextSendBlock(1_000n, 30, 29 / 59)).toBe(1_030n);
     let sum = 0n;
     for (let i = 0; i < 59; i++) sum += nextSendBlock(0n, 30, i / 59);
     expect(sum / 59n).toBe(30n);
-    // SEND_RETRY_BLOCKS = 1: altijd het volgende blok.
+    // SEND_RETRY_BLOCKS = 1: always the next block.
     expect(nextSendBlock(1_000n, 1, 0.7)).toBe(1_001n);
   });
 });
@@ -355,14 +355,14 @@ describe("competing keepers (final review F-1)", () => {
     expect(isDirectExecute({ to: null, input: execInput }, REBALANCER)).toBe(false);
 
     const txs = [
-      { transactionIndex: 1, to: REBALANCER, input: execInput, tip: 3n * GWEI }, // andere keeper
-      { transactionIndex: 2, to: OTHER, input: "0x12345678" as `0x${string}`, tip: 7n }, // aanraker
-      { transactionIndex: 9, to: OTHER, input: "0x12345678" as `0x${string}`, tip: 100n }, // na ons
+      { transactionIndex: 1, to: REBALANCER, input: execInput, tip: 3n * GWEI }, // other keeper
+      { transactionIndex: 2, to: OTHER, input: "0x12345678" as `0x${string}`, tip: 7n }, // toucher
+      { transactionIndex: 9, to: OTHER, input: "0x12345678" as `0x${string}`, tip: 100n }, // after us
     ];
     const blocking = blockingTransactions(txs, 5, REBALANCER);
     expect(blocking.map((tx) => tx.transactionIndex)).toEqual([2]);
     expect(blockerTip(blocking, 5)).toBe(7n);
-    // Alleen een andere keeper vóór ons: geen aanraker, dus geen blokkade.
+    // Only another keeper before us: no toucher, so no blockade.
     expect(blockingTransactions(txs.slice(0, 1), 5, REBALANCER)).toEqual([]);
   });
 
@@ -419,7 +419,7 @@ describe("competing keepers (final review F-1)", () => {
   });
 
   test("eurcToWei converts with two 8-decimal Chainlink answers", () => {
-    // 0,05 EURC, EURC/USD 1,146, ETH/USD 2.403,58: 0,05 × 1,146 / 2.403,58 ETH = 23.839.439.502.741 wei (afgerond naar beneden).
+    // 0.05 EURC, EURC/USD 1.146, ETH/USD 2,403.58: 0.05 × 1.146 / 2,403.58 ETH = 23,839,439,502,741 wei (rounded down).
     expect(eurcToWei(50_000n, 114_600_000n, 240_358_000_000n)).toBe(23_839_439_502_741n);
     expect(eurcToWei(50_000n, 0n, 240_358_000_000n)).toBe(0n);
     expect(eurcToWei(50_000n, 114_600_000n, -1n)).toBe(0n);
@@ -428,20 +428,20 @@ describe("competing keepers (final review F-1)", () => {
   test("the tip cap: tip × gas never above the reward share plus the budget", () => {
     const rewardWei = eurcToWei(50_000n, 114_600_000n, 240_358_000_000n);
     const gasEstimate = 500_000n;
-    // Alleen de beloning (budget 0): 23.839.439.502.741 wei / 500.000 gas = 47.678.879 wei ≈ 0,048 gwei < basis -> basis.
+    // Only the reward (budget 0): 23,839,439,502,741 wei / 500,000 gas = 47,678,879 wei ≈ 0.048 gwei < base -> base.
     const rewardOnly = capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 0n, gasEstimate });
     expect(rewardOnly.max).toBe(policy.base);
-    // Budget 0,0005 ETH: (23.839.439.502.741 + 5 × 10^14) / 500.000 = 1.047.678.879 wei ≈ 1,05 gwei.
+    // Budget 0.0005 ETH: (23,839,439,502,741 + 5 × 10^14) / 500,000 = 1,047,678,879 wei ≈ 1.05 gwei.
     const withBudget = capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 500_000_000_000_000n, gasEstimate });
     expect(withBudget.max).toBe(1_047_678_879n);
     expect(withBudget.max * gasEstimate).toBeLessThanOrEqual(rewardWei + 500_000_000_000_000n);
-    // Half van de beloning: de helft van dat deel.
+    // Half of the reward: half of that share.
     expect(capFeePolicy(policy, { rewardWei, rewardShareBps: 5_000n, budgetWei: 500_000_000_000_000n, gasEstimate }).max).toBe(
       (rewardWei / 2n + 500_000_000_000_000n) / gasEstimate,
     );
-    // Een ruim budget verandert het geconfigureerde plafond niet.
+    // A generous budget does not change the configured cap.
     expect(capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 10n ** 18n, gasEstimate }).max).toBe(policy.max);
-    // Escalatie stopt op het plafond, wat de concurrent ook biedt.
+    // Escalation stops at the cap, whatever the competitor bids.
     let fee = policy.base;
     for (let i = 0; i < 10; i++) fee = nextPriorityFee(fee, 3n * GWEI, withBudget);
     expect(fee).toBe(withBudget.max);
@@ -451,13 +451,13 @@ describe("competing keepers (final review F-1)", () => {
     const rewardWei = eurcToWei(50_000n, 114_600_000n, 240_358_000_000n);
     const gasEstimate = 500_000n;
     const defaults = capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 1_500_000_000_000_000n, gasEstimate });
-    // (2,4e13 + 1,5e15) / 500.000 ≈ 3,05 gwei: boven MAX_PRIORITY_FEE_GWEI, dus het plafond is 3 gwei.
+    // (2.4e13 + 1.5e15) / 500,000 ≈ 3.05 gwei: above MAX_PRIORITY_FEE_GWEI, so the cap is 3 gwei.
     expect((rewardWei + 1_500_000_000_000_000n) / gasEstimate).toBeGreaterThan(policy.max);
     expect(defaults.max).toBe(policy.max);
-    // De beloning is ~1,6% van het budget; zonder beloning blijft het plafond gelijk.
+    // The reward is ~1.6% of the budget; without a reward the cap stays the same.
     expect((rewardWei * 1_000n) / 1_500_000_000_000_000n).toBe(15n);
     expect(capFeePolicy(policy, { rewardWei: 0n, rewardShareBps: BPS, budgetWei: 1_500_000_000_000_000n, gasEstimate }).max).toBe(policy.max);
-    // Na één blokkade met een hoge aanrakerstip staat de tip meteen op het plafond.
+    // After one blockade with a high toucher tip the tip is at the cap right away.
     expect(nextPriorityFee(policy.base, 5n * GWEI, defaults)).toBe(defaults.max);
   });
 });
@@ -499,14 +499,14 @@ describe("register scan rotation (final review F-2)", () => {
   test("the next run starts where this one stopped, or at the first candidate it did not read", () => {
     expect(nextScanOffset(12_500n, null, 20_001n)).toBe(12_500n);
     expect(nextScanOffset(12_500n, 3_000n, 20_001n)).toBe(3_000n);
-    // Hele register gelezen: scannedTo is weer de start.
+    // Whole register read: scannedTo is the start again.
     expect(nextScanOffset(20_001n, null, 20_001n)).toBe(0n);
     expect(nextScanOffset(7n, null, 0n)).toBe(0n);
   });
 
   test("verification 579f763 (info c): after a crash the next run resumes at the first unread register candidate", () => {
     const owner = (i: number) => `0x${i.toString(16).padStart(40, "0")}` as Address;
-    // Kandidaten: twee uit OWNERS_FILE (geen plek), dan register-plekken 12.100, 12.340 en 12.410.
+    // Candidates: two from OWNERS_FILE (no position), then register positions 12,100, 12,340 and 12,410.
     const candidates = [
       { owner: owner(1), index: null },
       { owner: owner(2), index: null },
@@ -515,19 +515,19 @@ describe("register scan rotation (final review F-2)", () => {
       { owner: owner(5), index: 12_410n },
     ];
     const batches = chunks(candidates, 2);
-    // Fout in de tweede portie: die portie en alles erna is nog niet gelezen.
+    // Error in the second batch: that batch and everything after it has not been read yet.
     const pending = batches.slice(1).flat();
     expect(firstRegisterIndex(pending)).toBe(12_100n);
     expect(nextScanOffset(12_500n, firstRegisterIndex(pending), 20_001n)).toBe(12_100n);
-    // Fout in de laatste portie.
+    // Error in the last batch.
     expect(firstRegisterIndex(batches.slice(2).flat())).toBe(12_410n);
-    // Fout ná alle porties (in de retry-wachtrij) of alleen OWNERS_FILE over: waar het zoeken stopte.
+    // Error after all batches (in the retry queue) or only OWNERS_FILE left: where the search stopped.
     expect(nextScanOffset(12_500n, firstRegisterIndex([]), 20_001n)).toBe(12_500n);
     expect(nextScanOffset(12_500n, firstRegisterIndex(candidates.slice(0, 2)), 20_001n)).toBe(12_500n);
   });
 
   test("with spam in front of a real owner, the rotation reaches him within ceil(count / per run) runs", () => {
-    // 20.000 spam-adressen op 0..19.999, de echte owner op 20.000; per run passen 3.000 owners in de zoektijd.
+    // 20,000 spam addresses at 0..19,999, the real owner at 20,000; 3,000 owners fit in the search time per run.
     const count = 20_001n;
     const perRun = 3_000n;
     let start = 0n;
@@ -556,16 +556,16 @@ describe("register scan rotation (final review F-2)", () => {
     expect(parseScanState(undefined)).toBe(0n);
     expect(parseScanState("{}")).toBe(0n);
     expect(parseScanState('{"nextOffset":-1}')).toBe(0n);
-    expect(parseScanState("geen json")).toBe(0n);
+    expect(parseScanState("not json")).toBe(0n);
   });
 
   test("parseOwnersFile: addresses separated by lines, spaces or commas, comments, deduplicated", () => {
-    const text = `# eigen gebruikers\n${OWNER}\n${OTHER}, ${OWNER.toLowerCase()}  # dubbel\n\n`;
+    const text = `# own users\n${OWNER}\n${OTHER}, ${OWNER.toLowerCase()}  # duplicate\n\n`;
     expect(parseOwnersFile(text.replace(OWNER, getAddress(OWNER)))).toEqual([getAddress(OWNER), OTHER]);
-    // Verificatie 579f763 (K-1): een foute checksum komt er niet door; viem zou elke lezing voor die portie laten falen.
-    expect(() => parseOwnersFile(OWNER)).toThrow("ongeldige checksum");
+    // Verification 579f763 (K-1): a wrong checksum does not get through; viem would make every read for that batch fail.
+    expect(() => parseOwnersFile(OWNER)).toThrow("invalid checksum");
     expect(parseOwnersFile("")).toEqual([]);
-    expect(() => parseOwnersFile("0x123")).toThrow("geen geldig adres");
+    expect(() => parseOwnersFile("0x123")).toThrow("not a valid address");
   });
 });
 
@@ -579,7 +579,7 @@ describe("RPC URL in logs (verification 579f763, info b)", () => {
     expect(maskRpcUrl(query)).toBe("https://rpc.example.org/***");
     expect(maskRpcUrl(creds)).toBe("https://node.example.org:8545/***");
     expect(maskRpcUrl("https://mainnet.base.org")).toBe("https://mainnet.base.org");
-    expect(maskRpcUrl("geen url")).toBe("***");
+    expect(maskRpcUrl("not a url")).toBe("***");
   });
 
   test("a viem error message loses the key in path, query and credentials, in every form", () => {
@@ -605,7 +605,7 @@ describe("RPC URL in logs (verification 579f763, info b)", () => {
     expect(redactRpcUrl("HTTP request failed.", alchemy)).toBe("HTTP request failed.");
     expect(redactRpcUrl("v2 / base", alchemy)).toBe("v2 / base");
     expect(redactRpcUrl("URL: https://mainnet.base.org", "https://mainnet.base.org")).toBe("URL: https://mainnet.base.org");
-    expect(redactRpcUrl("tekst", "")).toBe("tekst");
+    expect(redactRpcUrl("text", "")).toBe("text");
   });
 });
 
@@ -627,11 +627,11 @@ describe("quietRevertSendBlock (verification 579f763, info a)", () => {
   });
 
   test("a direct execute of another party is no blockade, and with the wait the keeper no longer sends every block", () => {
-    // Elke poging revert on-chain; de hersimulatie slaagt en vóór ons stond alleen een directe execute (geen aanraker).
+    // Every attempt reverts on-chain; the re-simulation passes and before us was only a direct execute (no toucher).
     const verdict = onchainRevertVerdict({ kind: "passed" }, false, false);
     expect(verdict.blockade).toBe(false);
     expect(isTemporaryFailure(verdict.failure)).toBe(true);
-    // Simuleer 300 blokken (~10 minuten): hoeveel transacties verstuurt de keeper?
+    // Simulate 300 blocks (~10 minutes): how many transactions does the keeper send?
     let sendFrom: bigint | null = null;
     let reverts = 0;
     let sent = 0;
@@ -642,7 +642,7 @@ describe("quietRevertSendBlock (verification 579f763, info a)", () => {
       const from = quietRevertSendBlock(block, reverts, 30);
       if (from !== null && (sendFrom === null || from > sendFrom)) sendFrom = from;
     }
-    // Vroeger 300 gerevertte transacties. Nu in de blokken 1, 2, 4, 12, 28 en daarna elke 30 blokken vanaf 44: 14.
+    // Before: 300 reverted transactions. Now in blocks 1, 2, 4, 12, 28 and then every 30 blocks from 44: 14.
     expect(sent).toBe(14);
   });
 });
@@ -658,7 +658,7 @@ describe("nextAttemptBlock", () => {
   test("after a blockade not before the drawn send block (L-3)", () => {
     expect(nextAttemptBlock(105n, 100n, 130n)).toEqual({ target: 130n, throttled: true });
     expect(nextAttemptBlock(null, null, 130n)).toEqual({ target: 130n, throttled: true });
-    // Throttle al voorbij: gewoon het volgende blok.
+    // Throttle already passed: just the next block.
     expect(nextAttemptBlock(140n, 100n, 130n)).toEqual({ target: 141n, throttled: false });
   });
 });
@@ -713,14 +713,14 @@ describe("cool-down", () => {
     const state = recordFailure({}, OWNER, 1000, "x", policy);
     expect(parseCooldownState(JSON.stringify(state))).toEqual(state);
     expect(parseCooldownState("{}")).toEqual({});
-    expect(() => parseCooldownState("[]")).toThrow("geen JSON-object");
-    expect(() => parseCooldownState('{"0xabc":{"until":"soon"}}')).toThrow("ongeldige regel");
+    expect(() => parseCooldownState("[]")).toThrow("not a JSON object");
+    expect(() => parseCooldownState('{"0xabc":{"until":"soon"}}')).toThrow("invalid entry");
   });
 });
 
 describe("register spam filter (lead 9)", () => {
   const FLOOR = 20n * EURC_UNIT;
-  // 100.000 EURC per cbBTC (EURC-basiseenheden per cbBTC, zoals quote()).
+  // 100,000 EURC per cbBTC (EURC base units per cbBTC, like quote()).
   const PRICE = 100_000n * EURC_UNIT;
   const empty: OwnerFunds = {
     owner: OWNER,
@@ -746,12 +746,12 @@ describe("register spam filter (lead 9)", () => {
     expect(isCandidate({ ...empty, eurcBalance: FLOOR, eurcAllowance: max }, PRICE, FLOOR)).toBe(true);
     expect(isCandidate({ ...empty, eurcBalance: FLOOR - 1n, eurcAllowance: max }, PRICE, FLOOR)).toBe(false);
     expect(isCandidate({ ...empty, eurcBalance: 1_000n * EURC_UNIT, eurcAllowance: FLOOR - 1n }, PRICE, FLOOR)).toBe(false);
-    // 39,99 EURC is genoeg voor een run van 20 EURC: het contract kan die owner uitvoeren, dus hij blijft.
+    // 39.99 EURC is enough for a run of 20 EURC: the contract can execute that owner, so he stays.
     expect(isCandidate({ ...empty, eurcBalance: 39_990_000n, eurcAllowance: max }, PRICE, FLOOR)).toBe(true);
   });
 
   test("sell side: min(cbBTC balance, allowance) valued at quote() must reach the minimum run, rounded down", () => {
-    // 20 EURC bij 100.000 EURC per cbBTC = 20.000 sat.
+    // 20 EURC at 100,000 EURC per cbBTC = 20,000 sat.
     expect(isCandidate({ ...empty, cbbtcBalance: 20_000n, cbbtcAllowance: max }, PRICE, FLOOR)).toBe(true);
     expect(isCandidate({ ...empty, cbbtcBalance: 19_999n, cbbtcAllowance: max }, PRICE, FLOOR)).toBe(false);
     expect(isCandidate({ ...empty, cbbtcBalance: CBBTC_UNIT, cbbtcAllowance: 19_999n }, PRICE, FLOOR)).toBe(false);
@@ -772,7 +772,7 @@ describe("register spam filter (lead 9)", () => {
       { ...empty, owner: C, cbbtcBalance: CBBTC_UNIT, cbbtcAllowance: max },
     ];
     expect(filterCandidates(rows, PRICE, FLOOR)).toEqual([A, C]);
-    // 10.000 lege spam-registraties laten geen enkele kandidaat over.
+    // 10,000 empty spam registrations leave not a single candidate.
     expect(filterCandidates(Array.from({ length: 10_000 }, () => empty), PRICE, FLOOR)).toEqual([]);
   });
 
@@ -796,7 +796,7 @@ describe("lock (final review I-5)", () => {
     const lock = { pid: 4242, startedAt: 1_789_600_000 };
     expect(parseLock(formatLock(lock), 0)).toEqual(lock);
     expect(parseLock("4242\n", 1_789_500_000)).toEqual({ pid: 4242, startedAt: 1_789_500_000 });
-    expect(parseLock("rommel", 7)).toEqual({ pid: 0, startedAt: 7 });
+    expect(parseLock("garbage", 7)).toEqual({ pid: 0, startedAt: 7 });
   });
 
   test("a young lock of a live pid holds; of a dead pid it is stale", () => {
@@ -807,7 +807,7 @@ describe("lock (final review I-5)", () => {
   });
 
   test("a reused pid: a lock older than the max age is stale even if the pid is alive", () => {
-    // Crash om 1.000; het OS geeft pid 100 later aan een ander proces. Vroeger stopte elke run dan stil.
+    // Crash at 1,000; the OS later gives pid 100 to another process. Before, every run then stopped silently.
     const lock = { pid: 100, startedAt: 1_000 };
     expect(lockIsStale(lock, 1_899, 900, alive([100]))).toBe(false);
     expect(lockIsStale(lock, 1_900, 900, alive([100]))).toBe(true);
@@ -843,7 +843,7 @@ describe("stuck transaction (final review I-6)", () => {
   });
 
   test("a risen base fee lifts maxFeePerGas to at least twice the base fee plus the tip", () => {
-    // Base fee van 0,005 naar 0,5 gwei: de oude maxFee van 0,06 gwei is ruim te laag.
+    // Base fee from 0.005 to 0.5 gwei: the old maxFee of 0.06 gwei is far too low.
     const next = replacementFees({ maxPriorityFeePerGas: parseGwei("0.05"), maxFeePerGas: parseGwei("0.06") }, parseGwei("0.5"), max);
     expect(next?.maxFeePerGas).toBe(parseGwei("1") + 56_250_001n);
   });
@@ -855,21 +855,21 @@ describe("stuck transaction (final review I-6)", () => {
 
   test("verification 579f763 (K-6): with an own transaction still pending nothing new is sent, and that is temporary", () => {
     expect(ownTransactionPending(41, 41)).toBe(false);
-    expect(ownTransactionPending(41, 42)).toBe(true); // de vorige run liet nonce 41 hangen
-    // keeper.ts gooit dan een gewone Error (geen contract-revert): tijdelijk, opnieuw in een later blok, geen cool-down.
+    expect(ownTransactionPending(41, 42)).toBe(true); // the previous run left nonce 41 pending
+    // keeper.ts then throws a plain Error (no contract revert): temporary, retried in a later block, no cool-down.
     expect(failureAction({ errorName: undefined, transient: true }, 0, 540)).toBe("retry");
   });
 
   test("verification 579f763 (K-6): a transaction is only sent if it fits before the watchdog", () => {
-    // Standaard: 4 verzendingen × (15 blokken × 2 s + 30 s) + 30 s.
+    // Default: 4 sends × (15 blocks × 2 s + 30 s) + 30 s.
     expect(sendWorstCaseSeconds(15, 3, 30)).toBe(270);
     const start = 1_000;
-    const watchdogAt = start + lockWatchdogSeconds(900); // 1.885
-    // Tot aan het eind van het retry-budget (540 s) past een hele transactie met de standaardwaarden.
+    const watchdogAt = start + lockWatchdogSeconds(900); // 1,885
+    // Up to the end of the retry budget (540 s) a whole transaction fits with the defaults.
     expect(hasTimeToSend(start + 540, watchdogAt, 270)).toBe(true);
     expect(hasTimeToSend(start + 615, watchdogAt, 270)).toBe(true);
     expect(hasTimeToSend(start + 616, watchdogAt, 270)).toBe(false);
-    // De minimale configuratie LOCK_MAX_SECONDS = RETRY_SECONDS + 60: vlak voor het eind van het budget niet meer.
+    // The minimal configuration LOCK_MAX_SECONDS = RETRY_SECONDS + 60: right before the end of the budget, no longer.
     expect(hasTimeToSend(start + 530, start + lockWatchdogSeconds(600), 270)).toBe(false);
   });
 });
@@ -884,15 +884,15 @@ describe("REWARD_TO (final review I-8)", () => {
   });
 
   test("an invalid address is refused with a clear message", () => {
-    expect(rewardToError("0x123", REBALANCER)).toBe("REWARD_TO is geen geldig adres: 0x123");
-    expect(rewardToError("", REBALANCER)).toContain("geen geldig adres");
-    expect(rewardToError("mijn-wallet.eth", REBALANCER)).toContain("geen geldig adres");
+    expect(rewardToError("0x123", REBALANCER)).toBe("REWARD_TO is not a valid address: 0x123");
+    expect(rewardToError("", REBALANCER)).toContain("not a valid address");
+    expect(rewardToError("my-wallet.eth", REBALANCER)).toContain("not a valid address");
   });
 
   test("verification 579f763 (K-1): a wrong checksum is refused, and every address that passes, viem can encode", () => {
     const bad = "0xAbCdEf0000000000000000000000000000000001"; // mixed case, wrong checksum (the PoC)
-    expect(rewardToError(bad, REBALANCER)).toContain("ongeldige checksum");
-    expect(rewardToError(OWNER, REBALANCER)).toContain("ongeldige checksum");
+    expect(rewardToError(bad, REBALANCER)).toContain("invalid checksum");
+    expect(rewardToError(OWNER, REBALANCER)).toContain("invalid checksum");
     const encode = (rewardTo: string) =>
       encodeFunctionData({
         abi: parseAbi(["function execute(address owner, address rewardTo)"]),
@@ -908,7 +908,7 @@ describe("REWARD_TO (final review I-8)", () => {
   });
 
   test("the Rebalancer itself is refused, whatever the case", () => {
-    expect(rewardToError(REBALANCER, REBALANCER)).toContain("Rebalancer-contract zelf");
-    expect(rewardToError(REBALANCER.toLowerCase(), REBALANCER)).toContain("Rebalancer-contract zelf");
+    expect(rewardToError(REBALANCER, REBALANCER)).toContain("Rebalancer contract itself");
+    expect(rewardToError(REBALANCER.toLowerCase(), REBALANCER)).toContain("Rebalancer contract itself");
   });
 });

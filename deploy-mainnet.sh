@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Deploy van het Rebalancer-contract naar Base mainnet.
+# Deploy of the Rebalancer contract to Base mainnet.
 #
-# Standen:
-#   dry     simuleert de deploy, verstuurt niets
-#   go      deployt echt; weigert als er al een deploy in broadcast/ staat
-#   verify  verifieert de laatste broadcast op Basescan
+# Modes:
+#   dry     simulates the deploy, sends nothing
+#   go      deploys for real; refuses if there is already a deploy in broadcast/
+#   verify  verifies the latest broadcast on Basescan
 #
-# Ondertekenen, bij voorkeur met een keystore zodat de sleutel niet in de procestabel belandt:
+# Signing, preferably with a keystore so that the key does not end up in the process table:
 #   DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh dry
-# Of, met de sleutel uit een .env (forge krijgt hem dan via --private-key, zichtbaar in `ps`):
+# Or, with the key from a .env (forge then gets it via --private-key, visible in `ps`):
 #   set -a; source ~/Code/bitburo/.env; set +a; bash deploy-mainnet.sh dry
 #
-# Een keystore aanmaken doe je eenmalig met:
+# Create a keystore once with:
 #   ~/.foundry/bin/cast wallet import bitburo-deployer --interactive
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -20,28 +20,28 @@ MODE="${1:-dry}"
 FORGE="$HOME/.foundry/bin/forge"
 BROADCAST="broadcast/Deploy.s.sol/8453/run-latest.json"
 
-export TREASURY="0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9"        # zelfde treasury als het huidige contract
+export TREASURY="0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9"        # same treasury as the current contract
 export BASE_RPC_URL="${BASE_RPC_URL:-https://mainnet.base.org}"
 export BASESCAN_API_KEY="${BASESCAN_API_KEY:-${ETHERSCAN_API_KEY:-}}"
 
-# ─── Ondertekenen ───────────────────────────────────────────────────────────
-# Een keystore heeft de voorkeur: forge vraagt dan om het wachtwoord en de sleutel
-# komt nooit op de opdrachtregel, waar elk ander proces hem via `ps` kan lezen.
+# ─── Signing ────────────────────────────────────────────────────────────────
+# A keystore is preferred: forge then asks for the password and the key
+# never appears on the command line, where any other process can read it via `ps`.
 SIGNER=()
 if [ -n "${DEPLOYER_ACCOUNT:-}" ]; then
   SIGNER=(--account "$DEPLOYER_ACCOUNT")
 elif [ -n "${DEPLOYER_PRIVATE_KEY:-}" ]; then
   SIGNER=(--private-key "$DEPLOYER_PRIVATE_KEY")
-  echo "Let op: de sleutel gaat via --private-key en is zichtbaar in de procestabel." >&2
-  echo "       Veiliger is een keystore: cast wallet import <naam> --interactive, dan DEPLOYER_ACCOUNT=<naam>." >&2
+  echo "Note: the key is passed via --private-key and is visible in the process table." >&2
+  echo "      A keystore is safer: cast wallet import <name> --interactive, then DEPLOYER_ACCOUNT=<name>." >&2
 else
-  echo "Geen ondertekenaar. Zet DEPLOYER_ACCOUNT (keystore) of DEPLOYER_PRIVATE_KEY." >&2
+  echo "No signer. Set DEPLOYER_ACCOUNT (keystore) or DEPLOYER_PRIVATE_KEY." >&2
   exit 1
 fi
 
-# ─── Hulpfuncties ───────────────────────────────────────────────────────────
+# ─── Helper functions ───────────────────────────────────────────────────────
 
-# Het adres uit de laatste broadcast, of leeg als er geen deploy is vastgelegd.
+# The address from the latest broadcast, or empty if no deploy has been recorded.
 deployed_address() {
   [ -f "$BROADCAST" ] || return 0
   python3 -c "
@@ -57,7 +57,7 @@ for t in d.get('transactions', []):
 " 2>/dev/null
 }
 
-# De commit waarvandaan de laatste broadcast is gedraaid.
+# The commit from which the latest broadcast was run.
 deployed_commit() {
   [ -f "$BROADCAST" ] || return 0
   python3 -c "
@@ -69,10 +69,10 @@ except Exception:
 " 2>/dev/null
 }
 
-# ─── Standen ────────────────────────────────────────────────────────────────
+# ─── Modes ──────────────────────────────────────────────────────────────────
 
 if [ "$MODE" = "dry" ]; then
-  echo "== Droge run (er wordt niets verstuurd)"
+  echo "== Dry run (nothing is sent)"
   "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" "${SIGNER[@]}"
   exit 0
 fi
@@ -81,76 +81,76 @@ if [ "$MODE" = "go" ]; then
   EXISTING="$(deployed_address)"
   if [ -n "$EXISTING" ] && [ "${FORCE_REDEPLOY:-}" != "1" ]; then
     cat >&2 <<MSG
-Er staat al een deploy in $BROADCAST:
+There is already a deploy in $BROADCAST:
 
-  adres   $EXISTING
+  address $EXISTING
   commit  $(deployed_commit)
 
-Deze stand is niet idempotent: opnieuw draaien zet een tweede, los contract op
-mainnet dat niets van het eerste weet. Gebruikers houden hun allowance op het
-oude adres, dat permissionless uitvoerbaar blijft.
+This mode is not idempotent: running it again puts a second, separate contract on
+mainnet that knows nothing about the first. Users keep their allowance on the
+old address, which remains permissionlessly executable.
 
-Wil je echt een nieuw contract, dan hoort daar een plan bij (zie issue #7):
-het nieuwe adres in de app, het oude in legacy_addresses, en gebruikers die
-opnieuw goedkeuren. Noteer $EXISTING eerst ergens buiten deze machine; de map
-broadcast/ staat in .gitignore.
+If you really want a new contract, it needs a plan (see issue #7):
+the new address in the app, the old one in legacy_addresses, and users who
+approve again. Write down $EXISTING somewhere outside this machine first; the
+broadcast/ directory is in .gitignore.
 
-Daarna: FORCE_REDEPLOY=1 bash deploy-mainnet.sh go
+Then: FORCE_REDEPLOY=1 bash deploy-mainnet.sh go
 MSG
     exit 1
   fi
 
-  echo "== Echte deploy naar Base mainnet"
-  [ -n "$EXISTING" ] && echo "   (FORCE_REDEPLOY=1; het bestaande $EXISTING blijft gewoon op de keten staan)"
+  echo "== Real deploy to Base mainnet"
+  [ -n "$EXISTING" ] && echo "   (FORCE_REDEPLOY=1; the existing $EXISTING simply stays on chain)"
   VERIFY=()
   if [ -n "$BASESCAN_API_KEY" ]; then
     VERIFY=(--verify)
   else
-    echo "Geen BASESCAN_API_KEY: het contract wordt niet geverifieerd. Draai daarna 'verify'." >&2
+    echo "No BASESCAN_API_KEY: the contract will not be verified. Run 'verify' afterwards." >&2
   fi
   "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" "${SIGNER[@]}" --broadcast "${VERIFY[@]}"
   echo
-  echo "Klaar. Adres: $(deployed_address), vanaf commit $(deployed_commit)."
-  echo "Noteer dat adres in README.md en in de app; broadcast/ staat in .gitignore."
+  echo "Done. Address: $(deployed_address), from commit $(deployed_commit)."
+  echo "Record that address in README.md and in the app; broadcast/ is in .gitignore."
   exit 0
 fi
 
 if [ "$MODE" = "verify" ]; then
   if [ -z "$BASESCAN_API_KEY" ]; then
-    echo "Geen ETHERSCAN_API_KEY/BASESCAN_API_KEY geladen." >&2
+    echo "No ETHERSCAN_API_KEY/BASESCAN_API_KEY loaded." >&2
     exit 1
   fi
   if [ ! -f "$BROADCAST" ]; then
-    echo "Geen broadcast gevonden op $BROADCAST; er valt niets te verifiëren." >&2
+    echo "No broadcast found at $BROADCAST; there is nothing to verify." >&2
     exit 1
   fi
 
-  # Basescan vergelijkt de aangeboden broncode met de bytecode op de keten. Compileren
-  # we een andere commit dan die is uitgerold, dan kan die vergelijking niet kloppen.
+  # Basescan compares the submitted source code with the bytecode on chain. If we compile
+  # a different commit than the one that was deployed, that comparison cannot match.
   WANT="$(deployed_commit)"
-  HAVE="$(git rev-parse --short HEAD 2>/dev/null || echo onbekend)"
+  HAVE="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   if [ -n "$WANT" ] && [ "${WANT#"$HAVE"}" = "$WANT" ] && [ "${HAVE#"$WANT"}" = "$HAVE" ]; then
     cat >&2 <<MSG
-De broadcast is van commit $WANT, maar je staat op $HAVE. Verifiëren vanaf deze
-broncode biedt bytecode aan die niet matcht met wat er op de keten staat.
+The broadcast is from commit $WANT, but you are on $HAVE. Verifying from this
+source code submits bytecode that does not match what is on chain.
 
-Check eerst de juiste commit uit:
+Check out the right commit first:
 
-  git stash        # als je werk hebt liggen
+  git stash        # if you have uncommitted work
   git checkout $WANT
   bash deploy-mainnet.sh verify
 MSG
     exit 1
   fi
   if [ -n "$(git status --porcelain src/ script/ 2>/dev/null)" ]; then
-    echo "src/ of script/ heeft ongecommitte wijzigingen; de bytecode wijkt dan af van de deploy." >&2
+    echo "src/ or script/ has uncommitted changes; the bytecode then differs from the deploy." >&2
     exit 1
   fi
 
-  echo "== Broncode verifiëren op Basescan voor de laatste broadcast (commit $WANT)"
+  echo "== Verifying source code on Basescan for the latest broadcast (commit $WANT)"
   "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" "${SIGNER[@]}" --broadcast --resume --verify
   exit 0
 fi
 
-echo "Onbekende stand '$MODE'; gebruik 'dry', 'go' of 'verify'." >&2
+echo "Unknown mode '$MODE'; use 'dry', 'go' or 'verify'." >&2
 exit 1

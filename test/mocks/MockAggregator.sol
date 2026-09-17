@@ -3,7 +3,7 @@ pragma solidity 0.8.37;
 
 import {IAggregatorV3} from "../../src/interfaces/IAggregatorV3.sol";
 
-/// @notice Chainlink-feed met instelbare answer/startedAt/updatedAt.
+/// @notice Chainlink feed with configurable answer/startedAt/updatedAt.
 contract MockAggregator is IAggregatorV3 {
     uint8 private immutable _decimals;
     string private _description;

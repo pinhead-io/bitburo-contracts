@@ -27,12 +27,12 @@ contract PrevBlockAttacker is WindowAttacker {
     }
 }
 
-/// @notice Zelf-audit 2026-09-17, lead L-F (gevonden door de QuillShield oracle-checklist): push in blok N-1 (niet
-///         gezien door de blokcheck), Chainlink loopt binnen zijn deviation-drempel in het voordeel van de aanvaller
-///         achter, execute in blok N, push terug. Geen arbitrage tussen de blokken (worst case, zoals SCOPE §5.3).
-///         Alleen de EURC/USDC-pool wordt geduwd. Alleen logs, geen asserts: een meting.
+/// @notice Self-audit 2026-09-17, lead L-F (found by the QuillShield oracle checklist): push in block N-1 (not
+///         seen by the block check), Chainlink lags within its deviation threshold in the attacker's favour,
+///         execute in block N, push back. No arbitrage between the blocks (worst case, as in SCOPE §5.3).
+///         Only the EURC/USDC pool is pushed. Logs only, no asserts: a measurement.
 ///
-///         Draaien: kopieer dit bestand naar `test/` (het importeert `./BlockWindowFork.t.sol`) en run
+///         Run: copy this file to `test/` (it imports `./BlockWindowFork.t.sol`) and run
 ///         `FORK_BLOCK=51425248 ~/.foundry/bin/forge test --match-contract QuillPrevBlockLagTest -vv`.
 contract QuillPrevBlockLagTest is BlockWindowForkTest {
     PrevBlockAttacker internal patk;

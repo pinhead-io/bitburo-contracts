@@ -6,7 +6,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {RebalancerTestBase} from "./Rebalancer.t.sol";
 
-/// @notice Audit-PoC's en fuzz-tests voor de rekenkunde van _plan/_buy/_sell/_takeFee (scratchpad, niet in de repo).
+/// @notice Audit PoCs and fuzz tests for the arithmetic of _plan/_buy/_sell/_takeFee (scratchpad, not in the repo).
 contract AuditMathTest is RebalancerTestBase {
     // ─── helpers ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -22,12 +22,12 @@ contract AuditMathTest is RebalancerTestBase {
         return fracWad > t ? fracWad - t : t - fracWad;
     }
 
-    // ─── (a) corridor-of-cap, (b) fee exact 25 bps, (c) geen restanten ─────────────────────────────────────
+    // ─── (a) corridor-or-cap, (b) fee exactly 25 bps, (c) no residue ─────────────────────────────────────────
 
-    /// @dev Na één execute geldt: óf |drift| <= band, óf de run was begrensd (cap, allowance of minTrade-vloer),
-    ///      óf de resterende drift is uitsluitend het fee+slippage-verlies (< 1,25% van het run-bedrag / total).
-    ///      Verder: fee == exact 25 bps van het EURC-been, en het contract houdt niets over (behalve wat er vóór
-    ///      de run al per ongeluk in zat).
+    /// @dev After one execute: either |drift| <= band, or the run was bounded (cap, allowance or minTrade floor),
+    ///      or the remaining drift is only the fee+slippage loss (< 1.25% of the run amount / total).
+    ///      Also: fee == exactly 25 bps of the EURC leg, and the contract keeps nothing (except what was already
+    ///      in it by accident before the run).
     function testFuzz_audit_corridorFeeResidue(
         uint256 cash,
         uint256 btc,
@@ -50,7 +50,7 @@ contract AuditMathTest is RebalancerTestBase {
             targetBps: uint16(bound(targetSteps, 5, 95)) * 100,
             bandBps: uint16(bound(band, 1, 9999)),
             maxCorrectionBps: uint16(bound(cap, 1, 10_000)),
-            minTradeEurc: uint64(bound(minTrade, 1e5, 1e9)), // >= 0,1 EURC; microruns apart in test_poc_microBuyYieldsZeroOutput
+            minTradeEurc: uint64(bound(minTrade, 1e5, 1e9)), // >= 0.1 EURC; microruns: see test_poc_microBuyYieldsZeroOutput
             interval: 1 hours,
             maxSlippageBps: uint16(bound(slip, 30, 100))
         });
@@ -65,7 +65,7 @@ contract AuditMathTest is RebalancerTestBase {
         eurc.approve(address(r), allowanceEurc);
         cbbtc.approve(address(r), allowanceBtc);
         vm.stopPrank();
-        // Per ongeluk achtergebleven saldo: execute mag dat niet aanraken, en mag er niets bij laten komen.
+        // Balance left behind by accident: execute must not touch it, and must not add anything to it.
         if (donation > 0) eurc.mint(address(r), donation);
 
         (bool due, int256 delta) = r.isDue(alice);
@@ -83,13 +83,13 @@ contract AuditMathTest is RebalancerTestBase {
 
         r.execute(alice, keeper);
 
-        // (c) restanten
-        assertEq(eurc.balanceOf(address(r)), donation, "EURC-restant != donatie");
-        assertEq(cbbtc.balanceOf(address(r)), 0, "cbBTC-restant");
-        assertEq(eurc.allowance(address(r), address(router)), 0, "router-allowance EURC blijft staan");
-        assertEq(cbbtc.allowance(address(r), address(router)), 0, "router-allowance cbBTC blijft staan");
+        // (c) residue
+        assertEq(eurc.balanceOf(address(r)), donation, "EURC residue != donation");
+        assertEq(cbbtc.balanceOf(address(r)), 0, "cbBTC residue");
+        assertEq(eurc.allowance(address(r), address(router)), 0, "router allowance EURC remains");
+        assertEq(cbbtc.allowance(address(r), address(router)), 0, "router allowance cbBTC remains");
 
-        // (b) fee exact 25 bps van het EURC-been
+        // (b) fee exactly 25 bps of the EURC leg
         uint256 feePaid = (eurc.balanceOf(treasury) - treasuryBefore) + (eurc.balanceOf(keeper) - keeperBefore);
         uint256 feeBase;
         uint256 amountInEurcValue;
@@ -103,37 +103,37 @@ contract AuditMathTest is RebalancerTestBase {
             uint256 received = Math.mulDiv(Math.mulDiv(btcIn, price, 1e8), BPS - routerSlip, BPS);
             feeBase = received;
             amountInEurcValue = Math.mulDiv(btcIn, price, 1e8);
-            assertEq(eurc.balanceOf(alice) - aliceEurcBefore, received - feePaid, "owner kreeg niet received - fee");
+            assertEq(eurc.balanceOf(alice) - aliceEurcBefore, received - feePaid, "owner did not get received - fee");
         }
         assertEq(feePaid, Math.mulDiv(feeBase, 25, BPS), "fee != 25 bps");
-        assertLe(feePaid, feeBase * 25 / BPS, "fee naar boven afgerond");
-        assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, feePaid), "reward != min(0,05, fee)");
+        assertLe(feePaid, feeBase * 25 / BPS, "fee rounded up");
+        assertEq(eurc.balanceOf(keeper) - keeperBefore, Math.min(50_000, feePaid), "reward != min(0.05, fee)");
 
-        // (a) corridor of cap
+        // (a) corridor or cap
         (uint256 fracAfter, uint256 totalAfter) = _fraction(alice, price);
         uint256 driftAfter = _absDrift(fracAfter, p.targetBps);
         uint256 bandWad = uint256(p.bandBps) * 1e18 / BPS;
-        bool capped = absDelta == capEurc; // correctie is afgekapt op de cap (of minTrade-vloer)
-        bool clamped = amountInEurcValue + 2 < absDelta; // allowance/afronding beperkte de run
+        bool capped = absDelta == capEurc; // correction was capped at the cap (or minTrade floor)
+        bool clamped = amountInEurcValue + 2 < absDelta; // allowance/rounding limited the run
         if (!capped && !clamped) {
-            // Volledige correctie: enige restdrift is het verlies (fee + slippage) op het run-bedrag.
-            // |drift'| <= (fee+slip) * amountIn / total' , ruim onder 1,25% * 1.
+            // Full correction: the only residual drift is the loss (fee + slippage) on the run amount.
+            // |drift'| <= (fee+slip) * amountIn / total' , well below 1.25% * 1.
             uint256 lossBound = Math.mulDiv(amountInEurcValue, 25 + p.maxSlippageBps, BPS);
             uint256 maxDriftWad = Math.mulDiv(lossBound + 2, 1e18, totalAfter) + 1e12;
-            assertLe(driftAfter, maxDriftWad, "restdrift groter dan fee+slippage-verlies");
-            if (bandWad >= maxDriftWad) assertLe(driftAfter, bandWad, "volledige correctie eindigt buiten band");
+            assertLe(driftAfter, maxDriftWad, "residual drift larger than fee+slippage loss");
+            if (bandWad >= maxDriftWad) assertLe(driftAfter, bandWad, "full correction ends outside band");
         }
 
-        // Richting: een eventuele volgende run gaat dezelfde kant op (geen ping-pong door overshoot).
+        // Direction: any next run goes the same way (no ping-pong through overshoot).
         vm.warp(vm.getBlockTimestamp() + 1 hours);
         _setPrice(price);
         (bool due2, int256 delta2) = r.isDue(alice);
         if (due2) {
-            assertEq(delta2 > 0, isBuy, "richting keert om: ping-pong");
+            assertEq(delta2 > 0, isBuy, "direction reverses: ping-pong");
         }
     }
 
-    /// @dev Herhaalde runs bij constante koers: de richting keert nooit om en de reeks convergeert (eindig).
+    /// @dev Repeated runs at a constant price: the direction never reverses and the series converges (finite).
     function testFuzz_audit_noPingPongConstantPrice(
         uint256 cash,
         uint256 btc,
@@ -148,8 +148,8 @@ contract AuditMathTest is RebalancerTestBase {
             active: true,
             targetBps: uint16(bound(targetSteps, 5, 95)) * 100,
             bandBps: uint16(bound(band, 1, 500)),
-            maxCorrectionBps: uint16(bound(cap, 5000, 10_000)), // >= 50% per run: hoofdcorrectie in <= 2 runs, rest is staart
-            minTradeEurc: 1e5, // >= 0,1 EURC: onder ~0,0008 EURC levert een koop 0 sats op en de reeks eindigt nooit
+            maxCorrectionBps: uint16(bound(cap, 5000, 10_000)), // >= 50% per run: main correction in <= 2 runs, rest is tail
+            minTradeEurc: 1e5, // >= 0.1 EURC: below ~0.0008 EURC a buy yields 0 sats and the series never ends
             interval: 1 hours,
             maxSlippageBps: 100
         });
@@ -161,20 +161,20 @@ contract AuditMathTest is RebalancerTestBase {
         bool dir = delta > 0;
         uint256 runs;
         while (due && runs < 60) {
-            assertEq(delta > 0, dir, "richting keerde om");
+            assertEq(delta > 0, dir, "direction reversed");
             r.execute(alice, address(0));
             runs++;
             vm.warp(vm.getBlockTimestamp() + 1 hours);
             _setPrice(PRICE);
             (due, delta) = r.isDue(alice);
         }
-        assertLt(runs, 60, "convergeert niet");
+        assertLt(runs, 60, "does not converge");
     }
 
-    // ─── PoC's ─────────────────────────────────────────────────────────────────────────────────────────────
+    // ─── PoCs ──────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// @dev Overshoot bij verkoop: na een volledige sell ligt de fractie iets BOVEN target (zelfde richting),
-    ///      en met band 1 bps en minTrade 1 volgt een tweede, kleinere sell. Geen ping-pong, wel een staart.
+    /// @dev Overshoot on a sell: after a full sell the fraction is slightly ABOVE target (same direction),
+    ///      and with band 1 bps and minTrade 1 a second, smaller sell follows. No ping-pong, but a tail.
     function test_poc_sellOvershootTailRuns() public {
         Rebalancer.Params memory p = _defaultParams();
         p.bandBps = 1;
@@ -183,15 +183,15 @@ contract AuditMathTest is RebalancerTestBase {
         p.interval = 1 hours;
         router.setSlippageBps(100);
         _setUser(alice, 0, 1_250_000, p); // 1000 EURC in cbBTC, target 80/20
-        r.execute(alice, address(0)); // verkoop 200 EURC
+        r.execute(alice, address(0)); // sell 200 EURC
         (uint256 frac,) = _fraction(alice, PRICE);
-        emit log_named_uint("fractie na run 1 (wad)", frac); // > 0.80e18
+        emit log_named_uint("fraction after run 1 (wad)", frac); // > 0.80e18
         assertGt(frac, 0.8e18);
         vm.warp(vm.getBlockTimestamp() + 1 hours);
         _setPrice(PRICE);
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
-        assertLt(delta, 0, "tweede run is ook een verkoop");
+        assertLt(delta, 0, "second run is also a sell");
         emit log_named_int("run 2 delta", delta); // ~ -2 EURC
         r.execute(alice, address(0));
         vm.warp(vm.getBlockTimestamp() + 1 hours);
@@ -200,50 +200,50 @@ contract AuditMathTest is RebalancerTestBase {
         emit log_named_int("run 3 delta", delta);
     }
 
-    /// @dev Cadans: allowance < correctie -> deel-run, lastExecutedAt schuift toch een volledig interval op.
+    /// @dev Cadence: allowance < correction -> partial run, yet lastExecutedAt moves a full interval forward.
     function test_poc_partialRunAdvancesCadence() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         vm.prank(alice);
-        eurc.approve(address(r), 5e6); // precies minTrade
+        eurc.approve(address(r), 5e6); // exactly minTrade
         (bool due, int256 delta) = r.isDue(alice);
         assertTrue(due);
         assertEq(delta, 100e6);
         r.execute(alice, keeper);
-        assertEq(eurc.balanceOf(alice), 995e6, "slechts 5 EURC verhandeld");
+        assertEq(eurc.balanceOf(alice), 995e6, "only 5 EURC traded");
         assertEq(r.lastExecutedAt(alice), uint64(START));
         vm.expectRevert(Rebalancer.NotDue.selector);
-        r.execute(alice, keeper); // rest van de 100 EURC moet een vol interval wachten
+        r.execute(alice, keeper); // rest of the 100 EURC has to wait a full interval
     }
 
-    /// @dev Liveness: spot 0,5% onder oracle (toegestaan) + 0,1% poolfees > maxSlippage 0,3% -> elke run revert.
+    /// @dev Liveness: spot 0.5% below oracle (allowed) + 0.1% pool fees > maxSlippage 0.3% -> every run reverts.
     function test_poc_minSlippageBelowSpotDeviationPlusPoolFees() public {
         Rebalancer.Params memory p = _defaultParams();
         p.maxSlippageBps = 30;
         _setUser(alice, 1000e6, 0, p);
-        _setSpot(PRICE * (BPS + 50) / BPS); // spot binnen de 0,5%-grens
+        _setSpot(PRICE * (BPS + 50) / BPS); // spot within the 0.5% limit
         (bool due,) = r.isDue(alice);
-        assertTrue(due, "spot-check laat de run door");
-        router.setSlippageBps(60); // 0,5% spot + 0,1% poolfees t.o.v. oracle
+        assertTrue(due, "spot check lets the run through");
+        router.setSlippageBps(60); // 0.5% spot + 0.1% pool fees relative to oracle
         vm.expectRevert("Too little received");
         r.execute(alice, keeper);
     }
 
-    /// @dev DoS: TREASURY op de EURC-blacklist -> elke run met fee-restant naar treasury revert; geen admin om te
-    ///      wisselen. Ook sweep(EURC) faalt.
+    /// @dev DoS: TREASURY on the EURC blacklist -> every run with a fee remainder to treasury reverts; no admin to
+    ///      switch it. sweep(EURC) fails too.
     function test_poc_blacklistedTreasuryBricksExecute() public {
         _setUser(alice, 1000e6, 0, _defaultParams());
         eurc.setBlacklisted(treasury, true);
         vm.expectRevert("Blacklistable: account is blacklisted");
-        r.execute(alice, keeper); // fee 0,25 > reward 0,05 -> transfer naar treasury
+        r.execute(alice, keeper); // fee 0.25 > reward 0.05 -> transfer to treasury
         vm.expectRevert("Blacklistable: account is blacklisted");
         r.execute(alice, address(0));
-        // Alleen mini-runs (fee <= 0,05 EURC, amountIn <= 200 EURC) met rewardTo != 0 lukken nog.
+        // Only mini runs (fee <= 0.05 EURC, amountIn <= 200 EURC) with rewardTo != 0 still succeed.
         _setUser(bob, 100e6, 0, _defaultParams());
         r.execute(bob, keeper);
         assertEq(eurc.balanceOf(keeper), 25_000);
     }
 
-    /// @dev Fee 0 en amountOutMinimum 0 bij microruns: minTrade=1 en allowance=1 -> run "slaagt", keeper krijgt 0.
+    /// @dev Fee 0 and amountOutMinimum 0 on microruns: minTrade=1 and allowance=1 -> run "succeeds", keeper gets 0.
     function test_poc_microRunZeroFeeZeroMinOut() public {
         Rebalancer.Params memory p = _defaultParams();
         p.minTradeEurc = 1;
@@ -254,43 +254,43 @@ contract AuditMathTest is RebalancerTestBase {
         assertTrue(due);
         assertEq(delta, 100e6);
         r.execute(alice, keeper);
-        assertEq(eurc.balanceOf(keeper), 0, "keeper krijgt niets");
+        assertEq(eurc.balanceOf(keeper), 0, "keeper gets nothing");
         assertEq(eurc.balanceOf(treasury), 0);
         assertEq(router.lastAmountOutMinimum(), 0, "amountOutMinimum 0");
-        assertEq(r.lastExecutedAt(alice), uint64(START), "cadans toch opgeschoven");
+        assertEq(r.lastExecutedAt(alice), uint64(START), "cadence moved forward anyway");
     }
 
-    /// @dev Structureel: is total*maxCorrection < minTrade, dan wordt cap = minTrade en correction == minTrade.
-    ///      Bij verkoop wordt wantBtc naar beneden afgerond, waardoor de waarde < minTrade is en amountIn = 0,
-    ///      tenzij minTrade*1e8 exact deelbaar is door de koers. Kleine wallets kunnen dus niet verkopen.
+    /// @dev Structural: if total*maxCorrection < minTrade, then cap = minTrade and correction == minTrade.
+    ///      On a sell wantBtc is rounded down, so the value is < minTrade and amountIn = 0,
+    ///      unless minTrade*1e8 is exactly divisible by the price. Small wallets therefore cannot sell.
     function test_poc_smallWalletCannotSell() public {
-        uint256 price = 80_123_456_789; // realistische feedkoers: 80.123,456789 EURC per cbBTC
+        uint256 price = 80_123_456_789; // realistic feed price: 80,123.456789 EURC per cbBTC
         _setPrice(price);
         router.setPrice(price);
         Rebalancer.Params memory p = _defaultParams(); // minTrade 5 EURC, cap 10%
         uint256 btc = 50_000; // ~40 EURC in cbBTC, 0 EURC: drift 20%, total 40 -> cap 4 < 5 -> cap = 5
         _setUser(alice, 0, btc, p);
         (bool due, int256 delta) = r.isDue(alice);
-        assertFalse(due, "verkoop van 5 EURC wordt door afronding geblokkeerd");
+        assertFalse(due, "sell of 5 EURC is blocked by rounding");
         assertEq(delta, 0);
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         r.execute(alice, keeper);
 
-        // Spiegelbeeld: kopen met dezelfde total/cap werkt wel (amountIn = exact minTrade).
+        // Mirror image: buying with the same total/cap does work (amountIn = exactly minTrade).
         _setUser(bob, 40e6, 0, p);
         (due, delta) = r.isDue(bob);
         assertTrue(due);
         assertEq(delta, 5e6);
         r.execute(bob, keeper);
 
-        // Bij een koers die exact deelt (80.000,000000) lukt de verkoop wel: puur een afrondingsartefact.
+        // At a price that divides exactly (80,000.000000) the sell does succeed: purely a rounding artefact.
         _setPrice(80_000e6);
         router.setPrice(80_000e6);
         (due,) = r.isDue(alice);
-        assertTrue(due, "met exact delende koers wel due");
+        assertTrue(due, "due with an exactly dividing price");
     }
 
-    /// @dev Zelfde artefact bij grotere wallets als cap - minTrade < 1 sat aan waarde (tot ~800 EURC-units).
+    /// @dev Same artefact for larger wallets when cap - minTrade < 1 sat of value (up to ~800 EURC units).
     function testFuzz_poc_sellBlockedWhenCapEqualsMinTrade(uint256 price, uint64 minTrade, uint256 btc) public {
         price = bound(price, 20_000e6, 200_000e6);
         minTrade = uint64(bound(minTrade, 1e6, 100e6));
@@ -307,11 +307,11 @@ contract AuditMathTest is RebalancerTestBase {
         vm.assume(Math.mulDiv(total, 9500, BPS) >= minTrade); // drift*total >= minTrade: correction == minTrade
         (bool due,) = r.isDue(alice);
         bool exact = (uint256(minTrade) * 1e8) % price == 0;
-        assertEq(due, exact, "verkoop is alleen due als minTrade exact in sats past");
+        assertEq(due, exact, "sell is only due if minTrade fits exactly in sats");
     }
 
-    /// @dev Microkoop: swapIn < 1 sat aan waarde -> expectedOut 0 -> amountOutMinimum 0 -> owner betaalt EURC
-    ///      en ontvangt 0 cbBTC (fuzz-tegenvoorbeeld: cash 5866, target 10%, minTrade 6).
+    /// @dev Micro buy: swapIn < 1 sat of value -> expectedOut 0 -> amountOutMinimum 0 -> owner pays EURC
+    ///      and receives 0 cbBTC (fuzz counterexample: cash 5866, target 10%, minTrade 6).
     function test_poc_microBuyYieldsZeroOutput() public {
         Rebalancer.Params memory p = _defaultParams();
         p.targetBps = 1000;
@@ -322,17 +322,17 @@ contract AuditMathTest is RebalancerTestBase {
         assertTrue(due);
         assertEq(delta, 586);
         r.execute(alice, keeper);
-        assertEq(eurc.balanceOf(alice), 5866 - 586, "EURC betaald");
-        assertEq(cbbtc.balanceOf(alice), 0, "0 cbBTC ontvangen");
+        assertEq(eurc.balanceOf(alice), 5866 - 586, "EURC paid");
+        assertEq(cbbtc.balanceOf(alice), 0, "0 cbBTC received");
         assertEq(router.lastAmountOutMinimum(), 0);
     }
 
-    /// @dev Drain-lus: minTrade=1 en dust-cash: elke run trekt cap% EURC af, geeft 0 sats terug, fractie blijft 0,
-    ///      dus de volgende run is weer due. Fuzz-tegenvoorbeeld uit testFuzz_audit_noPingPongConstantPrice.
+    /// @dev Drain loop: minTrade=1 and dust cash: every run takes cap% EURC, returns 0 sats, fraction stays 0,
+    ///      so the next run is due again. Fuzz counterexample from testFuzz_audit_noPingPongConstantPrice.
     function test_poc_dustBuyLoopNeverConverges() public {
         Rebalancer.Params memory p = _defaultParams();
         p.minTradeEurc = 1;
-        p.targetBps = 600; // 6%: elke koop < 1 sat -> 0 output; bij 80% levert de eerste run toevallig 1 sat op
+        p.targetBps = 600; // 6%: every buy < 1 sat -> 0 output; at 80% the first run happens to yield 1 sat
         p.maxCorrectionBps = 5000;
         p.interval = 1 hours;
         _setUser(alice, 2067, 0, p);
@@ -345,13 +345,13 @@ contract AuditMathTest is RebalancerTestBase {
             _setPrice(PRICE);
             (due,) = r.isDue(alice);
         }
-        assertEq(runs, 20, "blijft due");
-        assertEq(cbbtc.balanceOf(alice), 0, "nooit iets ontvangen");
-        assertLt(eurc.balanceOf(alice), 2067, "wel EURC kwijt");
-        emit log_named_uint("EURC over na 20 runs", eurc.balanceOf(alice));
+        assertEq(runs, 20, "stays due");
+        assertEq(cbbtc.balanceOf(alice), 0, "never received anything");
+        assertLt(eurc.balanceOf(alice), 2067, "but lost EURC");
+        emit log_named_uint("EURC left after 20 runs", eurc.balanceOf(alice));
     }
 
-    /// @dev De cap is per run, niet per dag: interval 1 uur + cap 10% = tot 24 x 10% per dag.
+    /// @dev The cap is per run, not per day: interval 1 hour + cap 10% = up to 24 x 10% per day.
     function test_poc_capIsPerRunNotPerDay() public {
         Rebalancer.Params memory p = _defaultParams();
         p.interval = 1 hours;
@@ -361,6 +361,6 @@ contract AuditMathTest is RebalancerTestBase {
             vm.warp(vm.getBlockTimestamp() + 1 hours);
             _setPrice(PRICE);
         }
-        assertLt(eurc.balanceOf(alice), 600e6, "binnen 5 uur > 40% verplaatst");
+        assertLt(eurc.balanceOf(alice), 600e6, "> 40% moved within 5 hours");
     }
 }

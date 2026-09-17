@@ -6,8 +6,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Rebalancer} from "../src/Rebalancer.sol";
 import {IV3SwapRouter} from "../src/interfaces/IV3SwapRouter.sol";
 
-/// @notice Fork-regressies uit de interne audit van 15 september 2026 (`audit/2026-09-15/poc/PocFork.t.sol`).
-///         Overslaan met RUN_FORK=false.
+/// @notice Fork regressions from the internal audit of 15 September 2026 (`audit/2026-09-15/poc/PocFork.t.sol`).
+///         Skip with RUN_FORK=false.
 contract PocFork is Test {
     IERC20 constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 constant CBBTC = IERC20(0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf);
@@ -23,7 +23,7 @@ contract PocFork is Test {
         if (!vm.envOr("RUN_FORK", true)) {
             vm.skip(true);
         }
-        // `FORK_BLOCK` pint een blok (review I-7), zodat de suite reproduceerbaar is; standaard het laatste.
+        // `FORK_BLOCK` pins a block (review I-7), so the suite is reproducible; defaults to the latest.
         string memory rpc = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
         uint256 forkBlock = vm.envOr("FORK_BLOCK", uint256(0));
         if (forkBlock == 0) vm.createSelectFork(rpc);
@@ -55,22 +55,22 @@ contract PocFork is Test {
         vm.stopPrank();
     }
 
-    /// @dev Was PoC B en B2: een stof-owner met `minTradeEurc = 1` en `maxCorrectionBps = 1` was elke run
-    ///      due, reverte op Uniswap of slaagde met fee 0, en kostte de wekker zo elk uur gas. De verharding
-    ///      legde daar economische ondergrenzen onder (audit L-1 en M-2), waardoor die opzet niet meer te
-    ///      registreren valt. Vervalt die grens ooit, dan faalt deze test.
+    /// @dev Was PoC B and B2: a dust owner with `minTradeEurc = 1` and `maxCorrectionBps = 1` was due every run,
+    ///      reverted on Uniswap or succeeded with fee 0, and so cost the keeper gas every hour. The hardening
+    ///      put economic lower bounds under that (audit L-1 and M-2), so that setup can no longer be
+    ///      registered. If that bound is ever dropped, this test fails.
     function test_dustOwnerCannotRegisterAnymore() public {
         address dust = makeAddr("dust");
-        _fund(dust, 10, 0); // 0,00001 EURC
+        _fund(dust, 10, 0); // 0.00001 EURC
 
-        // minTradeEurc onder MIN_TRADE_FLOOR (20 EURC).
+        // minTradeEurc below MIN_TRADE_FLOOR (20 EURC).
         vm.prank(dust);
         vm.expectRevert(Rebalancer.InvalidParams.selector);
         r.setParams(
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
+                bandBps: 500, // valid band: the revert must come from the bound under test
                 maxCorrectionBps: 1000,
                 minTradeEurc: 1,
                 interval: 1 hours,
@@ -78,14 +78,14 @@ contract PocFork is Test {
             })
         );
 
-        // maxCorrectionBps onder MIN_CORRECTION_BPS (10).
+        // maxCorrectionBps below MIN_CORRECTION_BPS (10).
         vm.prank(dust);
         vm.expectRevert(Rebalancer.InvalidParams.selector);
         r.setParams(
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
+                bandBps: 500, // valid band: the revert must come from the bound under test
                 maxCorrectionBps: 1,
                 minTradeEurc: 20e6,
                 interval: 1 hours,
@@ -93,14 +93,14 @@ contract PocFork is Test {
             })
         );
 
-        // maxSlippageBps onder MIN_SLIPPAGE_BPS (60), de grens uit audit L-2.
+        // maxSlippageBps below MIN_SLIPPAGE_BPS (60), the bound from audit L-2.
         vm.prank(dust);
         vm.expectRevert(Rebalancer.InvalidParams.selector);
         r.setParams(
             Rebalancer.Params({
                 active: true,
                 targetBps: 8000,
-                bandBps: 500, // geldige band: de revert moet uit de getoetste grens komen
+                bandBps: 500, // valid band: the revert must come from the bound under test
                 maxCorrectionBps: 1000,
                 minTradeEurc: 20e6,
                 interval: 1 hours,
@@ -108,15 +108,15 @@ contract PocFork is Test {
             })
         );
 
-        // Er staat dus niemand in het register en geen enkele wekker vindt werk.
-        assertEq(r.ownerCount(), 0, "stof-owner staat toch geregistreerd");
+        // So nobody is in the registry and no keeper finds work.
+        assertEq(r.ownerCount(), 0, "dust owner is registered after all");
         assertEq(r.dueOwners(0, 10).length, 0);
     }
 
-    /// C: de aanroeper sandwicht zijn eigen execute binnen de 0,5%-spotcheck.
-    ///    Buyer: 20.000 EURC, cap 10% -> run van 2.000 EURC. Aanvaller verkoopt eerst EURC in de dunne
-    ///    EURC/USDC-pool (EURC wordt goedkoper, spot cbBTC-in-EURC stijgt), laat de run lopen (die koopt
-    ///    op een slechtere koers), en koopt de EURC daarna terug.
+    /// C: the caller sandwiches its own execute within the 0.5% spot check.
+    ///    Buyer: 20,000 EURC, cap 10% -> run of 2,000 EURC. Attacker first sells EURC in the thin
+    ///    EURC/USDC pool (EURC gets cheaper, spot cbBTC-in-EURC rises), lets the run go (which buys
+    ///    at a worse price), and buys the EURC back afterwards.
     function test_poc_executorSandwich() public {
         address buyer = makeAddr("buyer");
         deal(address(EURC), buyer, 20_000e6);
@@ -141,7 +141,7 @@ contract PocFork is Test {
             "EURC in pool:", EURC.balanceOf(POOL_EURC_USDC) / 1e6, "USDC in pool:", USDC.balanceOf(POOL_EURC_USDC) / 1e6
         );
 
-        // Zoek het grootste EURC-bedrag waarmee de spot nog binnen 0,5% blijft (bisectie op een snapshot).
+        // Find the largest EURC amount at which the spot still stays within 0.5% (bisection on a snapshot).
         uint256 lo = 0;
         uint256 hi = 30_000e6;
         for (uint256 i = 0; i < 20; i++) {
@@ -156,22 +156,22 @@ contract PocFork is Test {
             if (ok) lo = mid;
             else hi = mid;
         }
-        console.log("max EURC-verkoop binnen 0,5%:", lo / 1e6);
+        console.log("max EURC sell within 0.5%:", lo / 1e6);
 
-        // 1) Aanvaller verkoopt `lo` EURC -> USDC, tot net binnen de spotcheck vooraf.
+        // 1) Attacker sells `lo` EURC -> USDC, to just within the upfront spot check.
         _sellEurc(atk, lo);
-        console.log("spot na push:", r.spot(), "afwijking bps:", (r.spot() - oracle) * 10_000 / oracle);
+        console.log("spot after push:", r.spot(), "deviation bps:", (r.spot() - oracle) * 10_000 / oracle);
 
-        // 2) De push ligt in hetzelfde blok en verandert de tick van EURC/USDC (Uniswap schrijft dan een observatie),
-        //    dus de run revert al vóór de swap op de blokcheck (audit M-1). Vóór de blokcheck strandde hij op het
-        //    blokvenster, daarvóór op de spotcheck ná de swap; de oorspronkelijke PoC kwam hier wél doorheen en logde
-        //    de winst van de aanvaller.
+        // 2) The push is in the same block and changes the tick of EURC/USDC (Uniswap then writes an observation),
+        //    so the run already reverts before the swap on the block check (audit M-1). Before the block check it
+        //    stranded on the block window, before that on the spot check after the swap; the original PoC did get
+        //    through here and logged the attacker's profit.
         uint256 btcBefore = CBBTC.balanceOf(buyer);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.PoolTouchedThisBlock.selector, POOL_EURC_USDC));
         r.execute(buyer, atk);
 
-        assertEq(CBBTC.balanceOf(buyer), btcBefore, "buyer heeft toch gekocht op een geduwde koers");
-        assertEq(EURC.balanceOf(atk), 0, "aanvaller heeft toch een beloning geincasseerd");
+        assertEq(CBBTC.balanceOf(buyer), btcBefore, "buyer still bought at a pushed price");
+        assertEq(EURC.balanceOf(atk), 0, "attacker still collected a reward");
     }
 
     function _sellEurc(address who, uint256 amt) internal returns (uint256 out) {

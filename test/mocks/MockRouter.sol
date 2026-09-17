@@ -7,23 +7,23 @@ import {IV3SwapRouter} from "../../src/interfaces/IV3SwapRouter.sol";
 import {MockERC20} from "./MockERC20.sol";
 import {MockUniswapV3Pool} from "./MockUniswapV3Pool.sol";
 
-/// @notice Uniswap SwapRouter02-nabootsing: accepteert alleen het 2-hop-pad via USDC met 0,05% per hop,
-///         rekent output op een instelbare koers (EURC-basiseenheden per cbBTC) minus instelbare slippage.
+/// @notice Uniswap SwapRouter02 imitation: accepts only the 2-hop path via USDC at 0.05% per hop,
+///         computes output at a configurable rate (EURC base units per cbBTC) minus configurable slippage.
 contract MockRouter is IV3SwapRouter {
     uint24 public constant POOL_FEE = 500;
 
     address public immutable EURC;
     address public immutable USDC;
     address public immutable CBBTC;
-    /// @notice Zoals SwapRouter02.factory(); instelbaar, zodat de constructorcheck op de pools te testen is.
+    /// @notice Like SwapRouter02.factory(); configurable, so the constructor check on the pools can be tested.
     address public factory;
 
     uint256 public price;
     uint256 public slippageBps;
     uint256 public gasBurn;
-    /// @dev > 0: verbruik in elke swap al het gas op `gasKeep` na (om "run op vol budget" te testen).
+    /// @dev > 0: burn all gas except `gasKeep` in every swap (to test "run at full budget").
     uint256 public gasKeep;
-    /// @dev Optioneel: pool die ná elke swap op een nieuwe prijs wordt gezet (prijsimpact / sandwich nabootsen).
+    /// @dev Optional: pool that is set to a new price after every swap (imitates price impact / sandwich).
     MockUniswapV3Pool public shiftPool;
     uint256 public shiftToken0Amount;
     uint256 public shiftToken1Amount;
@@ -52,13 +52,13 @@ contract MockRouter is IV3SwapRouter {
         slippageBps = bps;
     }
 
-    /// @notice Laat elke swap minstens `gas` gas verbruiken (om gasbudgetten te testen).
+    /// @notice Makes every swap burn at least `gas` gas (to test gas budgets).
     function setGasBurn(uint256 gas) external {
         gasBurn = gas;
     }
 
-    /// @notice Laat elke swap daarna `pool` op `token0Amount : token1Amount` zetten. Pool address(0) = uit.
-    /// @notice Laat elke swap gas verbruiken tot er nog `keep` over is in het router-frame; 0 = uit.
+    /// @notice Makes every swap then set `pool` to `token0Amount : token1Amount`. Pool address(0) = off.
+    /// @notice Makes every swap burn gas until only `keep` is left in the router frame; 0 = off.
     function setGasKeep(uint256 keep) external {
         gasKeep = keep;
     }

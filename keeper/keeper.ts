@@ -1,77 +1,77 @@
 /**
- * Bitburo keeper-script. Iedereen mag dit draaien; Bitburo is niet nodig.
+ * Bitburo keeper script. Anyone may run this; Bitburo is not needed.
  *
- * Leest het register van het Rebalancer-contract (owners), filtert het off-chain op actief, saldo en allowance, vraagt
- * voor de overgebleven kandidaten isDue(owner) in porties van PAGE_SIZE (één Multicall3 per portie), slaat runs onder
- * MIN_RUN_EURC over (de fee dekt de gas dan niet), simuleert execute(owner, rewardTo)
- * eerst met eth_call en roept het daarna pas echt aan. Een owner waarvan de simulatie of de transactie mislukt
- * krijgt een cool-down (verdubbelt per mislukking) in een klein JSON-bestand, zodat een owner die structureel
- * revert niet elke run opnieuw gas kost. De beloning (hooguit 0,05 EURC en hooguit de helft van de fee per run) gaat
- * naar REWARD_TO, standaard het eigen adres. Het script beslist niets over bedragen of richting: het contract bepaalt
- * of, wat en hoeveel.
+ * Reads the register of the Rebalancer contract (owners), filters it off-chain on active, balance and allowance, asks
+ * for the remaining candidates isDue(owner) in batches of PAGE_SIZE (one Multicall3 per batch), skips runs below
+ * MIN_RUN_EURC (the fee does not cover the gas then), simulates execute(owner, rewardTo)
+ * first with eth_call and only then calls it for real. An owner whose simulation or transaction fails
+ * gets a cool-down (doubles per failure) in a small JSON file, so that an owner that structurally
+ * reverts does not cost gas again every run. The reward (at most 0.05 EURC and at most half the fee per run) goes
+ * to REWARD_TO, by default our own address. The script decides nothing about amounts or direction: the contract decides
+ * whether, what and how much.
  *
- * Blokcheck en blokvenster (audit M-1, review PR #18): een run mag niet als een pool in hetzelfde blok al een
- * oracle-observatie schreef, en een pool mag binnen één blok maar 6 bp van zijn beginkoers afwijken.
- * - Een revert met PoolTouchedThisBlock of BlockMoveExceeded is tijdelijk: het script probeert die owner in elk nieuw
- *   blok opnieuw, zolang het retry-budget van de run loopt (RETRY_SECONDS), en geeft geen cool-down. Dat geldt ook
- *   voor een transactie die on-chain revertte terwijl een nieuwe simulatie op dat blok slaagt.
- * - Na een eigen transactie wacht het script op een nieuw blok voordat het de volgende owner of portie leest of
- *   simuleert.
+ * Block check and block window (audit M-1, review PR #18): a run is not allowed if a pool already wrote an
+ * oracle observation in the same block, and a pool may deviate only 6 bp from its starting price within one block.
+ * - A revert with PoolTouchedThisBlock or BlockMoveExceeded is temporary: the script retries that owner in every new
+ *   block, as long as the run's retry budget lasts (RETRY_SECONDS), and gives no cool-down. The same applies
+ *   to a transaction that reverted on-chain while a new simulation on that block passes.
+ * - After our own transaction the script waits for a new block before it reads or simulates the next owner or
+ *   batch.
  *
- * Runs tegenhouden (audit L-3): wie een pool in elk blok aanraakt (een burn van 1 liquiditeit kost ~92.630 gas), houdt
- * alle runs in dat blok tegen. Daartegen:
- * - Lezen en simuleren alsof het het volgende blok is: isDue en de simulatie van execute gaan als eth_call
- *   met blok-overrides (nummer + 1, timestamp + 2 s) op de state van het laatste blok. Een aanraking in het laatste
- *   blok is dan geen reden meer om niets te versturen. Eén keer per run controleert het script met een kleine probe
- *   of de node de overrides toepast; zo niet, dan valt het terug op het laatste blok (en leest het elke portie
- *   minstens twee keer, in opeenvolgende blokken, hooguit BLOCK_RETRIES + 1 keer) en logt het dat.
- * - Het hele retry-budget blijven proberen, niet een paar blokken: anders hoeft een aanvaller alleen een voorspelbaar
- *   venster af te dekken.
- * - Versturen met een expliciete priority fee (PRIORITY_FEE_GWEI, standaard 0,05 gwei), zodat de transactie in de
- *   Flashblock vóór een aanraker met een lagere tip staat. Revert een transactie on-chain door een tijdelijke oorzaak
- *   (een blokkade), dan verstuurt het script pas na een willekeurig aantal blokken opnieuw (gemiddeld
- *   SEND_RETRY_BLOCKS, zodat een aanvaller het moment niet kan voorspellen), met minstens het dubbele
- *   van de vorige tip en minstens 10% boven de hoogste tip van wie de pool eerder in dat blok aanraakte, tot
- *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei) en het plafond `capFeePolicy`: tip × GAS_ESTIMATE ≤ TIP_REWARD_SHARE_BPS
- *   van de beloning + TIP_BUDGET_ETH. Met de standaardwaarden bepaalt het budget dat plafond, niet de beloning (0,025
- *   EURC, de helft van KEEPER_REWARD_EURC, is ~0,8% van 0,0015 ETH): een run op 3 gwei kost ~0,0014 ETH. Wie alleen wil
- *   bieden wat een run oplevert, zet TIP_BUDGET_ETH=0 (verificatie 579f763, K-4). De verhoogde tip wordt bewaard in
- *   FEE_STATE_FILE en geldt zolang de laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een
- *   revert telt alleen als blokkade als een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit)
- *   én een transactie vóór de eigen transactie een pool aanraakte (Swap, Mint of Burn) die zelf geen directe `execute`
- *   op de Rebalancer was.
- *   Een tijdelijke revert zonder blokkade (bijvoorbeeld door een directe `execute` van een ander) verhoogt de tip niet;
- *   vanaf de tweede in een run wacht het script 2, 4, … tot SEND_RETRY_BLOCKS blokken (verificatie 579f763, info a).
- * - Concurrerende keepers (eindreview F-1): staat vóór de eigen gerevertte transactie een `Executed` voor dezelfde
- *   owner (in dat blok, of in een blok tussen de simulatie en de eigen transactie: verificatie 579f763, K-2), dan is
- *   die owner bediend: geen blokkade, geen cool-down, geen hogere tip. Na een eigen transactie zonder
- *   blokkade, en aan het eind van een run zonder blokkade en zonder eigen transactie, halveert de tip tot de basis.
- * - Eén run tegelijk (LOCK_FILE), en de run leest na het retry-budget geen nieuwe kandidaten meer.
- * - Geen nieuwe transactie zolang een eigen transactie nog hangt (nonce `pending` > `latest`), en alleen een transactie
- *   die in het slechtste geval (alle vervangingen) vóór de watchdog klaar is (verificatie 579f763, K-6).
+ * Holding up runs (audit L-3): whoever touches a pool in every block (a burn of 1 liquidity costs ~92,630 gas) holds up
+ * all runs in that block. Countermeasures:
+ * - Read and simulate as if it were the next block: isDue and the simulation of execute go as eth_call
+ *   with block overrides (number + 1, timestamp + 2 s) on the state of the latest block. A touch in the latest
+ *   block is then no longer a reason to send nothing. Once per run the script checks with a small probe
+ *   whether the node applies the overrides; if not, it falls back to the latest block (and reads every batch
+ *   at least twice, in consecutive blocks, at most BLOCK_RETRIES + 1 times) and logs that.
+ * - Keep trying for the whole retry budget, not a few blocks: otherwise an attacker only needs to cover a predictable
+ *   window.
+ * - Send with an explicit priority fee (PRIORITY_FEE_GWEI, default 0.05 gwei), so that the transaction is in the
+ *   Flashblock ahead of a toucher with a lower tip. If a transaction reverts on-chain due to a temporary cause
+ *   (a blockade), the script only sends again after a random number of blocks (on average
+ *   SEND_RETRY_BLOCKS, so that an attacker cannot predict the moment), with at least double
+ *   the previous tip and at least 10% above the highest tip of whoever touched the pool earlier in that block, up to
+ *   MAX_PRIORITY_FEE_GWEI (default 3 gwei) and the cap `capFeePolicy`: tip × GAS_ESTIMATE ≤ TIP_REWARD_SHARE_BPS
+ *   of the reward + TIP_BUDGET_ETH. With the defaults the budget sets that cap, not the reward (0.025
+ *   EURC, half of KEEPER_REWARD_EURC, is ~0.8% of 0.0015 ETH): a run at 3 gwei costs ~0.0014 ETH. To bid only
+ *   what a run yields, set TIP_BUDGET_ETH=0 (verification 579f763, K-4). The raised tip is stored in
+ *   FEE_STATE_FILE and applies as long as the last blockade was less than FEE_HOLD_SECONDS (default 3600) ago. A
+ *   revert only counts as a blockade if a re-simulation at the start of the block passes (or hits the block window)
+ *   and a transaction before our own touched a pool (Swap, Mint or Burn) that was not itself a direct `execute`
+ *   on the Rebalancer.
+ *   A temporary revert without a blockade (e.g. due to a direct `execute` by someone else) does not raise the tip;
+ *   from the second in a run the script waits 2, 4, … up to SEND_RETRY_BLOCKS blocks (verification 579f763, info a).
+ * - Competing keepers (final review F-1): if an `Executed` for the same owner precedes our own reverted transaction
+ *   (in that block, or in a block between the simulation and our own transaction: verification 579f763, K-2), that
+ *   owner has been served: no blockade, no cool-down, no higher tip. After our own transaction without a
+ *   blockade, and at the end of a run without a blockade and without our own transaction, the tip halves to the base.
+ * - One run at a time (LOCK_FILE), and after the retry budget the run reads no new candidates.
+ * - No new transaction while one of our own is still pending (nonce `pending` > `latest`), and only a transaction
+ *   that in the worst case (all replacements) is done before the watchdog (verification 579f763, K-6).
  *
- * Registratiespam (audit lead 9): iedereen kan zich registreren, ook zonder saldo, en het register krimpt nooit. Het
- * script leest daarom per 500 owners in één Multicall3 per 100 owners `params(owner).active` en saldo en allowance van
- * EURC en cbBTC, en houdt alleen owners over die in minstens één richting een run van max(MIN_TRADE_FLOOR,
- * MIN_RUN_EURC) kunnen halen: min(saldo, allowance) van EURC, of van cbBTC tegen quote(). Dat is een noodzakelijke
- * voorwaarde van het contract, dus er valt geen owner af die anders uitgevoerd zou worden. Wie het script wil
- * ophouden, moet per adres dat bedrag met allowance aanhouden. Het filter draait één keer per run; wie tijdens de run
- * stort, komt de volgende run aan de beurt.
+ * Registration spam (audit lead 9): anyone can register, also without a balance, and the register never shrinks. The
+ * script therefore reads, per 500 owners, `params(owner).active` and balance and allowance of EURC and cbBTC in one
+ * Multicall3 per 100 owners, and keeps only owners that can reach a run of max(MIN_TRADE_FLOOR,
+ * MIN_RUN_EURC) in at least one direction: min(balance, allowance) of EURC, or of cbBTC at quote(). That is a necessary
+ * condition of the contract, so no owner drops out that would otherwise be executed. Anyone who wants to hold up the
+ * script must keep that amount with allowance per address. The filter runs once per run; anyone who deposits during
+ * the run gets their turn in the next run.
  *
- * Eindreview F-2: met genoeg lege registraties kostte alleen dat lezen het hele retry-budget, elke run weer vanaf 0.
- * - Het zoeken heeft een eigen tijdsgrens, SEARCH_SECONDS (standaard 180) na de start, binnen het retry-budget: daarna
- *   blijft er tijd over voor isDue en execute.
- * - Het register wordt niet meer altijd vanaf 0 gelezen: de volgende run begint waar deze stopte (SCAN_STATE_FILE),
- *   en loopt na het eind door vanaf 0. Stopt een run met gevonden maar ongelezen kandidaten, dan begint de volgende
- *   bij de eerste daarvan.
- * - Een fout van de node bij een portie (owners, saldo en allowance, isDue) slaat alleen die portie over, met een log.
- * - OWNERS_FILE (optioneel): adressen die elke run eerst worden bediend, vóór het register.
+ * Final review F-2: with enough empty registrations, that reading alone took the whole retry budget, each run from 0.
+ * - The search has its own time limit, SEARCH_SECONDS (default 180) after the start, within the retry budget: then
+ *   there is time left for isDue and execute.
+ * - The register is no longer always read from 0: the next run starts where this one stopped (SCAN_STATE_FILE),
+ *   and continues from 0 after the end. If a run stops with candidates found but not read, the next one starts
+ *   at the first of those.
+ * - A node error on a batch (owners, balance and allowance, isDue) only skips that batch, with a log.
+ * - OWNERS_FILE (optional): addresses that are served first every run, before the register.
  *
- * Grote correcties gaan in delen die 10 minuten na elkaar mogen. Draai dit script daarom elke 10 minuten.
+ * Large corrections go in parts that are allowed 10 minutes apart. So run this script every 10 minutes.
  *
- * Gebruik:
+ * Usage:
  *   RPC_URL=https://mainnet.base.org REBALANCER=0x… KEEPER_PRIVATE_KEY=0x… bun run keeper.ts
- * Optioneel: REWARD_TO=0x…  PAGE_SIZE=20  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
+ * Optional: REWARD_TO=0x…  PAGE_SIZE=20  DRY_RUN=1  MIN_RUN_EURC=20  BLOCK_RETRIES=3  BLOCK_WAIT_SECONDS=30
  *            RETRY_SECONDS=540  SEND_RETRY_BLOCKS=30  PRIORITY_FEE_GWEI=0.05  MAX_PRIORITY_FEE_GWEI=3
  *            GAS_LIMIT=1000000  FEE_STATE_FILE=./keeper-fee.json  FEE_HOLD_SECONDS=3600  LOCK_FILE=./keeper.lock
  *            LOCK_MAX_SECONDS=900  TX_WAIT_BLOCKS=15  TX_REPLACEMENTS=3
@@ -173,7 +173,7 @@ const abi = parseAbi([
   "function KEEPER_REWARD_EURC() view returns (uint256)",
   "function FEED_EURC_USD() view returns (address)",
   "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
-  // Custom errors, zodat viem de revert-reden kan decoderen.
+  // Custom errors, so that viem can decode the revert reason.
   "error BlockMoveExceeded(address pool)",
   "error PoolTouchedThisBlock(address pool)",
   "error ContractRetired()",
@@ -187,21 +187,21 @@ const abi = parseAbi([
   "error StaleFeed(address feed)",
 ]);
 
-/** Pool-events die een observatie kunnen schrijven of de koers verschuiven (Uniswap v3). Collect en Flash tellen niet. */
+/** Pool events that can write an observation or move the price (Uniswap v3). Collect and Flash do not count. */
 const poolEvents = parseAbi([
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
   "event Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
   "event Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
 ]);
 
-/** `Executed` van de Rebalancer: welke owner in welk blok al bediend is (eindreview F-1). */
+/** `Executed` of the Rebalancer: which owner has already been served in which block (final review F-1). */
 const executedEvent = parseAbi([
   "event Executed(address indexed owner, bool isBuy, uint256 amountIn, uint256 fee, uint256 reward, address rewardTo, uint256 amountOut, uint256 priceEurcPerBtc, uint256 totalValueEurc, uint256 fractionBps)",
 ]);
 
 const env = (name: string, fallback?: string): string => {
   const value = process.env[name] ?? fallback;
-  if (value === undefined) throw new Error(`${name} ontbreekt`);
+  if (value === undefined) throw new Error(`${name} is missing`);
   return value;
 };
 
@@ -237,33 +237,33 @@ const cooldownPolicy = {
   baseSeconds: Number(env("COOLDOWN_SECONDS", "3600")),
   maxSeconds: Number(env("COOLDOWN_MAX_SECONDS", "86400")),
 };
-if (!isAddress(rebalancer)) throw new Error("REBALANCER is geen geldig adres");
-if (!Number.isFinite(minRunEurc) || minRunEurc < 0) throw new Error("MIN_RUN_EURC moet een getal >= 0 zijn");
-if (!Number.isInteger(blockRetries) || blockRetries < 0) throw new Error("BLOCK_RETRIES moet een geheel getal >= 0 zijn");
-if (!Number.isFinite(retrySeconds) || retrySeconds < 0) throw new Error("RETRY_SECONDS moet een getal >= 0 zijn");
+if (!isAddress(rebalancer)) throw new Error("REBALANCER is not a valid address");
+if (!Number.isFinite(minRunEurc) || minRunEurc < 0) throw new Error("MIN_RUN_EURC must be a number >= 0");
+if (!Number.isInteger(blockRetries) || blockRetries < 0) throw new Error("BLOCK_RETRIES must be an integer >= 0");
+if (!Number.isFinite(retrySeconds) || retrySeconds < 0) throw new Error("RETRY_SECONDS must be a number >= 0");
 if (!Number.isFinite(searchSeconds) || searchSeconds < 0 || searchSeconds > retrySeconds) {
-  throw new Error("SEARCH_SECONDS moet een getal tussen 0 en RETRY_SECONDS zijn");
+  throw new Error("SEARCH_SECONDS must be a number between 0 and RETRY_SECONDS");
 }
-/** Eindreview F-2: adressen die elke run eerst worden bediend. Een ongeldig bestand stopt de run vóór er iets gebeurt. */
+/** Final review F-2: addresses that are served first every run. An invalid file stops the run before anything happens. */
 const priorityOwners: Address[] = ownersFile === undefined || ownersFile === "" ? [] : parseOwnersFile(readFileSync(ownersFile, "utf8"));
-if (!Number.isInteger(sendRetryBlocks) || sendRetryBlocks < 1) throw new Error("SEND_RETRY_BLOCKS moet een geheel getal >= 1 zijn");
-if (!Number.isInteger(txWaitBlocks) || txWaitBlocks < 1) throw new Error("TX_WAIT_BLOCKS moet een geheel getal >= 1 zijn");
-if (!Number.isInteger(txReplacements) || txReplacements < 0) throw new Error("TX_REPLACEMENTS moet een geheel getal >= 0 zijn");
-if (configuredFeePolicy.base > configuredFeePolicy.max) throw new Error("PRIORITY_FEE_GWEI mag niet boven MAX_PRIORITY_FEE_GWEI liggen");
-if (gasEstimate <= 0n) throw new Error("GAS_ESTIMATE moet een geheel getal > 0 zijn");
-if (tipRewardShareBps < 0n) throw new Error("TIP_REWARD_SHARE_BPS moet >= 0 zijn");
-if (tipBudgetWei < 0n) throw new Error("TIP_BUDGET_ETH moet >= 0 zijn");
-if (!isAddress(feedEthUsd)) throw new Error("FEED_ETH_USD is geen geldig adres");
-if (!Number.isFinite(feeHoldSeconds) || feeHoldSeconds < 0) throw new Error("FEE_HOLD_SECONDS moet een getal >= 0 zijn");
+if (!Number.isInteger(sendRetryBlocks) || sendRetryBlocks < 1) throw new Error("SEND_RETRY_BLOCKS must be an integer >= 1");
+if (!Number.isInteger(txWaitBlocks) || txWaitBlocks < 1) throw new Error("TX_WAIT_BLOCKS must be an integer >= 1");
+if (!Number.isInteger(txReplacements) || txReplacements < 0) throw new Error("TX_REPLACEMENTS must be an integer >= 0");
+if (configuredFeePolicy.base > configuredFeePolicy.max) throw new Error("PRIORITY_FEE_GWEI must not be above MAX_PRIORITY_FEE_GWEI");
+if (gasEstimate <= 0n) throw new Error("GAS_ESTIMATE must be an integer > 0");
+if (tipRewardShareBps < 0n) throw new Error("TIP_REWARD_SHARE_BPS must be >= 0");
+if (tipBudgetWei < 0n) throw new Error("TIP_BUDGET_ETH must be >= 0");
+if (!isAddress(feedEthUsd)) throw new Error("FEED_ETH_USD is not a valid address");
+if (!Number.isFinite(feeHoldSeconds) || feeHoldSeconds < 0) throw new Error("FEE_HOLD_SECONDS must be a number >= 0");
 if (!Number.isFinite(lockMaxSeconds) || lockMaxSeconds < retrySeconds + 60) {
-  throw new Error("LOCK_MAX_SECONDS moet minstens RETRY_SECONDS + 60 zijn");
+  throw new Error("LOCK_MAX_SECONDS must be at least RETRY_SECONDS + 60");
 }
 
 /**
- * Eén run tegelijk: twee runs zouden om dezelfde nonce en hetzelfde cool-down-bestand vechten. Het lock-bestand bevat
- * pid en starttijd (eindreview I-5). Een lock is verlopen als de pid niet meer bestaat, of als het ouder is dan
- * LOCK_MAX_SECONDS (standaard 900), ook als de pid inmiddels van een ander proces is. Dat laatste is veilig omdat deze
- * run zichzelf 15 s vóór die leeftijd stopt (watchdog hieronder).
+ * One run at a time: two runs would fight over the same nonce and the same cool-down file. The lock file contains
+ * pid and start time (final review I-5). A lock is stale if the pid no longer exists, or if it is older than
+ * LOCK_MAX_SECONDS (default 900), even if the pid now belongs to another process. The latter is safe because this
+ * run stops itself 15 s before that age (watchdog below).
  */
 const lockStartedAt = Math.floor(Date.now() / 1000);
 const pidAlive = (pid: number): boolean => {
@@ -271,42 +271,42 @@ const pidAlive = (pid: number): boolean => {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    // EPERM: het proces bestaat, maar is van een andere gebruiker.
+    // EPERM: the process exists, but belongs to another user.
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 };
-// Verificatie 579f763 (K-3): een verlopen lock wordt atomair opgeruimd (`acquireLock` in lock.ts), zodat twee runs die
-// tegelijk starten niet elkaars nieuwe lock verwijderen.
+// Verification 579f763 (K-3): a stale lock is cleaned up atomically (`acquireLock` in lock.ts), so that two runs that
+// start at the same time do not remove each other's new lock.
 if (
   !acquireLock(lockFile, {
     pid: process.pid,
     nowSeconds: lockStartedAt,
     maxAgeSeconds: lockMaxSeconds,
     isAlive: pidAlive,
-    onStaleRemoved: (lock) => console.warn(`verlopen lock opgeruimd (pid ${lock.pid}, ${lockStartedAt - lock.startedAt} s oud)`),
+    onStaleRemoved: (lock) => console.warn(`stale lock removed (pid ${lock.pid}, ${lockStartedAt - lock.startedAt} s old)`),
   })
 ) {
-  console.warn(`Een andere keeper-run loopt nog (${lockFile}); deze run stopt.`);
+  console.warn(`Another keeper run is still running (${lockFile}); this run stops.`);
   process.exit(0);
 }
 process.on("exit", () => {
   try {
     if (parseLock(readFileSync(lockFile, "utf8"), 0).pid === process.pid) unlinkSync(lockFile);
   } catch {
-    // al weg
+    // already gone
   }
 });
-// Eindreview I-5: een run die blijft hangen, stopt zichzelf voordat zijn lock verloopt.
+// Final review I-5: a run that hangs stops itself before its lock expires.
 setTimeout(() => {
-  console.error(`run loopt langer dan ${lockWatchdogSeconds(lockMaxSeconds)} s (LOCK_MAX_SECONDS ${lockMaxSeconds}); gestopt`);
+  console.error(`run exceeds ${lockWatchdogSeconds(lockMaxSeconds)} s (LOCK_MAX_SECONDS ${lockMaxSeconds}); stopped`);
   process.exit(1);
 }, lockWatchdogSeconds(lockMaxSeconds) * 1000).unref();
 
 const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
 const account = dryRun ? undefined : privateKeyToAccount(env("KEEPER_PRIVATE_KEY") as Hex);
 const rewardTo = (process.env.REWARD_TO ?? account?.address ?? "0x0000000000000000000000000000000000000000") as Address;
-// Eindreview I-8: een ongeldige REWARD_TO liet elke simulatie falen met een encodefout, die als fout van de node gold;
-// de keeper probeerde dan tot het budget op was, zonder duidelijke melding. Nu stopt de run meteen.
+// Final review I-8: an invalid REWARD_TO made every simulation fail with an encode error, which counted as node error;
+// the keeper then kept trying until the budget was spent, without a clear message. Now the run stops right away.
 {
   const problem = rewardToError(rewardTo, rebalancer);
   if (problem !== null) throw new Error(problem);
@@ -316,16 +316,16 @@ const walletClient = account ? createWalletClient({ account, chain: base, transp
 const nowSec = () => Math.floor(Date.now() / 1000);
 const startSeconds = nowSec();
 const deadline = retryDeadline(startSeconds, retrySeconds);
-/** Eindreview F-2: eigen tijdsgrens voor het zoeken in het register, gescheiden van het retry-budget. */
+/** Final review F-2: own time limit for searching the register, separate from the retry budget. */
 const searchDeadline = startSeconds + searchSeconds;
 
-/** Leest de node het volgende blok (blok-overrides)? Eén keer per run gecontroleerd met de probe. */
+/** Does the node read the next block (block overrides)? Checked once per run with the probe. */
 let readsNextBlock = false;
 
 /**
- * Waarop een lezing draait. Altijd vastgepind op het gelezen blok (`blockNumber`): anders kan de node al een blok verder
- * zijn, en rekent hij met de overrides van het vorige blok op de staat van het nieuwe (dan telt een aanraking in dat
- * nieuwe blok weer mee).
+ * What a read runs on. Always pinned to the block that was read (`blockNumber`): otherwise the node may already be one
+ * block further, and it computes with the overrides of the previous block on the state of the new one (then a touch in
+ * that new block counts again).
  */
 type At = { blockNumber?: bigint; blockOverrides?: BlockOverrides };
 const atParams = (at: At) => ({
@@ -333,13 +333,13 @@ const atParams = (at: At) => ({
   ...(at.blockOverrides === undefined ? {} : { blockOverrides: at.blockOverrides }),
 });
 
-/** Lezen op `latest`: vastgepind op dat blok, met de overrides van het volgende blok als de node die toepast. */
+/** Reading at `latest`: pinned to that block, with the overrides of the next block if the node applies them. */
 const atLatest = (latest: { number: bigint; timestamp: bigint }): At => ({
   blockNumber: latest.number,
   blockOverrides: overridesFor(latest),
 });
 
-/** Overrides voor het blok ná `latest`, of undefined bij de terugval op het laatste blok. */
+/** Overrides for the block after `latest`, or undefined when falling back to the latest block. */
 const overridesFor = (latest: { number: bigint; timestamp: bigint }): BlockOverrides | undefined =>
   readsNextBlock ? nextBlockOverrides(latest) : undefined;
 
@@ -367,7 +367,7 @@ const read = <T>(
     functionName,
     args,
     ...atParams(at),
-    // biome-ignore lint/suspicious/noExplicitAny: viem's ABI-generics zijn te strikt voor een gedeelde helper
+    // biome-ignore lint/suspicious/noExplicitAny: viem's ABI generics are too strict for a shared helper
   } as any) as Promise<T>;
 
 const simulateExecute = (owner: Address, at: At = {}) =>
@@ -386,23 +386,23 @@ const revertOf = (error: unknown): ContractFunctionRevertedError | undefined => 
   return reverted instanceof ContractFunctionRevertedError ? reverted : undefined;
 };
 
-/** Naam van de contract-error (bijvoorbeeld "BlockMoveExceeded"), als viem die kon decoderen. */
+/** Name of the contract error (for example "BlockMoveExceeded"), if viem could decode it. */
 const errorNameOf = (error: unknown): string | undefined => revertOf(error)?.data?.errorName;
 
-/** Eerste regel van een viem-fout, met de contract-error als die er is (bijvoorbeeld NotDue()). */
+/** First line of a viem error, with the contract error if there is one (for example NotDue()). */
 const describeError = (error: unknown): string => {
   const reverted = revertOf(error);
   if (reverted?.data?.errorName) {
     return `${reverted.data.errorName}(${(reverted.data.args ?? []).join(", ")})`;
   }
-  // Verificatie 579f763 (info b): nooit de RPC-URL (met een mogelijke API-sleutel) in de log.
+  // Verification 579f763 (info b): never the RPC URL (with a possible API key) in the log.
   if (error instanceof BaseError) return redactRpcUrl(error.shortMessage, rpcUrl);
   return redactRpcUrl(String((error as Error)?.message ?? error).split("\n")[0], rpcUrl);
 };
 
 /**
- * Wacht tot het laatste blok minstens `target` is (Base: ~2 s per blok). Geeft false als de chain
- * BLOCK_WAIT_SECONDS lang geen nieuw blok maakt, of als `until` (unix-seconden) verstreken is.
+ * Wait until the latest block is at least `target` (Base: ~2 s per block). Returns false if the chain
+ * produces no new block for BLOCK_WAIT_SECONDS, or if `until` (unix seconds) has passed.
  */
 const waitForBlock = async (target: bigint | null, until?: number): Promise<boolean> => {
   if (target === null) return true;
@@ -421,11 +421,11 @@ const waitForBlock = async (target: bigint | null, until?: number): Promise<bool
   }
 };
 
-/** Wacht tot er een blok ná `block` is. */
+/** Wait until there is a block after `block`. */
 const waitForBlockAfter = (block: bigint | null, until?: number): Promise<boolean> =>
   waitForBlock(block === null ? null : block + 1n, until);
 
-/** Controleer één keer per run of de node blok-overrides toepast (probe die timestamp en bloknummer teruggeeft). */
+/** Check once per run whether the node applies block overrides (probe that returns timestamp and block number). */
 const probeOverrides = async (): Promise<boolean> => {
   try {
     const latest = await publicClient.getBlock();
@@ -433,7 +433,7 @@ const probeOverrides = async (): Promise<boolean> => {
     const { data } = await publicClient.call({ data: OVERRIDE_PROBE_CODE, blockOverrides: overrides });
     return overridesApplied(data, overrides);
   } catch (error) {
-    console.warn(`probe voor blok-overrides mislukt: ${describeError(error)}`);
+    console.warn(`probe for block overrides failed: ${describeError(error)}`);
     return false;
   }
 };
@@ -447,16 +447,16 @@ const failed = (owner: Address, error: unknown) => {
   cooldowns = recordFailure(cooldowns, owner, nowSeconds, message, cooldownPolicy);
   saveCooldowns();
   const entry = cooldowns[owner.toLowerCase()];
-  console.error(`${owner}: ${message}; cool-down tot ${new Date(entry.until * 1000).toISOString()} (mislukking ${entry.failures})`);
+  console.error(`${owner}: ${message}; cool-down until ${new Date(entry.until * 1000).toISOString()} (failure ${entry.failures})`);
 };
 
-/** Blok van de laatste eigen transactie in deze keeper-run; de volgende owner pas in een later blok. */
+/** Block of the last own transaction in this keeper run; the next owner only in a later block. */
 let lastRunBlock: bigint | null = null;
-/** Na een blokkade (eigen transactie on-chain gerevert door een tijdelijke oorzaak): vroegste blok voor een nieuwe send. */
+/** After a blockade (own transaction reverted on-chain due to a temporary cause): earliest block for a new send. */
 let sendFromBlock: bigint | null = null;
-/** Opeenvolgende eigen reverts zonder blokkade in deze run (`quietRevertSendBlock`); weer 0 na een geslaagde run. */
+/** Consecutive own reverts without a blockade in this run (`quietRevertSendBlock`); back to 0 after a successful run */
 let quietReverts = 0;
-/** Priority fee voor de volgende transactie; loopt op na een blokkade, tot MAX_PRIORITY_FEE_GWEI (`startPriorityFee`). */
+/** Priority fee for the next transaction; rises after a blockade, up to MAX_PRIORITY_FEE_GWEI (`startPriorityFee`). */
 const readFeeState = (): FeeState | undefined => {
   try {
     return existsSync(feeStateFile) ? parseFeeState(readFileSync(feeStateFile, "utf8")) : undefined;
@@ -466,12 +466,12 @@ const readFeeState = (): FeeState | undefined => {
 };
 
 /**
- * Eindreview F-1: plafond van de tip uit wat een run oplevert (`capFeePolicy`). De beloning in wei volgt uit
- * KEEPER_REWARD_EURC en de Chainlink-koersen EURC/USD (de feed van het contract) en ETH/USD. Is een koers niet te lezen,
- * dan telt de beloning als 0 en geldt alleen TIP_BUDGET_ETH: liever te weinig bieden dan te veel.
- * Het contract betaalt hooguit min(KEEPER_REWARD_EURC, fee / 2) (zelf-audit 2026-09-17, L-D). Elke run heeft een fee
- * van minstens KEEPER_REWARD_EURC (de fee van MIN_TRADE_FLOOR), dus KEEPER_REWARD_EURC / 2 is wat elke run zeker
- * oplevert.
+ * Final review F-1: cap of the tip from what a run yields (`capFeePolicy`). The reward in wei follows from
+ * KEEPER_REWARD_EURC and the Chainlink prices EURC/USD (the contract's feed) and ETH/USD. If a price cannot be read,
+ * the reward counts as 0 and only TIP_BUDGET_ETH applies: better to bid too little than too much.
+ * The contract pays at most min(KEEPER_REWARD_EURC, fee / 2) (self-audit 2026-09-17, L-D). Every run has a fee
+ * of at least KEEPER_REWARD_EURC (the fee of MIN_TRADE_FLOOR), so KEEPER_REWARD_EURC / 2 is what every run is certain
+ * to yield.
  */
 const readRewardWei = async (): Promise<bigint> => {
   if (/^0x0{40}$/i.test(rewardTo)) return 0n;
@@ -484,7 +484,7 @@ const readRewardWei = async (): Promise<bigint> => {
     ]);
     return eurcToWei(reward / 2n, eurcRound[1], ethRound[1]);
   } catch (error) {
-    console.warn(`beloning in ETH niet te lezen (${describeError(error)}); tipplafond alleen uit TIP_BUDGET_ETH`);
+    console.warn(`reward in ETH cannot be read (${describeError(error)}); tip cap only from TIP_BUDGET_ETH`);
     return 0n;
   }
 };
@@ -495,17 +495,17 @@ const feePolicy = capFeePolicy(configuredFeePolicy, {
   gasEstimate,
 });
 if (feePolicy.max < configuredFeePolicy.max) {
-  console.log(`tipplafond ${formatGwei(feePolicy.max)} gwei (tip × ${gasEstimate} gas ≤ beloning × ${tipRewardShareBps}/10000 + budget)`);
+  console.log(`tip cap ${formatGwei(feePolicy.max)} gwei (tip × ${gasEstimate} gas ≤ reward × ${tipRewardShareBps}/10000 + budget)`);
 }
 const initialFeeState = readFeeState();
 let lastBlockadeAt = initialFeeState?.lastBlockadeAt ?? 0;
 let priorityFee = startPriorityFee(initialFeeState, startSeconds, feePolicy, feeHoldSeconds);
 const saveFeeState = () =>
   writeFileSync(feeStateFile, `${JSON.stringify({ priorityFeeWei: priorityFee.toString(), lastBlockadeAt }, null, 2)}\n`);
-/** Een blokkade of een eigen transactie in deze run; zonder beide zakt de tip aan het eind van de run. */
+/** A blockade or an own transaction in this run; without either, the tip drops at the end of the run. */
 let blockadeThisRun = false;
 let sentThisRun = false;
-/** Eindreview F-1: na een eigen transactie zonder blokkade zakt de tip (halveren, niet onder de basis). */
+/** Final review F-1: after an own transaction without a blockade the tip drops (halving, not below the base). */
 const lowerFee = () => {
   const next = decayPriorityFee(priorityFee, feePolicy);
   if (next === priorityFee) return;
@@ -516,10 +516,10 @@ const lowerFee = () => {
 let pools: readonly Address[] | undefined;
 
 /**
- * Is `owner` na de simulatie (op blok `simulatedBlock`) en vóór de eigen transactie al door een ander uitgevoerd? In het
- * blok van de eigen transactie (eindreview F-1) of in een blok daartussen (verificatie 579f763, K-2): `Executed`-logs
- * voor die owner van `simulatedBlock` + 1 tot en met het blok van de receipt (`servedSince`). Bij een leesfout: niet
- * bediend (het oude gedrag).
+ * Has `owner` already been executed by someone else after the simulation (at block `simulatedBlock`) and before our
+ * own transaction? In the block of our own transaction (final review F-1) or in a block in between (verification
+ * 579f763, K-2): `Executed` logs for that owner from `simulatedBlock` + 1 through the block of the receipt
+ * (`servedSince`). On a read error: not served (the old behaviour).
  */
 const servedByOther = async (owner: Address, simulatedBlock: bigint, receipt: TransactionReceipt): Promise<boolean> => {
   try {
@@ -541,16 +541,16 @@ const servedByOther = async (owner: Address, simulatedBlock: bigint, receipt: Tr
       receipt,
     );
   } catch (error) {
-    console.warn(`Executed-logs voor ${owner} in blok ${simulatedBlock + 1n}–${receipt.blockNumber} niet te lezen: ${describeError(error)}`);
+    console.warn(`Executed logs for ${owner} in block ${simulatedBlock + 1n}–${receipt.blockNumber} unreadable: ${describeError(error)}`);
     return false;
   }
 };
 
 /**
- * Transacties die vóór de eigen transactie in dat blok een van beide pools aanraakten (Swap, Mint of Burn), zonder directe
- * `execute`'s van andere keepers, en de hoogste tip daarvan; en of `owner` sinds de simulatie al door een ander is
- * uitgevoerd (`servedByOther`). Bij een leesfout van de pool-logs: `touched` onbekend (false) en geen tip; dan loopt de
- * fee niet op.
+ * Transactions that touched one of both pools before our own transaction in that block (Swap, Mint or Burn), without
+ * direct `execute`s of other keepers, and the highest tip among them; and whether `owner` has already been executed by
+ * someone else since the simulation (`servedByOther`). On a read error of the pool logs: `touched` unknown (false) and
+ * no tip; then the fee does not rise.
  */
 const blockersOf = async (
   owner: Address,
@@ -581,15 +581,15 @@ const blockersOf = async (
     );
     return { touched: blocking.length > 0, tip: blockerTip(blocking, receipt.transactionIndex), served };
   } catch (error) {
-    console.warn(`aanrakers in blok ${receipt.blockNumber} niet te lezen: ${describeError(error)}`);
+    console.warn(`touchers in block ${receipt.blockNumber} cannot be read: ${describeError(error)}`);
     return { touched: false, tip: undefined, served: await servedPromise };
   }
 };
 
 /**
- * Hersimuleer een on-chain gerevert `execute` op de staat aan het begin van het blok van de transactie: het vorige blok,
- * met de overrides van het blok zelf. Zo tellen alleen transacties vóór de eigen transactie, niet een aanraking erna.
- * Zonder override-ondersteuning: op het blok zelf (dan kan een latere aanraking ook meetellen).
+ * Re-simulate an `execute` that reverted on-chain on the state at the start of the transaction's block: the previous
+ * block, with the overrides of the block itself. So only transactions before our own count, not a touch after it.
+ * Without override support: on the block itself (then a later touch can count as well).
  */
 const resimulateAtBlockStart = async (owner: Address, receipt: TransactionReceipt): Promise<Resimulation> => {
   try {
@@ -609,9 +609,9 @@ const resimulateAtBlockStart = async (owner: Address, receipt: TransactionReceip
 };
 
 /**
- * Eindreview I-6: wacht tot een van `hashes` (dezelfde nonce: de transactie en haar vervangers) gemined is. undefined
- * als dat na TX_WAIT_BLOCKS blokken sinds `sentAtBlock` niet zo is. Een fout bij het lezen van een receipt telt als
- * "nog niet gemined". Maakt de chain BLOCK_WAIT_SECONDS lang geen blok, dan ook undefined.
+ * Final review I-6: wait until one of `hashes` (same nonce: the transaction and its replacements) is mined. undefined
+ * if that is not the case after TX_WAIT_BLOCKS blocks since `sentAtBlock`. An error reading a receipt counts as
+ * "not mined yet". If the chain produces no block for BLOCK_WAIT_SECONDS, also undefined.
  */
 const waitMined = async (hashes: readonly Hex[], sentAtBlock: bigint): Promise<TransactionReceipt | undefined> => {
   let last = sentAtBlock;
@@ -621,7 +621,7 @@ const waitMined = async (hashes: readonly Hex[], sentAtBlock: bigint): Promise<T
       try {
         return await publicClient.getTransactionReceipt({ hash });
       } catch {
-        // nog niet gemined, of een fout van de node: volgende poging
+        // not mined yet, or a node error: next attempt
       }
     }
     const latest = await publicClient.getBlockNumber({ cacheTime: 0 }).catch(() => last);
@@ -638,35 +638,35 @@ const waitMined = async (hashes: readonly Hex[], sentAtBlock: bigint): Promise<T
 type Outcome = "executed" | "skipped" | "dry-run" | "retry";
 
 /**
- * Eén poging voor een owner: lezen, simuleren en uitvoeren. "retry" = tijdelijk, opnieuw in een blok ná `block`.
- * `isRetry`: een herhaalde poging, begrensd door het retry-budget.
+ * One attempt for an owner: read, simulate and execute. "retry" = temporary, again in a block after `block`.
+ * `isRetry`: a repeated attempt, bounded by the retry budget.
  */
 const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRetry: boolean): Promise<{ outcome: Outcome; block: bigint | null }> => {
-  // Na een blokkade pas gemiddeld SEND_RETRY_BLOCKS later opnieuw; simuleren zonder te mogen versturen heeft geen zin.
+  // After a blockade only again SEND_RETRY_BLOCKS later on average; simulating without being allowed to send is futile.
   const { target, throttled } = nextAttemptBlock(retryAfterBlock, lastRunBlock, dryRun ? null : sendFromBlock);
   if (!(await waitForBlock(target, isRetry || throttled ? deadline : undefined))) {
-    console.log(`${owner}: overgeslagen, geen blok ${target} binnen het wachtbudget; geen cool-down`);
+    console.log(`${owner}: skipped, no block ${target} within the wait budget; no cool-down`);
     return { outcome: "skipped", block: null };
   }
 
   const latest = await publicClient.getBlock();
   const at = atLatest(latest);
   const [due, eurcDelta] = await read<readonly [boolean, bigint]>("isDue", [owner], at);
-  const direction = eurcDelta > 0n ? "koop" : "verkoop";
+  const direction = eurcDelta > 0n ? "buy" : "sell";
   const eurc = formatEurc(eurcDelta < 0n ? -eurcDelta : eurcDelta);
   if (due) {
     const sizeReason = runSizeSkipReason(eurcDelta, minRunEurc);
     if (sizeReason !== null) {
-      console.log(`${owner}: overgeslagen, ${sizeReason}`);
+      console.log(`${owner}: skipped, ${sizeReason}`);
       return { outcome: "skipped", block: null };
     }
   }
 
-  // Eerst simuleren: een owner die revert (dust dat op de route naar 0 afrondt, blacklist, te krappe
-  // slippage) blijft in dueOwners staan en zou anders elke run ~160k gas kosten zonder beloning. Ook als isDue
-  // false zegt: dat kan een vol blokvenster zijn, en alleen de simulatie geeft de reden.
+  // Simulate first: an owner that reverts (dust that rounds to 0 on the route, blacklist, too tight
+  // slippage) stays in dueOwners and would otherwise cost ~160k gas every run without a reward. Also when isDue
+  // says false: that can be a full block window, and only the simulation gives the reason.
   let failure: unknown;
-  /** Oordeel over de fout, als die niet rechtstreeks uit `failure` volgt (on-chain revert). */
+  /** Verdict on the error, if it does not follow directly from `failure` (on-chain revert). */
   let verdict: ReturnType<typeof onchainRevertVerdict>["failure"] | undefined;
   let simulated = false;
   try {
@@ -677,35 +677,35 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
   }
 
   if (!due && !isBlockWindowRevert(errorNameOf(failure))) {
-    console.log(`${owner}: niet meer due${failure === undefined ? "" : ` (${describeError(failure)})`}`);
+    console.log(`${owner}: no longer due${failure === undefined ? "" : ` (${describeError(failure)})`}`);
     return { outcome: "skipped", block: null };
   }
 
   if (simulated) {
     if (dryRun || !walletClient) {
-      console.log(`[dry-run] ${owner}: ${direction} ≈ ${eurc} EURC (simulatie ok${at.blockOverrides ? ", volgend blok" : ""})`);
+      console.log(`[dry-run] ${owner}: ${direction} ≈ ${eurc} EURC (simulation ok${at.blockOverrides ? ", next block" : ""})`);
       return { outcome: "dry-run", block: null };
     }
-    // Verificatie 579f763 (K-6): geen transactie die de watchdog halverwege zou afbreken.
+    // Verification 579f763 (K-6): no transaction that the watchdog would cut off halfway.
     const needed = sendWorstCaseSeconds(txWaitBlocks, txReplacements, blockWaitSeconds);
     if (!hasTimeToSend(nowSec(), lockStartedAt + lockWatchdogSeconds(lockMaxSeconds), needed)) {
-      console.log(`${owner}: overgeslagen, te weinig tijd vóór de watchdog voor een transactie (${needed} s nodig); geen cool-down`);
+      console.log(`${owner}: skipped, too little time before the watchdog for a transaction (${needed} s needed); no cool-down`);
       return { outcome: "skipped", block: null };
     }
     try {
-      // Verificatie 579f763 (K-6): hangt er nog een eigen transactie (vorige run gestopt, of een fout van de node tijdens
-      // het vervangen), dan niets versturen: tijdelijk, opnieuw in een later blok.
+      // Verification 579f763 (K-6): if one of our own transactions is still pending (previous run stopped, or node error
+      // during replacement), send nothing: temporary, again in a later block.
       const [minedNonce, pendingNonce] = await Promise.all([
         publicClient.getTransactionCount({ address: walletClient.account.address, blockTag: "latest" }),
         publicClient.getTransactionCount({ address: walletClient.account.address, blockTag: "pending" }),
       ]);
       if (ownTransactionPending(minedNonce, pendingNonce)) {
-        throw new Error(`eigen transactie met nonce ${minedNonce} hangt nog (pending ${pendingNonce}); niets verstuurd`);
+        throw new Error(`own transaction with nonce ${minedNonce} still pending (pending ${pendingNonce}); none sent`);
       }
-      // Gas, beide fees, nonce en chainId expliciet: anders schat viem ze zelf. eth_estimateGas draait op het laatste
-      // blok (waar een aanraking de schatting laat reverten), een fee-schatting overschrijft de gekozen tip, en zonder
-      // nonce probeert viem eerst eth_fillTransaction. GAS_LIMIT 1.000.000 is de grens die
-      // test_fork_buyAndSellGasCost bewaakt.
+      // Gas, both fees, nonce and chainId explicitly: otherwise viem estimates them itself. eth_estimateGas runs on the
+      // latest block (where a touch makes the estimate revert), a fee estimate overwrites the chosen tip, and without
+      // a nonce viem first tries eth_fillTransaction. GAS_LIMIT 1,000,000 is the limit that
+      // test_fork_buyAndSellGasCost guards.
       const nonce = pendingNonce;
       const send = (fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) =>
         walletClient.writeContract({
@@ -716,17 +716,17 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
           gas: gasLimit,
           ...fees,
           nonce,
-          // `chainId` staat niet in het type van writeContract, maar gaat via sendTransaction mee naar
-          // prepareTransactionRequest; zonder probeert viem eerst eth_fillTransaction (viem 2.56.3).
+          // `chainId` is not in the type of writeContract, but is passed via sendTransaction to
+          // prepareTransactionRequest; without it viem first tries eth_fillTransaction (viem 2.56.3).
           ...({ chainId: base.id } as unknown as Record<string, never>),
         });
       let fees = { maxPriorityFeePerGas: priorityFee, maxFeePerGas: maxFeePerGas(latest.baseFeePerGas ?? 0n, priorityFee) };
       const hashes: Hex[] = [await send(fees)];
       let sentAtBlock = latest.number;
       let receipt: TransactionReceipt | undefined;
-      // Eindreview I-6: niet gemined binnen TX_WAIT_BLOCKS blokken (bijvoorbeeld een base fee die boven maxFeePerGas
-      // steeg): vervangen met dezelfde nonce en hogere fees, hooguit TX_REPLACEMENTS keer. Lukt dat niet, dan stopt de
-      // run duidelijk; een volgende send zou achter dezelfde nonce blijven hangen. Geen cool-down.
+      // Final review I-6: not mined within TX_WAIT_BLOCKS blocks (for example a base fee that rose above maxFeePerGas):
+      // replace with the same nonce and higher fees, at most TX_REPLACEMENTS times. If that fails, the
+      // run stops clearly; a next send would get stuck behind the same nonce. No cool-down.
       for (let replacements = 0; ; replacements += 1) {
         receipt = await waitMined(hashes, sentAtBlock);
         if (receipt !== undefined) break;
@@ -735,18 +735,18 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
         if (next === null) {
           saveCooldowns();
           throw new Error(
-            `transactie ${hashes.join(", ")} (nonce ${nonce}) voor ${owner} niet binnen ${txWaitBlocks} blokken gemined en niet meer te vervangen; run gestopt`,
+            `transaction ${hashes.join(", ")} (nonce ${nonce}) for ${owner} not mined within ${txWaitBlocks} blocks and no longer replaceable; run stopped`,
           );
         }
         console.warn(
-          `${owner}: transactie ${hashes.at(-1)} niet gemined na ${txWaitBlocks} blokken; vervangen (nonce ${nonce}, tip ${formatGwei(next.maxPriorityFeePerGas)} gwei, maxFee ${formatGwei(next.maxFeePerGas)} gwei)`,
+          `${owner}: transaction ${hashes.at(-1)} not mined after ${txWaitBlocks} blocks; replacing (nonce ${nonce}, tip ${formatGwei(next.maxPriorityFeePerGas)} gwei, maxFee ${formatGwei(next.maxFeePerGas)} gwei)`,
         );
         fees = next;
         try {
           hashes.push(await send(fees));
         } catch (error) {
-          // Bijvoorbeeld "nonce too low": de vorige is intussen gemined. De volgende ronde vindt die receipt.
-          console.warn(`${owner}: vervangen mislukt (${describeError(error)})`);
+          // For example "nonce too low": the previous one was mined in the meantime. The next round finds that receipt.
+          console.warn(`${owner}: replacement failed (${describeError(error)})`);
         }
         sentAtBlock = block.number;
       }
@@ -761,9 +761,9 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
         lowerFee();
         return { outcome: "executed", block: receipt.blockNumber };
       }
-      // Gerevert na een geslaagde simulatie: de staat veranderde in de tussentijd. Hersimuleer op het begin van dat
-      // blok voor de reden, en kijk wie vóór ons een pool aanraakte.
-      failure = new Error(`transactie ${hash} is gerevert`);
+      // Reverted after a successful simulation: the state changed in the meantime. Re-simulate at the start of that
+      // block for the reason, and look at who touched a pool before us.
+      failure = new Error(`transaction ${hash} reverted`);
       const [resimulation, blockers] = await Promise.all([
         resimulateAtBlockStart(owner, receipt),
         blockersOf(owner, latest.number, receipt),
@@ -771,45 +771,45 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
       const judged = onchainRevertVerdict(resimulation, blockers.touched, blockers.served);
       verdict = judged.failure;
       if (judged.failure.servedByOther) {
-        // Eindreview F-1 en K-2: een ander voerde deze owner na onze simulatie uit, in dit blok of een eerder. Bediend;
-        // geen cool-down, geen hogere tip.
+        // Final review F-1 and K-2: another party executed this owner after our simulation, in this block or earlier.
+        // Served; no cool-down, no higher tip.
         console.log(
-          `${owner}: al uitgevoerd door een ander (blok ${latest.number + 1n}–${receipt.blockNumber}); geen cool-down, geen hogere tip`,
+          `${owner}: already executed by another (block ${latest.number + 1n}–${receipt.blockNumber}); no cool-down, no higher tip`,
         );
         lowerFee();
         return { outcome: "skipped", block: null };
       }
-      if (resimulation.kind === "reverted") failure = new Error(`transactie ${hash} is gerevert (${resimulation.errorName ?? "revert"})`);
+      if (resimulation.kind === "reverted") failure = new Error(`transaction ${hash} reverted (${resimulation.errorName ?? "revert"})`);
       if (judged.blockade) {
-        // Blokkade: een andere transactie raakte vóór ons een pool aan. Hogere tip, en pas gemiddeld SEND_RETRY_BLOCKS later.
+        // Blockade: another transaction touched a pool before us. Higher tip, and only SEND_RETRY_BLOCKS later on average.
         sendFromBlock = nextSendBlock(receipt.blockNumber, sendRetryBlocks, Math.random());
         priorityFee = nextPriorityFee(priorityFee, blockers.tip, feePolicy);
         lastBlockadeAt = nowSec();
         blockadeThisRun = true;
         saveFeeState();
         console.warn(
-          `${owner}: blokkade in blok ${receipt.blockNumber} (tip aanraker ${blockers.tip === undefined ? "onbekend" : `${formatGwei(blockers.tip)} gwei`}); volgende tip ${formatGwei(priorityFee)} gwei`,
+          `${owner}: blockade in block ${receipt.blockNumber} (toucher tip ${blockers.tip === undefined ? "unknown" : `${formatGwei(blockers.tip)} gwei`}); next tip ${formatGwei(priorityFee)} gwei`,
         );
       } else {
         lowerFee();
         if (isTemporaryFailure(judged.failure)) {
-          // Verificatie 579f763 (info a): tijdelijk zonder blokkade (bijv. een directe execute van een ander). Na de eerste
-          // keer niet elk blok opnieuw versturen, maar 2, 4, … tot SEND_RETRY_BLOCKS blokken wachten; de tip blijft.
+          // Verification 579f763 (info a): temporary without a blockade (e.g. a direct execute of another party). After the
+          // first time do not send again every block, but wait 2, 4, … up to SEND_RETRY_BLOCKS blocks; the tip stays.
           quietReverts += 1;
           const from = quietRevertSendBlock(receipt.blockNumber, quietReverts, sendRetryBlocks);
           if (from !== null && (sendFromBlock === null || from > sendFromBlock)) {
             sendFromBlock = from;
-            console.log(`${owner}: ${quietReverts}e revert zonder blokkade in deze run; volgende transactie niet vóór blok ${from}`);
+            console.log(`${owner}: revert ${quietReverts} without blockade in this run; next transaction not before block ${from}`);
           }
         }
       }
     } catch (error) {
-      if (error instanceof Error && error.message.includes("run gestopt")) throw error;
+      if (error instanceof Error && error.message.includes("run stopped")) throw error;
       failure = error;
     }
   }
 
-  // Een fout van de node (geen revert van het contract) zegt niets over de owner: tijdelijk, geen cool-down.
+  // A node error (not a contract revert) says nothing about the owner: temporary, no cool-down.
   const judged = verdict ?? { errorName: errorNameOf(failure), transient: revertOf(failure) === undefined };
   const action = failureAction(judged, nowSec(), deadline);
   if (action === "fail") {
@@ -817,18 +817,18 @@ const attemptOwner = async (owner: Address, retryAfterBlock: bigint | null, isRe
     return { outcome: "skipped", block: null };
   }
   if (action === "skip") {
-    console.log(`${owner}: ${describeError(failure)}, retry-budget (${retrySeconds} s) op; geen cool-down`);
+    console.log(`${owner}: ${describeError(failure)}, retry budget (${retrySeconds} s) spent; no cool-down`);
     return { outcome: "skipped", block: null };
   }
-  console.log(`${owner}: ${describeError(failure)}; opnieuw in een volgend blok`);
+  console.log(`${owner}: ${describeError(failure)}; again in a following block`);
   return { outcome: "retry", block: lastRunBlock !== null && lastRunBlock > latest.number ? lastRunBlock : latest.number };
 };
 
-/** Owners per `owners(offset, limit)`-lezing en per multicall voor saldo en allowance (5 calls per owner). */
+/** Owners per `owners(offset, limit)` read and per multicall for balance and allowance (5 calls per owner). */
 const REGISTER_PAGE = 500n;
 const FUNDS_BATCH = 100;
 
-/** Multicall3 over losse contract-calls, één eth_call per portie; een mislukte call geeft undefined. */
+/** Multicall3 over separate contract calls, one eth_call per batch; a failed call gives undefined. */
 const multicallResults = async (
   contracts: readonly { address: Address; functionName: string; args?: readonly unknown[] }[],
   at: At = {},
@@ -838,21 +838,21 @@ const multicallResults = async (
     allowFailure: true,
     batchSize: 0,
     ...atParams(at),
-    // biome-ignore lint/suspicious/noExplicitAny: gemengde functies in één multicall
+    // biome-ignore lint/suspicious/noExplicitAny: mixed functions in one multicall
   } as any);
   return (results as { status: string; result?: unknown }[]).map((r) => (r.status === "success" ? r.result : undefined));
 };
 
-/** Een kandidaat, met zijn plek in het register (null voor een adres uit OWNERS_FILE). */
+/** A candidate, with its position in the register (null for an address from OWNERS_FILE). */
 type Candidate = { owner: Address; index: bigint | null };
 
-/** Wat het filter nodig heeft: de tokens van het contract, de feedkoers en de ondergrens. */
+/** What the filter needs: the contract's tokens, the feed price and the lower bound. */
 type FilterContext = { eurcToken: Address; cbbtcToken: Address; price: bigint; minRun: bigint };
 
 /**
- * Lead 9: welke van deze owners kunnen in minstens één richting een run halen (`filterCandidates`)? Eén multicall. Een
- * owner waarvan een lezing mislukt, blijft voorzichtigheidshalve kandidaat. Een fout van de node gooit; de aanroeper
- * slaat de portie dan over.
+ * Lead 9: which of these owners can reach a run in at least one direction (`filterCandidates`)? One multicall. An
+ * owner for which a read fails stays a candidate as a precaution. A node error throws; the caller
+ * then skips the batch.
  */
 const fundedAmong = async (owners: readonly Address[], ctx: FilterContext): Promise<Set<string>> => {
   const results = await multicallResults(
@@ -869,7 +869,7 @@ const fundedAmong = async (owners: readonly Address[], ctx: FilterContext): Prom
   owners.forEach((owner, i) => {
     const [params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance] = results.slice(i * 5, i * 5 + 5);
     if ([params, eurcBalance, eurcAllowance, cbbtcBalance, cbbtcAllowance].some((r) => r === undefined)) {
-      console.warn(`${owner}: saldo of allowance niet te lezen; blijft kandidaat`);
+      console.warn(`${owner}: balance or allowance cannot be read; stays a candidate`);
       keep.add(owner.toLowerCase());
       return;
     }
@@ -887,8 +887,8 @@ const fundedAmong = async (owners: readonly Address[], ctx: FilterContext): Prom
 };
 
 /**
- * Tokens, feedkoers en ondergrens voor het filter. undefined als de feedkoers revert: dan is volgens het contract niemand
- * due. Een fout van de node bij deze paar lezingen breekt de run af (er is dan nog niets gedaan).
+ * Tokens, feed price and lower bound for the filter. undefined if the feed price reverts: then, per the contract, nobody
+ * is due. A node error on these few reads aborts the run (nothing has been done yet at that point).
  */
 const filterContext = async (): Promise<FilterContext | undefined> => {
   const [eurcToken, cbbtcToken, floor] = await Promise.all([
@@ -901,15 +901,15 @@ const filterContext = async (): Promise<FilterContext | undefined> => {
     return { eurcToken, cbbtcToken, price, minRun: minRunBaseUnits(floor, minRunEurc) };
   } catch (error) {
     if (revertOf(error) === undefined) throw error;
-    console.warn(`feedkoers niet te lezen (${describeError(error)}); niemand due`);
+    console.warn(`feed price cannot be read (${describeError(error)}); nobody due`);
     return undefined;
   }
 };
 
 /**
- * Eindreview F-2: kandidaten uit het register, vanaf de opgeslagen offset (`scanSegments`) en binnen de zoektijd
- * (`SEARCH_SECONDS` na de start, los van het retry-budget). Een fout van de node bij een portie (`owners` of de
- * multicall) slaat alleen die portie over. Geeft ook terug tot waar het register gelezen is.
+ * Final review F-2: candidates from the register, from the stored offset (`scanSegments`) and within the search time
+ * (`SEARCH_SECONDS` after the start, separate from the retry budget). A node error on a batch (`owners` or the
+ * multicall) only skips that batch. Also returns up to where the register has been read.
  */
 const scanRegister = async (
   count: bigint,
@@ -921,14 +921,14 @@ const scanRegister = async (
   let read_ = 0n;
   for (const segment of scanSegments(start, count, REGISTER_PAGE)) {
     if (nowSec() >= searchDeadline) {
-      console.warn(`Zoektijd (${searchSeconds} s) op na ${read_} van ${count} owners; de volgende run zoekt verder vanaf ${segment.offset}.`);
+      console.warn(`Search time (${searchSeconds} s) spent after ${read_} of ${count} owners; next run continues from ${segment.offset}.`);
       return { candidates, scannedTo: segment.offset, read: read_, complete: false };
     }
     let page: readonly Address[];
     try {
       page = await read<readonly Address[]>("owners", [segment.offset, segment.limit]);
     } catch (error) {
-      console.warn(`owners(${segment.offset}, ${segment.limit}) niet te lezen (${describeError(error)}); portie overgeslagen`);
+      console.warn(`owners(${segment.offset}, ${segment.limit}) cannot be read (${describeError(error)}); batch skipped`);
       read_ += segment.limit;
       continue;
     }
@@ -938,7 +938,7 @@ const scanRegister = async (
       try {
         funded = await fundedAmong(batch, ctx);
       } catch (error) {
-        console.warn(`saldo en allowance van owners ${firstIndex}–${firstIndex + BigInt(batch.length) - 1n} niet te lezen (${describeError(error)}); portie overgeslagen`);
+        console.warn(`balance and allowance of owners ${firstIndex}–${firstIndex + BigInt(batch.length) - 1n} cannot be read (${describeError(error)}); batch skipped`);
         continue;
       }
       batch.forEach((owner, i) => {
@@ -953,8 +953,8 @@ const scanRegister = async (
 };
 
 /**
- * Welke van deze owners zijn nu due? `isDue` per owner in één multicall. `isDue` revert nooit, dus een mislukte call is
- * een fout van de node (viem vangt die met `allowFailure` ook af). Dan gooit dit; de aanroeper slaat de portie over.
+ * Which of these owners are due now? `isDue` per owner in one multicall. `isDue` never reverts, so a failed call is
+ * a node error (viem also catches it with `allowFailure`). Then this throws; the caller skips the batch.
  */
 const dueAmong = async (owners: readonly Address[], at: At): Promise<Address[]> => {
   const results = await multicallResults(
@@ -962,17 +962,17 @@ const dueAmong = async (owners: readonly Address[], at: At): Promise<Address[]> 
     at,
   );
   if (results.some((r) => r === undefined)) {
-    throw new Error("isDue niet te lezen voor een portie kandidaten (fout van de node)");
+    throw new Error("isDue cannot be read for a batch of candidates (node error)");
   }
   return owners.filter((_, i) => (results[i] as readonly [boolean, bigint])[0] === true);
 };
 
-// Verificatie 579f763 (info b): een fout die nergens anders wordt afgevangen, niet door Bun laten printen (dan staat de
-// volledige RPC-URL met een mogelijke API-sleutel in de log), maar hier, zonder die URL.
+// Verification 579f763 (info b): an error that is not caught anywhere else is not printed by Bun (then the
+// full RPC URL with a possible API key is in the log), but here, without that URL.
 /**
- * Verificatie 579f763 (info c): de scanvoortgang (eindreview F-2) wordt ook bewaard als de run door een fout stopt, in
- * `finally`. `scan` is gezet zodra het register gelezen is; `pending` zijn de kandidaten die nog niet (helemaal) gelezen
- * zijn: bij het retry-budget de rest, bij een fout de portie waarin het misging en alles erna.
+ * Verification 579f763 (info c): the scan progress (final review F-2) is also saved if the run stops on an error, in
+ * `finally`. `scan` is set once the register has been read; `pending` are the candidates not yet (fully) read
+ * so far: at the retry budget the rest, on an error the batch where it went wrong and everything after it.
  */
 let scan: { count: bigint; scannedTo: bigint } | undefined;
 let pending: readonly Candidate[] = [];
@@ -980,16 +980,16 @@ try {
   readsNextBlock = await probeOverrides();
   if (!readsNextBlock) {
     console.warn(
-      "De node past blok-overrides niet toe: terugval op het laatste blok. Een aanraking van een pool in het laatste blok laat owners dan niet due lijken (audit L-3).",
+      "The node does not apply block overrides: falling back to the latest block. A touch of a pool in the latest block then makes owners appear not due (audit L-3).",
     );
   }
 
   const checked = await read<bigint>("ownerCount");
   let executed = 0;
   let skipped = 0;
-  /** Owners die deze run al behandeld zijn (uitgevoerd, overgeslagen of mislukt); die worden niet opnieuw geprobeerd. */
+  /** Owners already handled this run (executed, skipped or failed); these are not tried again. */
   const handled = new Set<string>();
-  /** Owners met een tijdelijke revert, om de beurt opnieuw geprobeerd tot het retry-budget op is. */
+  /** Owners with a temporary revert, retried in turn until the retry budget is spent. */
   const retryQueue: { owner: Address; block: bigint | null }[] = [];
 
   const count = (owner: Address, result: { outcome: Outcome; block: bigint | null }) => {
@@ -998,9 +998,9 @@ try {
     if (result.outcome === "retry") retryQueue.push({ owner, block: result.block });
   };
 
-  // Audit lead 9 en eindreview F-2: eerst de adressen uit OWNERS_FILE, dan het register vanaf de opgeslagen offset, binnen
-  // de zoektijd. Alles off-chain gefilterd op actief, saldo en allowance (gebundeld met Multicall3), zodat lege
-  // spam-registraties de run niet ophouden. Alleen de kandidaten krijgen een isDue.
+  // Audit lead 9 and final review F-2: first the addresses from OWNERS_FILE, then the register from the stored offset,
+  // within the search time. All filtered off-chain on active, balance and allowance (bundled with Multicall3), so empty
+  // spam registrations do not hold up the run. Only the candidates get an isDue.
   const scanStart = nextScanOffset(parseScanState(existsSync(scanStateFile) ? readFileSync(scanStateFile, "utf8") : undefined), null, checked);
   const ctx = await filterContext();
   const candidates: Candidate[] = [];
@@ -1012,19 +1012,19 @@ try {
           const funded = await fundedAmong(batch, ctx);
           for (const owner of batch) if (funded.has(owner.toLowerCase())) candidates.push({ owner, index: null });
         } catch (error) {
-          // Eigen gebruikers niet stil laten vallen: bij een fout van de node gaan ze ongefilterd door naar isDue.
-          console.warn(`saldo en allowance van OWNERS_FILE niet te lezen (${describeError(error)}); ongefilterd verder`);
+          // Do not silently drop our own users: on a node error they go through unfiltered to isDue.
+          console.warn(`balance and allowance of OWNERS_FILE unreadable (${describeError(error)}); going on unfiltered`);
           for (const owner of batch) candidates.push({ owner, index: null });
         }
       }
-      console.log(`${priorityOwners.length} adressen uit OWNERS_FILE, ${candidates.length} kandidaten`);
+      console.log(`${priorityOwners.length} addresses from OWNERS_FILE, ${candidates.length} candidates`);
     }
     const found = await scanRegister(checked, scanStart, ctx, new Set(priorityOwners.map((o) => o.toLowerCase())));
     candidates.push(...found.candidates);
     scannedTo = found.scannedTo;
     scan = { count: checked, scannedTo };
     console.log(
-      `${checked} owners geregistreerd, ${found.read} gelezen vanaf ${scanStart}${found.complete ? " (hele register)" : ""}, ${candidates.length} kandidaten na het filter op saldo en allowance`,
+      `${checked} owners registered, ${found.read} read from ${scanStart}${found.complete ? " (whole register)" : ""}, ${candidates.length} candidates after the balance and allowance filter`,
     );
   }
 
@@ -1033,14 +1033,14 @@ try {
     pending = batches.slice(index).flat();
     if (nowSec() >= deadline) {
       console.warn(
-        `Retry-budget (${retrySeconds} s) op: ${pending.length} kandidaten niet meer gelezen; de volgende run begint in het register bij ${firstRegisterIndex(pending) ?? scannedTo}.`,
+        `Retry budget (${retrySeconds} s) spent: ${pending.length} candidates no longer read; the next run starts in the register at ${firstRegisterIndex(pending) ?? scannedTo}.`,
       );
       break;
     }
     const owners = batch.map((c) => c.owner);
     let readBlock: bigint | null = null;
     for (let reads = 1; ; reads += 1) {
-      // Elke lezing in een blok ná de laatste eigen run en ná de vorige lezing van deze portie.
+      // Every read in a block after the last own run and after the previous read of this batch.
       const after = readBlock !== null && (lastRunBlock === null || readBlock > lastRunBlock) ? readBlock : lastRunBlock;
       if (!(await waitForBlockAfter(after))) break;
       let fresh: Address[];
@@ -1049,14 +1049,14 @@ try {
         readBlock = latest.number;
         fresh = newOwners(await dueAmong(owners, atLatest(latest)), handled);
       } catch (error) {
-        console.warn(`isDue voor ${owners.length} kandidaten niet te lezen (${describeError(error)}); portie overgeslagen`);
+        console.warn(`isDue for ${owners.length} candidates cannot be read (${describeError(error)}); batch skipped`);
         break;
       }
 
       for (const owner of fresh) {
         handled.add(owner.toLowerCase());
         if (isCoolingDown(cooldowns, owner, nowSeconds)) {
-          console.log(`${owner}: overgeslagen, cool-down tot ${new Date((cooldownUntil(cooldowns, owner) ?? 0) * 1000).toISOString()}`);
+          console.log(`${owner}: skipped, cool-down until ${new Date((cooldownUntil(cooldowns, owner) ?? 0) * 1000).toISOString()}`);
           skipped += 1;
           continue;
         }
@@ -1067,19 +1067,19 @@ try {
     pending = batches.slice(index + 1).flat();
   }
 
-  // Tijdelijk geblokkeerde owners om de beurt, elk in een nieuw blok, tot ze lukken of het retry-budget op is.
+  // Temporarily blocked owners in turn, each in a new block, until they succeed or the retry budget is spent.
   while (retryQueue.length > 0) {
     const next = retryQueue.shift();
     if (next === undefined) break;
     count(next.owner, await attemptOwner(next.owner, next.block, true));
   }
 
-  // Eindreview F-1: een run zonder blokkade en zonder eigen transactie laat de tip ook zakken.
+  // Final review F-1: a run without a blockade and without our own transaction also lowers the tip.
   if (!blockadeThisRun && !sentThisRun && !dryRun) lowerFee();
-  console.log(`Klaar: ${checked} owners geregistreerd, ${executed} uitgevoerd, ${skipped} overgeslagen${dryRun ? " (dry-run)" : ""}.`);
+  console.log(`Done: ${checked} owners registered, ${executed} executed, ${skipped} skipped${dryRun ? " (dry-run)" : ""}.`);
 } catch (error) {
   const full = error instanceof Error ? (error.stack ?? error.message) : String(error);
-  console.error(`run afgebroken: ${redactRpcUrl(full, rpcUrl)}`);
+  console.error(`run aborted: ${redactRpcUrl(full, rpcUrl)}`);
   process.exitCode = 1;
 } finally {
   try {
@@ -1089,7 +1089,7 @@ try {
       writeFileSync(scanStateFile, `${JSON.stringify({ nextOffset: nextOffset.toString() }, null, 2)}\n`);
     }
   } catch (error) {
-    console.error(`staat niet op te slaan: ${describeError(error)}`);
+    console.error(`state cannot be saved: ${describeError(error)}`);
     process.exitCode = 1;
   }
 }

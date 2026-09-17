@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.37;
 
-/// @notice Leesaanroepen op een Uniswap v3-pool die de Rebalancer doet, en niets meer. Zelf geschreven voor dit
-///         contract (review I-3): alleen de functienamen en de ABI-typen liggen vast, want die bepalen de selector en
-///         de decodering. Documentatie van de betekenis: docs.uniswap.org/contracts/v3/reference/core/UniswapV3Pool.
+/// @notice Read calls on a Uniswap v3 pool that the Rebalancer makes, and nothing more. Written from scratch for this
+///         contract (review I-3): only the function names and the ABI types are fixed, because they determine the
+///         selector and the decoding. Semantics: docs.uniswap.org/contracts/v3/reference/core/UniswapV3Pool.
 interface IUniswapV3Pool {
-    /// @dev Adres van het token met het kleinste adres van het paar.
+    /// @dev Address of the token with the lower address of the pair.
     function token0() external view returns (address);
 
-    /// @dev Adres van het andere token.
+    /// @dev Address of the other token.
     function token1() external view returns (address);
 
-    /// @dev Swapfee in miljoensten (500 = 0,05%).
+    /// @dev Swap fee in millionths (500 = 0.05%).
     function fee() external view returns (uint24);
 
-    /// @dev Afstand tussen ticks die liquiditeit kunnen dragen (10 bij fee 500).
+    /// @dev Distance between ticks that can carry liquidity (10 at fee 500).
     function tickSpacing() external view returns (int24);
 
-    /// @dev Huidige stand. `sqrtPriceX96` is √(token1 per token0, in basiseenheden) × 2^96; `observationIndex` wijst
-    ///      naar de laatst geschreven oracle-observatie. De overige velden leest de Rebalancer niet.
+    /// @dev Current state. `sqrtPriceX96` is √(token1 per token0, in base units) × 2^96; `observationIndex` points
+    ///      to the most recently written oracle observation. The Rebalancer does not read the other fields.
     function slot0()
         external
         view
@@ -32,11 +32,11 @@ interface IUniswapV3Pool {
             bool unlocked
         );
 
-    /// @dev Liquiditeit die op de huidige koers actief is.
+    /// @dev Liquidity that is active at the current price.
     function liquidity() external view returns (uint128);
 
-    /// @dev Gegevens van één tick. De Rebalancer gebruikt alleen `netLiquidity`: wat erbij komt als de koers de tick
-    ///      van onder naar boven passeert (en eraf gaat in de andere richting); 0 als de tick niet in gebruik is.
+    /// @dev Data of one tick. The Rebalancer only uses `netLiquidity`: what is added when the price crosses the tick
+    ///      from below to above (and removed in the other direction); 0 if the tick is not in use.
     function ticks(int24 tick)
         external
         view
@@ -51,8 +51,8 @@ interface IUniswapV3Pool {
             bool inUse
         );
 
-    /// @dev Oracle-observatie op `index`. De Rebalancer gebruikt alleen `timestamp`: het blok waarin de pool die
-    ///      observatie schreef (hooguit één per blok).
+    /// @dev Oracle observation at `index`. The Rebalancer only uses `timestamp`: the block in which the pool wrote
+    ///      that observation (at most one per block).
     function observations(uint256 index)
         external
         view

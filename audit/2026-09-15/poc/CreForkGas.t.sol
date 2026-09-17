@@ -4,7 +4,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Rebalancer} from "repo/src/Rebalancer.sol";
 
-/// Meet execute-gas op de Base-fork bij oplopende koopbedragen (tick-crossings) t.o.v. EXECUTE_GAS = 700k.
+/// Measures execute gas on the Base fork at increasing buy amounts (tick crossings) against EXECUTE_GAS = 700k.
 contract CreForkGas is Test {
     IERC20 constant EURC = IERC20(0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42);
     IERC20 constant CBBTC = IERC20(0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf);
@@ -28,7 +28,7 @@ contract CreForkGas is Test {
         uint256 g0 = gasleft();
         (bool ok, bytes memory ret) = address(r).call{gas: 700_000}(abi.encodeCall(r.execute, (u, address(0xBEEF))));
         uint256 used = g0 - gasleft();
-        console.log(buy ? "BUY " : "SELL", "wallet EURC-waarde:", eurcAmount / 1e6);
+        console.log(buy ? "BUY " : "SELL", "wallet EURC value:", eurcAmount / 1e6);
         console.log("   due:", due);
         console.logInt(delta / 1e6);
         console.log("   ok:", ok, "gas used:", used);

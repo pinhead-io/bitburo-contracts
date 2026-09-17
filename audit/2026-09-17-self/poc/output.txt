@@ -1,45 +1,45 @@
-# Uitvoer PoC's, 2026-09-17, commit bab2ed3, FORK_BLOCK=51425248 (fork-tests starten 1-2 blokken later door _nextBlock)
+# PoC output, 2026-09-17, commit bab2ed3 (before the self-audit fixes), FORK_BLOCK=51425248 (fork tests start 1-2 blocks later because of _nextBlock). Regenerated after the translation to English; all numbers identical to the first run.
 Ran 3 tests for test/SelfKeeperFeeCapture.t.sol:SelfKeeperFeeCaptureTest
 [PASS] test_poc_floorRunsYieldNothingForTreasuryWithAnyKeeper() (gas: 684709)
 [PASS] test_poc_normalRunStillPaysTreasury() (gas: 683926)
-[PASS] test_poc_selfKeeperTradesFeeFreeAtFloor() (gas: 4878464)
+[PASS] test_poc_selfKeeperTradesFeeFreeAtFloor() (gas: 4878193)
 Logs:
   volume EURC (6 dec): 480000000
-  fee betaald door owner netto (6 dec): 0
+  net fee paid by owner (6 dec): 0
   treasury (6 dec): 0
-Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 8.39ms (6.90ms CPU time)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 7.88ms (7.48ms CPU time)
 Ran 2 tests for test/BoundaryJitFork.t.sol:BoundaryJitForkTest
-[PASS] test_poc_boundaryJit_buy() (gas: 1904605)
+[PASS] test_poc_boundaryJit_buy() (gas: 1904587)
 Logs:
-  koop correctie EURC 2000
-    blok 51425250 grens b
+  buy correction EURC 2000
+    block 51425250 boundary b
   1380
-    run EURC (6 dec) zonder / met JIT 642437568 704508107
-    slachtoffer EURC ontvangen zonder / met JIT 0 0
-    slachtoffer sats ontvangen zonder / met JIT 962475 1055661
-    JIT tokensOwed na burn (hoofdsom + fees) EURC / USDC 696245829 1064840012136
-    in-range bovengrens run EURC 704508107
-    PnL aanvaller zonder / met JIT (EURC 6 dec, zonder beloning):
+    run EURC (6 dec) without / with JIT 642437568 704508107
+    victim EURC received without / with JIT 0 0
+    victim sats received without / with JIT 962475 1055661
+    JIT tokensOwed after burn (principal + fees) EURC / USDC 696245829 1064840012136
+    in-range upper bound run EURC 704508107
+    attacker PnL without / with JIT (EURC 6 dec, excluding reward):
   0
   262427
-    PnL aanvaller met JIT in bp x100 van de run
+    attacker PnL with JIT in bp x100 of the run
   372
-[PASS] test_poc_boundaryJit_sell() (gas: 1953883)
+[PASS] test_poc_boundaryJit_sell() (gas: 1953868)
 Logs:
-  verkoop correctie EURC 2000
-    blok 51425250 grens b
+  sell correction EURC 2000
+    block 51425250 boundary b
   1370
-    run EURC (6 dec) zonder / met JIT 525482378 525482378
-    slachtoffer EURC ontvangen zonder / met JIT 523726785 523806271
-    slachtoffer sats ontvangen zonder / met JIT 0 0
-    JIT tokensOwed na burn (hoofdsom + fees) EURC / USDC 692372401068 595097965
-    in-range bovengrens run EURC 525481952
-    PnL aanvaller zonder / met JIT (EURC 6 dec, zonder beloning):
+    run EURC (6 dec) without / with JIT 525482378 525482378
+    victim EURC received without / with JIT 523726785 523806271
+    victim sats received without / with JIT 0 0
+    JIT tokensOwed after burn (principal + fees) EURC / USDC 692372401068 595097965
+    in-range upper bound run EURC 525481952
+    attacker PnL without / with JIT (EURC 6 dec, excluding reward):
   0
   195584
-    PnL aanvaller met JIT in bp x100 van de run
+    attacker PnL with JIT in bp x100 of the run
   372
-Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 280.63ms (10.56ms CPU time)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 329.18ms (15.11ms CPU time)
 Ran 6 tests for test/PrevBlockLagFork.t.sol:QuillPrevBlockLagTest
 [PASS] test_quill_prevBlockLag_lp99_buy() (gas: 67026641)
 Logs:
@@ -323,5 +323,5 @@ Logs:
   PBL,sell,phi=0,feeOff=0,cbLag=30,euLag=10,push_bp_x10=1000,REVERT=0x1b3ce45e
   PBL,sell,phi=0,feeOff=0,cbLag=30,euLag=10,push_bp_x10=1100,REVERT=0x1b3ce45e
   PBL,sell,phi=0,feeOff=0,cbLag=30,euLag=10,push_bp_x10=1200,REVERT=0x1b3ce45e
-Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 409.74ms (750.13ms CPU time)
-Ran 3 test suites in 413.39ms (698.77ms CPU time): 11 tests passed, 0 failed, 0 skipped (11 total tests)
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 457.90ms (766.27ms CPU time)
+Ran 3 test suites in 459.09ms (794.97ms CPU time): 11 tests passed, 0 failed, 0 skipped (11 total tests)
