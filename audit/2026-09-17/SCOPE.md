@@ -2,7 +2,7 @@
 
 Prepared 17 September 2026. Companion file: [`FINDINGS-STATUS.md`](FINDINGS-STATUS.md) lists every finding from the internal reviews and its status.
 
-Internal reports referenced below are in Dutch: `audit/2026-09-15/RAPPORT.md` (+ `details/`), `audit/2026-09-16/ai-audit.md`, the description of PR #18, and the `README.md`. Code comments (NatSpec) in `src/` are also in Dutch. Everything a reviewer needs to reason about the contract is summarised here in English; where a number comes from a measurement that is not reproducible from this repository, this is stated.
+Internal reports referenced below are in Dutch: `audit/2026-09-15/RAPPORT.md` (+ `details/`), `audit/2026-09-16/ai-audit.md`, the self-audit `audit/2026-09-17-self/ai-audit.md`, the description of PR #18, and the `README.md`. Code comments (NatSpec) in `src/` are also in Dutch. Everything a reviewer needs to reason about the contract is summarised here in English; where a number comes from a measurement that is not reproducible from this repository, this is stated.
 
 ---
 
@@ -13,9 +13,9 @@ Internal reports referenced below are in Dutch: `audit/2026-09-15/RAPPORT.md` (+
 | | |
 |---|---|
 | Repository | `pinheadio/bitburo-contracts` |
-| Branch | `fix/contract-twap-and-lows` (PR #18) |
-| **Commit of the audited code** | **`05ed03cec8ccd859f2d5b812557848f08db8faa5`** (`05ed03c`) |
-| Note | The package was first prepared for `579f763`. A verification of that commit (17 Sept 2026) led to keeper fixes and a corrected F-4 measurement (`46a4aca` … `05ed03c`, rows `verify-579f763/*` in `FINDINGS-STATUS.md`). In `src/` only NatSpec changed (`src/Rebalancer.sol:49-63`); bytecode is identical. The commit that updates this folder changes documentation only: `src/`, `script/`, `test/` and `keeper/` are byte-identical to `05ed03c`. |
+| Branch | `fix/fee-floor-round-budget-sequencer` (after PR #18 and the self-audit PRs #19, #20 on `development`) |
+| **Commit of the audited code** | **`f392f3c22dbb3cecf03dde8a9f5ca0bc4fede20a`** (`f392f3c`) |
+| Note | The package was first prepared for `579f763` and then for `05ed03c` (PR #18). The self-audit of 17 Sept 2026 on `development` (`audit/2026-09-17-self/ai-audit.md`) led to three contract changes on top of `05ed03c`, rows `09-17-self/*` in `FINDINGS-STATUS.md`: the keeper reward is at most half the fee (L-D, `a10271f`), a chunk never exceeds the budget of the current wallet value (lead 11, `3ea8787`), and a sequencer `startedAt` in the future gives `SequencerDown` (Info-G, `b23d422`); plus NatSpec, README and keeper comments (`36bb2e5`, `f392f3c`). All `file:line` references in this package were re-mapped to `f392f3c`. Later commits on the branch change `audit/` only. |
 
 ### 1.2 Files and size
 
@@ -23,19 +23,19 @@ nSLOC method: counted with a small script (no `cloc` installed): block comments 
 
 | File | Lines | nSLOC | In scope |
 |---|---|---|---|
-| `src/Rebalancer.sol` | 1,032 | 607 | **yes, primary** |
+| `src/Rebalancer.sol` | 1,049 | 608 | **yes, primary** |
 | `src/libraries/TickMath.sol` | 99 | 44 | yes (only `getSqrtPriceAtTick`, copied from Uniswap v4-core `46c6834`, MIT) |
 | `src/interfaces/IUniswapV3Pool.sol` | 60 | 37 | yes (self-written minimal interface) |
 | `src/interfaces/IV3SwapRouter.sol` | 21 | 11 | yes |
 | `src/interfaces/IAggregatorV3.sol` | 12 | 9 | yes |
 | `src/interfaces/IUniswapV3Factory.sol` | 10 | 4 | yes |
-| **Total `src/`** | **1,234** | **712** | |
-| `script/Deploy.s.sol` | 57 | 35 | yes (constructor arguments; addresses verified in §1.5) |
-| `keeper/keeper.ts` | 1,090 | 820 | optional: reference keeper, not deployed on-chain |
+| **Total `src/`** | **1,251** | **713** | |
+| `script/Deploy.s.sol` | 58 | 35 | yes (constructor arguments; addresses verified in §1.5) |
+| `keeper/keeper.ts` | 1,095 | 820 | optional: reference keeper, not deployed on-chain |
 | `keeper/selection.ts` | 884 | 454 | optional: pure logic used by `keeper.ts` |
 | `keeper/lock.ts` | 134 | 86 | optional: run lock used by `keeper.ts` |
 
-Runtime bytecode of `Rebalancer`: 17,551 bytes (`forge build --sizes`, margin 7,025 to the 24,576 limit).
+Runtime bytecode of `Rebalancer`: 17,544 bytes (`forge build --sizes`, margin 7,032 to the 24,576 limit).
 
 ### 1.3 Compiler and settings (`foundry.toml`)
 
@@ -124,10 +124,10 @@ Test files: `test/Rebalancer.t.sol` (unit, fuzz, invariants, mocks), `test/Block
 
 ### 3.1 Fee and accounting
 
-- Fee = 25 bps of the EURC leg. Buy: of the gross EURC input. Sell: of `max(received, expectedOut)` capped at `received` (`_takeFee` `:1037-1048`, `_sell` `:1020`). `reward = min(0.05 EURC, fee)`; `reward + toTreasury + retained == fee`. Failed transfers never revert the run: a failed reward goes to the treasury, a failed treasury transfer stays in the contract (`FeeRetained`) and is sweepable.
-- Every run is at least `MIN_TRADE_FLOOR` = 20 EURC, so the fee always covers the full keeper reward, for buys and sells (`:146-154`).
+- Fee = 25 bps of the EURC leg. Buy: of the gross EURC input. Sell: of `max(received, expectedOut)` capped at `received` (`_takeFee` `:1037-1048`, `_sell` `:1020`). `reward = min(0.05 EURC, fee / 2)` (self-audit L-D: before, a run at the floor gave the whole fee to `rewardTo`, so the treasury got nothing and an owner calling `execute(self, self)` traded fee-free); `reward + toTreasury + retained == fee`. Failed transfers never revert the run: a failed reward goes to the treasury, a failed treasury transfer stays in the contract (`FeeRetained`) and is sweepable.
+- Every run is at least `MIN_TRADE_FLOOR` = 20 EURC, so the fee is at least 0.05 EURC for buys and sells, and the treasury keeps at least half of every fee, whoever `rewardTo` is (`:146-154`).
 - The contract holds no balance after any call.
-- Tests: `test_execute_buy_exactAmounts`, `test_execute_sell_exactAmounts`, `test_execute_sellFeeFloorUsesExpectedOut`, `test_takeFee_cappedAtMaxFee`, `test_execute_rewardCappedByFee`, `test_execute_rewardToSelfGoesToTreasury`, `test_execute_rewardFallsBackToTreasuryWhenRewardToBlacklisted`, `test_execute_continuesWhenTreasuryBlacklistedAndSweepRecoversFee`, `testFuzz_audit_corridorFeeResidue`, `testFuzz_planBoundedAndAccountingClosed`; invariants `invariant_contractNeverHoldsBalance`, `invariant_treasuryMonotonic`, `invariant_ownerBalancesOnlyMoveThroughExecute`.
+- Tests: `test_execute_buy_exactAmounts`, `test_execute_sell_exactAmounts`, `test_execute_sellFeeFloorUsesExpectedOut`, `test_takeFee_cappedAtMaxFee`, `test_execute_rewardCappedByFee`, `test_execute_selfRewardAtFloorStillPaysTreasuryHalf`, `test_execute_rewardToSelfGoesToTreasury`, `test_execute_rewardFallsBackToTreasuryWhenRewardToBlacklisted`, `test_execute_continuesWhenTreasuryBlacklistedAndSweepRecoversFee`, `testFuzz_audit_corridorFeeResidue`, `testFuzz_planBoundedAndAccountingClosed`; invariants `invariant_contractNeverHoldsBalance`, `invariant_treasuryMonotonic`, `invariant_ownerBalancesOnlyMoveThroughExecute`.
 
 ### 3.2 Loss bound per run
 
@@ -151,7 +151,7 @@ Measured maxima (from the README tables; they move with pool state per block): c
 
 **Why these bounds hold (derivation to review).**
 
-1. *Block check* (`_window` `:688-708`, `:691`). A run proceeds only if neither pool wrote an oracle observation in the current block: `observations[slot0.observationIndex].blockTimestamp != block.timestamp`. In Uniswap v3-core (`d8b1c635`) exactly two actions write an observation: a swap that changes the tick (`UniswapV3Pool.sol:732-748`) and a mint/burn with non-zero liquidity whose range contains the current tick (`_modifyPosition`, `:327`, `:336-348`); at most one write per block (`Oracle.sol:90`). Swaps within the tick, out-of-range mint/burn, zero burns, `collect` and `flash` write nothing. Confirmed per action on a fork: `test_observationSemantics_perAction`. Consequence: in the block of the run, tick and in-range liquidity are still those at block start, so `slot0.tick` is the block-start tick.
+1. *Block check* (`_window` `:688-708`, `:691`). A run proceeds only if neither pool wrote an oracle observation in the current block: `observations[slot0.observationIndex].blockTimestamp != block.timestamp`. In Uniswap v3-core (`d8b1c635`) exactly two actions write an observation: a swap that changes the tick (`UniswapV3Pool.sol:732-748`) and a mint/burn with non-zero liquidity whose range contains the current tick (`_modifyPosition`, `:327`, `:336-348`); at most one write per block (`Oracle.sol:90`). Swaps within the tick, out-of-range mint/burn, zero burns, `collect` and `flash` write nothing. Confirmed per action on a fork: `test_observationSemantics_perAction`. Consequence: in the block of the run, tick and in-range liquidity are still those at block start, so `slot0.tick` is the block-start tick. Edge case (self-audit L-E): when the price sits exactly on a tick boundary b (after a swap ended there), a position with b as its bound in the swap direction counts as out of range for Uniswap, so minting it writes nothing, but the run crosses b at once and trades against it. Measured at block 51,425,248 (`audit/2026-09-17-self/poc/BoundaryJitFork.t.sol`, JIT 99× active liquidity): no observation, run within 1 sat of the in-range bound, victim not worse per unit, JIT position +3.72 bp of the run in pool fees (taken from other LPs). See §5.2.
 2. *Tick granularity.* A push that does not change the tick is invisible. With tick base 1.0001, one tick ≈ 1 bp of price, so a victim can trade up to ~1 tick worse **per pushed pool** (two pools: ~2 bp).
 3. *Push cost.* The push crosses the attacker's own and others' liquidity and pays the 5 bps pool fee on the way in and out. An attacker without an LP position loses those fees and gains at most the in-tick move → no profit. An attacker holding share φ of active liquidity (minted in an earlier block; minting in the run's block is refused) gets back φ × (1 − protocol share) of the fee on his own push. With `feeProtocol` 68 the protocol keeps 1/4 even at φ → 1, which keeps the extra profit measured below 0.5 bp. With protocol fee 0 and φ → 1 the push is almost free, and the victim's loss is bounded by tick granularity: ~1 tick per pool, < 2.05 bp in total. The attacker's gain is not bounded by that alone: near window capacity a push can shrink the run the contract allows (the window is measured from the block-start tick, the pushed price leaves less room), and the attacker as LP then also avoids his margin loss on the volume that drops out. That part does not come from the victim, and it depends on pool state per block (§5.4). `test_scenario_lpNearCapacity_*` covers that region.
 4. *Window* (`:714-720`). In addition, before and after the swap each pool's sqrtPrice must stay within `MAX_BLOCK_MOVE_BPS` = 6 bps of the block-start tick, including the run's own impact (`_requireWithinWindow` at `:571-572`). Because only the tick (not the exact in-tick price) is known, the lower bound is computed from P(t+1)·√(1 − 6 bp) and the upper bound from P(t)·√(1 + 6 bp); all rounding (TickMath, `Math.sqrt`, `mulDiv`) narrows the window. This costs honest runs up to 1 bp of room and never gives an attacker room. 6 bps < 2 × pool fee, so each pushed unit loses money for a non-LP. Tests: `testFuzz_window_conservativeAndTight`, `test_window_extremeTicksDoNotOverflow`, `testFuzz_window_observationThisBlockMeansTouched`, `test_execute_pushWithinTickAllowed_pushOverTickRefused`, `test_execute_revertsBlockMoveExceededAfterSwap`.
@@ -159,11 +159,11 @@ Measured maxima (from the README tables; they move with pool state per block): c
 ### 3.4 Rounds (chunked corrections)
 
 - A round opens only when liquidity (not balance or allowance) bounded the run and the estimated drift after the run is still outside the band (`:959-962`).
-- Round budget = `max(total × maxCorrectionBps, minTradeEurc)` fixed at the first run; all chunks together never exceed it, also after a donation to the owner.
+- Round budget = `max(total × maxCorrectionBps, minTradeEurc)` fixed at the first run; all chunks together never exceed it, also after a donation to the owner. In addition, a chunk never uses more than that budget computed on the current total, so a round shrinks with the wallet (withdrawal or price drop; self-audit lead 11).
 - A chunk only runs in the round's direction, only after `CHUNK_INTERVAL` (10 min), and only while `remainingEurc > 0` (`_timing` `:521-527`, `_plan` `:914-920`). A direction change never starts a chunk.
 - `setParams` deletes the round (`:394`). After `interval` a fresh round replaces a stale one.
 - Every chunk is ≥ `MIN_TRADE_FLOOR`; a chunk may be below the owner's `minTradeEurc` (`:877-880`).
-- Tests: invariants `invariant_roundBudgetNeverExceeded`, `invariant_chunkKeepsRoundDirection`; unit `test_chunk_nextOnlyAfterChunkInterval`, `test_chunk_runsUntilWithinBand`, `test_chunk_budgetCapsRound`, `test_chunk_tailBelowMinTradeEndsRound`, `test_chunk_allowanceBoundRunOpensNoRound`, `test_chunk_directionChangeNeverStartsChunk`, `test_setParams_abortsRound`, `test_chunk_belowFloorWaitsAndKeepsRound`, `test_chunk_smallerThanUserMinTradeButAboveFloor`, `test_chunk_donationDoesNotGrowRoundBudget`, `test_chunk_freshRoundAfterIntervalReplacesStaleRound`, `test_chunk_roundEndsWhenRunReachesBand`, `test_plan_buyBoundedByLiquidityOpensRound`, `test_plan_sellBoundedByLiquidityOpensRound`; fork `test_fork_honestCorrectionInChunks_buy`, `test_fork_honestCorrectionInChunks_sell`.
+- Tests: invariants `invariant_roundBudgetNeverExceeded`, `invariant_chunkKeepsRoundDirection`; unit `test_chunk_nextOnlyAfterChunkInterval`, `test_chunk_runsUntilWithinBand`, `test_chunk_budgetCapsRound`, `test_chunk_tailBelowMinTradeEndsRound`, `test_chunk_allowanceBoundRunOpensNoRound`, `test_chunk_directionChangeNeverStartsChunk`, `test_setParams_abortsRound`, `test_chunk_belowFloorWaitsAndKeepsRound`, `test_chunk_smallerThanUserMinTradeButAboveFloor`, `test_chunk_donationDoesNotGrowRoundBudget`, `test_chunk_budgetShrinksWithWallet`, `test_chunk_freshRoundAfterIntervalReplacesStaleRound`, `test_chunk_roundEndsWhenRunReachesBand`, `test_plan_buyBoundedByLiquidityOpensRound`, `test_plan_sellBoundedByLiquidityOpensRound`; fork `test_fork_honestCorrectionInChunks_buy`, `test_fork_honestCorrectionInChunks_sell`.
 
 ### 3.5 `MIN_BAND_BPS` = 125
 
@@ -182,7 +182,7 @@ Measured maxima (from the README tables; they move with pool state per block): c
 - Only the owner changes its params; inactive params are still validated: `test_setParams_*`, `testFuzz_setParamsValidation`.
 - `execute` fails only for known reasons (no unexpected router slippage): `invariant_executeFailsOnlyForKnownReasons`.
 - `retire`: `test_retire_revertsForNonTreasury`, `test_retire_setsFlagAndEmits`, `test_retire_secondCallReverts`, `test_retire_executeReverts`, `test_retire_executeRevertsForEveryOwner`, `test_retire_setParamsCanOnlyDeactivate`, `test_retire_sweepStillWorks`, `invariant_noExecutedAfterRetire`.
-- Oracle validation (answer > 0, staleness 1,500 s / 4,500 s, no future `updatedAt`, sequencer up + 1 h grace, `startedAt != 0`): `test_execute_revertsStaleFeedCbbtc`, `test_execute_revertsStaleFeedEurc`, `test_execute_revertsStaleFeedWhenUpdatedAtInFuture`, `test_execute_revertsInvalidFeedAnswer`, `test_execute_revertsSequencerDownAnswerOne`, `test_execute_revertsSequencerDownWhenStartedAtZero`, `test_execute_revertsSequencerDownWithinGrace`, `test_fork_feedsAreFreshAndMatchConstants`, `test_fork_feedCadenceWithinMaxAge`.
+- Oracle validation (answer > 0, staleness 1,500 s / 4,500 s, no future `updatedAt`, sequencer up + 1 h grace, `startedAt != 0` and not in the future): `test_execute_revertsStaleFeedCbbtc`, `test_execute_revertsStaleFeedEurc`, `test_execute_revertsStaleFeedWhenUpdatedAtInFuture`, `test_execute_revertsInvalidFeedAnswer`, `test_execute_revertsSequencerDownAnswerOne`, `test_execute_revertsSequencerDownWhenStartedAtZero`, `test_execute_revertsSequencerDownWhenStartedAtInFuture`, `test_execute_revertsSequencerDownWithinGrace`, `test_fork_feedsAreFreshAndMatchConstants`, `test_fork_feedCadenceWithinMaxAge`.
 - Constructor checks: `test_constructor_rejectsZeroAddress`, `test_constructor_rejectsNonContracts`, `test_constructor_rejectsFeedWithWrongDecimals`, `test_constructor_rejectsTokenWithWrongDecimals`, `test_constructor_rejectsTokenWithoutDecimals`, `test_constructor_rejectsPoolWithWrongTokens`, `test_constructor_rejectsPoolWithWrongFee`, `test_constructor_rejectsPoolWithWrongTickSpacing`, `test_constructor_rejectsPoolNotFromRouterFactory`, `test_fork_constructorChecksTokenDecimals`.
 - Gas: `execute` stays below 1,000,000 gas (`test_fork_buyAndSellGasCost`).
 
@@ -237,16 +237,20 @@ Each item was accepted by the project owner. "README" refers to `README.md` at t
 - **Cost.** At base fee 0.005 gwei, tip 0 and 1 ETH = 2,101 EURC (block 51,400,175): ~0.001 EURC per block, **~1.8 EURC per hour**. No contract change raises that cost without leaving the touch at gas price (measured options: TWAP, relaxed block check, second route via Aerodrome).
 - **Defence in the keepers.** Read `isDue` and simulate `execute` with block overrides for the next block (number + 1, timestamp + 2 s) after a probe that the node applies them; retry every block for the whole budget (`RETRY_SECONDS` 540 s); send from an own key with an explicit priority fee (0.05 gwei) that at least doubles after a blockade, ≥ 110 % of the blocker's tip, up to 3 gwei and capped by what a run yields (`TIP_BUDGET_ETH`); random 1–59 blocks before the next send. Base orders transactions by priority fee within each 200 ms Flashblock, so the attacker must outbid in every block, the keeper only per attempt. Estimated from measured gas at 3 gwei: attacker ~1,050 EURC/hour, keeper ~15 EURC/hour extra.
 - **Criterion ("L-3 is solved when…").** Measured on a Base fork at current prices, against the keeper as run in production: (1) blocking all runs for an hour costs the attacker ≥ 1,000 EURC; (2) Bitburo pays ≤ 2 % of that extra (≤ 20 EURC/hour) and nothing without an attack; (3) blocking yields no sandwich profit above §3.3; (4) honest failure rate without an attacker does not increase; (5) every due owner runs within 5 minutes after the attack. The open `keeper/` script meets this by estimate, relying on Base's sequencer ordering, which cannot be verified for production.
-- **The app keeper cannot set a priority fee.** It sends through a sponsored Privy transaction (the bundler picks the fee; Privy documents no setting) and runs hourly. It does not meet criteria 1 and 5; only the open script (or an own keeper wallet) does. The next-block reading for the app keeper is in `pinheadio/bitburo` PR #149 (open).
+- **The app keeper cannot set a priority fee.** It sends through a sponsored Privy transaction (the bundler picks the fee; Privy documents no setting) and runs hourly. It does not meet criteria 1 and 5; only the open script (or an own keeper wallet) does. The next-block reading for the app keeper is in `pinheadio/bitburo` PR #149 (merged into the app's `development` on 17 Sept 2026, not verified in production).
 - Documented: README "Runs tegenhouden (audit L-3)", `src/Rebalancer.sol:96-101`, `keeper/keeper.ts` header.
 
 ### 5.2 JIT out of range can enlarge a chunk up to the in-range bound
 
-Minting just outside the range in the swap direction writes no observation. Such liquidity can lift a liquidity cliff and make a chunk larger than without it, but never larger than the in-range liquidity at block start allows, and without profit. Measured extra profit: −0.30 bp (current protocol fee) and −7.51 bp (protocol fee 0) at block 51,390,800; −0.21 bp at 51,402,700. Tests assert per run that the run stays below the in-range bound (computed with `RebalancerInRangeSizing`) and the LP bounds of §3.3: `test_scenario_jitOutOfRange_currentProtocolFee`, `test_scenario_jitOutOfRange_protocolFeeOff`. A fix that excludes this and still handles the cliff would need visibility of in-block tick changes. Documented: README "JIT buiten de range", `src/Rebalancer.sol:72-73`.
+Minting just outside the range in the swap direction writes no observation. Such liquidity can lift a liquidity cliff and make a chunk larger than without it, but never larger than the in-range liquidity at block start allows, and without profit. Measured extra profit: −0.30 bp (current protocol fee) and −7.51 bp (protocol fee 0) at block 51,390,800; −0.21 bp at 51,402,700. Tests assert per run that the run stays below the in-range bound (computed with `RebalancerInRangeSizing`) and the LP bounds of §3.3: `test_scenario_jitOutOfRange_currentProtocolFee`, `test_scenario_jitOutOfRange_protocolFeeOff`. A fix that excludes this and still handles the cliff would need visibility of in-block tick changes. The same holds for the boundary edge case of §3.3 point 1 (self-audit L-E): with the price exactly on a tick boundary the JIT position trades from the first unit; it earns pool fees (+3.72 bp of the run, from other LPs), not a loss for the victim. Documented: README "JIT buiten de range", `src/Rebalancer.sol:72-73`.
 
 ### 5.3 Push at the end of the previous block
 
-The block check does not see a push in block N−1 followed by `execute` in block N. It is not atomic (arbitrage can act in between, and in 20,000 measured blocks EURC/USDC never ended a block more than 6.0 bp from Aerodrome), and the spot check bounds it. A two-block measurement in the L-3 research (not in this repo; assumes **no** arbitrage between the blocks; 10,000 EURC correction) gave: largest accepted push 25 bp (buy) / 50 bp (sell); no LP ≤ −18.5 bp; LP 99 % at current protocol fee ≤ −40.8 bp; **LP 99 % at protocol fee 0: +41.5 bp** (sell, push 50 bp). The victim's loss versus Chainlink stayed ≤ 79.4 bp including the 25 bp fee, inside the §3.2 bound. Documented: `src/Rebalancer.sol:64-67`, README "Niet gedekt".
+The block check does not see a push in block N−1 followed by `execute` in block N. It is not atomic (arbitrage can act in between, and in 20,000 measured blocks EURC/USDC never ended a block more than 6.0 bp from Aerodrome), and the spot check bounds it. A two-block measurement in the L-3 research (not in this repo; assumes **no** arbitrage between the blocks; 10,000 EURC correction) gave: largest accepted push 25 bp (buy) / 50 bp (sell); no LP ≤ −18.5 bp; LP 99 % at current protocol fee ≤ −40.8 bp; **LP 99 % at protocol fee 0: +41.5 bp** (sell, push 50 bp). The victim's loss versus Chainlink stayed ≤ 79.4 bp including the 25 bp fee, inside the §3.2 bound.
+
+**Chainlink lag widens it (self-audit L-F).** The spot check compares with Chainlink, not with the market. A feed lagging within its deviation threshold in the attacker's favour (cbBTC/USD 0.3 %, EURC/USD 0.1 %) adds to the 50 bp tolerance. Measured at block 51,425,248 (`audit/2026-09-17-self/poc/PrevBlockLagFork.t.sol`, on the code before the self-audit fixes, which do not touch this path; 10,000 EURC correction, push in EURC/USDC only, no arbitrage between the blocks, cbBTC/USD 30 bp and EURC/USD 10 bp lag): largest accepted push 50 / 40 bp (buy / sell) without lag and 90 / 80 bp with lag; LP 99 % at protocol fee 0: +44.2 bp without and **+82.3 bp with lag** (buy), victim 123.5 bp below the true price including the fee; at the current protocol fee the attacker loses 161 to 485 bp of the run at that push. The `FEE_BPS + maxSlippageBps` bound holds versus the feed; versus the market the lag (up to ~40 bp) comes on top. Accepted: lowering `MAX_SPOT_DEVIATION_BPS` would make honest runs revert more often (§4.5).
+
+Documented: `src/Rebalancer.sol:64-67`, README "Niet gedekt".
 
 ### 5.4 LP with a large share when protocol fee is 0
 
@@ -298,12 +302,13 @@ Chainlink's Reference Data Directory labels both cbBTC/USD and EURC/USD on Base 
 
 ## 6. Specific questions for the auditors
 
-1. **Strict block check without production precedent.** We found no protocol that refuses on *any* observation written in the current block; others use the block-start tick with a tolerance. Please verify: (a) the claim that, on these pools, only a tick-changing swap or an in-range mint/burn with non-zero liquidity writes an observation, at most once per block, and that `observations(slot0.observationIndex)` is always the latest write (including cardinality growth and ring-buffer wrap); (b) that without an observation in the block `slot0.tick` equals the block-start tick and in-range liquidity is unchanged; (c) any action that changes in-range state in the block without writing an observation; (d) whether the resulting availability and griefing trade-off (§5.1, §5.5) has a better alternative for an immutable contract.
+1. **Strict block check without production precedent.** We found no protocol that refuses on *any* observation written in the current block; others use the block-start tick with a tolerance. Please verify: (a) the claim that, on these pools, only a tick-changing swap or an in-range mint/burn with non-zero liquidity writes an observation, at most once per block, and that `observations(slot0.observationIndex)` is always the latest write (including cardinality growth and ring-buffer wrap); (b) that without an observation in the block `slot0.tick` equals the block-start tick and in-range liquidity is unchanged; (c) any action that changes in-range state in the block without writing an observation (known: an in-tick push, out-of-range liquidity, and the tick-boundary edge case of §3.3 point 1); (d) whether the resulting availability and griefing trade-off (§5.1, §5.5) has a better alternative for an immutable contract.
 2. **Derivation of the LP bounds** (§3.3, §5.4). (a) Is "the victim loses at most ~1 tick per pushed pool (< 2.05 bp)" a correct upper bound at every protocol fee, including multi-owner blocks, sells and runs near window capacity? (b) Is "attacker < 0.5 bp at `feeProtocol` 68" correct there? (c) At protocol fee 0 we measured an attacker gain of +1.39 to +4.07 bp near capacity, above the victim's loss, and attribute the surplus to volume that drops out when the push shrinks the run. Is that attribution right, is there a tighter bound we should assert, and is accepting it (it needs protocol fee 0 and ~99 % of active liquidity) reasonable? (d) Is there an ordering (e.g. out-of-range positions, burns just outside the range, flash, collect) that beats these bounds?
 3. **Arithmetic of the cliff fix** (`_maxInput` `:794-818`, `_window` `:701-721`). The boundary selection for negative ticks and ticks exactly on a multiple of 10; the claim that the window crosses at most one initialisable tick per direction; the sign of `liquidityNet` per direction; overflow of `liquidity << 96` and the `uint96` clamp; rounding direction of `lower`/`upper` and of the amount formulas; and whether `SIZING_BPS` = 75 % is enough when liquidity changes at the one boundary.
 4. **Round state machine** (`_timing` `:521-527`, `_plan` `:885-963`, `execute` `:555-560`, `setParams` `:394`). Can any sequence of runs, price moves, donations, allowance changes or `setParams` calls exceed a round budget, flip direction within a round, start a chunk without a round, or keep an owner due forever? Note the documented edge: a price move that brings the owner inside the band does not close the round on-chain.
 5. **Per-page refactor of `dueOwners`** (`RunCaps`, `:730-760`, `:477`). The cache assumes `_maxRunEurc` depends only on direction, `price`, the two windows and pool state, none of which vary per owner or change inside a view call. Is that assumption sound, and does `dueOwners` still return exactly the `isDue` set (§3.6)?
 6. Open question from lead 5 (also asked to Chainlink): which pools and weights feed cbBTC/USD and EURC/USD on Base, and how long must a pool stay displaced before the feed follows?
+7. **Previous-block push with Chainlink lag** (§5.3). With a feed lagging inside its threshold, the accepted previous-block push roughly doubles (+82.3 bp for a 99 % LP at protocol fee 0, measured without arbitrage). Is accepting this reasonable for an immutable contract, and is there a check that bounds it without making honest runs revert (for example a bound on how far the pool may be from the previous block's price)?
 
 ---
 
@@ -313,7 +318,7 @@ Chainlink's Reference Data Directory labels both cbBTC/USD and EURC/USD on Base 
 
 ```bash
 git clone https://github.com/pinheadio/bitburo-contracts && cd bitburo-contracts
-git checkout 05ed03cec8ccd859f2d5b812557848f08db8faa5
+git checkout f392f3c22dbb3cecf03dde8a9f5ca0bc4fede20a
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ```
@@ -322,7 +327,7 @@ Fork tests read `BASE_RPC_URL` (default `https://mainnet.base.org`, rate-limited
 
 ### 7.2 Commands and actual results
 
-All results below were produced on 17 Sept 2026 on commit `05ed03c`.
+All results below were produced on 17 Sept 2026 on commit `f392f3c`.
 
 ```bash
 ~/.foundry/bin/forge fmt --check
@@ -335,11 +340,11 @@ cd keeper && bun install && bun test && bunx tsc --noEmit
 | Command | Result |
 |---|---|
 | `forge fmt --check` | exit 0 |
-| `forge build --sizes` | `Rebalancer` runtime 17,551 B |
-| `FORK_BLOCK=51390800 forge test` | `Ran 13 test suites in 3.25s (21.09s CPU time): 211 tests passed, 0 failed, 0 skipped (211 total tests)` |
-| `FORK_BLOCK=51407527 forge test` (latest block at the time) | `Ran 13 test suites in 72.30s (418.82s CPU time): 211 tests passed, 0 failed, 0 skipped (211 total tests)` |
-| Invariants 1000 runs × depth 100 | `Ran 2 test suites in 36.02s (68.54s CPU time): 14 tests passed, 0 failed, 0 skipped (14 total tests)`; each invariant `runs: 1000, calls: 100000` |
-| `RUN_FORK=false forge test` | `Ran 13 test suites in 1.61s (5.83s CPU time): 163 tests passed, 0 failed, 8 skipped (171 total tests)` |
+| `forge build --sizes` | `Rebalancer` runtime 17,544 B |
+| `FORK_BLOCK=51390800 forge test` | `Ran 13 test suites in 2.77s (16.40s CPU time): 214 tests passed, 0 failed, 0 skipped (214 total tests)` |
+| `FORK_BLOCK=51425248 forge test` (latest block at the start of the self-audit) | `Ran 13 test suites in 3.21s (19.01s CPU time): 214 tests passed, 0 failed, 0 skipped (214 total tests)` |
+| Invariants 1000 runs × depth 100 | `Ran 2 test suites in 32.21s (63.26s CPU time): 14 tests passed, 0 failed, 0 skipped (14 total tests)`; each invariant `runs: 1000, calls: 100000` |
+| `RUN_FORK=false forge test` | `Ran 13 test suites in 1.68s (5.59s CPU time): 166 tests passed, 0 failed, 8 skipped (174 total tests)` |
 | `bun test` (keeper, bun 1.3.5) | `97 pass, 0 fail, 608 expect() calls`, 3 files |
 | `bunx tsc --noEmit` | exit 0 |
 
@@ -347,10 +352,10 @@ Per suite on `FORK_BLOCK=51390800`:
 
 | Suite | Passed |
 |---|---|
-| `test/Rebalancer.t.sol:RebalancerTest` | 104 |
+| `test/Rebalancer.t.sol:RebalancerTest` | 106 |
 | `test/Rebalancer.t.sol:RebalancerInvariantTest` | 7 |
 | `test/Rebalancer.t.sol:RebalancerInvariantTestNoRetire` | 7 |
-| `test/BlockWindow.t.sol:BlockWindowTest` | 34 |
+| `test/BlockWindow.t.sol:BlockWindowTest` | 35 |
 | `test/AuditMath.t.sol:AuditMathTest` | 11 |
 | `test/BlockWindowReviewFork.t.sol:BlockWindowReviewForkTest` | 16 |
 | `test/RebalancerFork.t.sol:RebalancerForkTest` | 10 |
@@ -360,10 +365,10 @@ Per suite on `FORK_BLOCK=51390800`:
 | `test/BlockWindowFork.t.sol:BlockWindowChunksForkTest` | 2 |
 | `test/BlockWindowFork.t.sol:BlockWindowLpForkTest` | 2 |
 | `test/PocFork.t.sol:PocFork` | 2 |
-| **Total** | **211** |
+| **Total** | **214** |
 
 The 14 invariants are the same 7 in two handler setups: `RebalancerInvariantTest` (handler may call `retire`, 1 in 8) and `RebalancerInvariantTestNoRetire` (so rounds and chunks are reached in deep runs).
 
-Fork measurements shift with pool state per block. `FORK_BLOCK=51390800` is the reference block for this package; the full suite also passed on the latest block at the time, 51,407,527 (table above). On block 51,407,293 the earlier assertion "attacker < 2.5 bp at protocol fee 0 near capacity" failed (+3.56 bp); that assertion was replaced by the victim bound (§5.4).
+Fork measurements shift with pool state per block. `FORK_BLOCK=51390800` is the reference block for this package; the full suite also passed on 51,425,248 (table above), and at `05ed03c` on 51,407,527. The measured values quoted in §3.3, §5.2–§5.4 were taken at `05ed03c` or earlier; the self-audit fixes change neither the block window nor the sizing, and the reward only for runs below 40 EURC, so the asserting fork tests above still pass. On block 51,407,293 the earlier assertion "attacker < 2.5 bp at protocol fee 0 near capacity" failed (+3.56 bp); that assertion was replaced by the victim bound (§5.4).
 
 Pitfall under `via_ir`: Solidity caches `block.timestamp` inside a test function; after `vm.warp` tests use `vm.getBlockTimestamp()`.
