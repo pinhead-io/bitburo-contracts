@@ -1008,9 +1008,9 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(eurc.balanceOf(alice), 900e6);
     }
 
-    /// @notice Zelf-audit 2026-09-17, L-D: een owner die `execute` voor zichzelf aanroept met `rewardTo` = zichzelf en
-    ///         alleen runs op de vloer doet (`maxCorrectionBps` 10, `minTradeEurc` 20 EURC, wallet 20.000 EURC), betaalt
-    ///         toch de helft van de fee aan de treasury. Vroeger ging de hele fee terug naar de owner.
+    /// @notice Zelf-audit 2026-09-17, L-D: een owner die `execute` voor zichzelf aanroept met `rewardTo` = zichzelf
+    ///         en alleen runs op de vloer doet (`maxCorrectionBps` 10, `minTradeEurc` 20 EURC, wallet 20.000 EURC),
+    ///         betaalt toch de helft van de fee aan de treasury. Vroeger ging de hele fee terug naar de owner.
     function test_execute_selfRewardAtFloorStillPaysTreasuryHalf() public {
         Rebalancer.Params memory p = _defaultParams();
         p.maxCorrectionBps = 10;

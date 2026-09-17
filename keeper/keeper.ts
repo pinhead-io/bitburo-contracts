@@ -7,7 +7,8 @@
  * eerst met eth_call en roept het daarna pas echt aan. Een owner waarvan de simulatie of de transactie mislukt
  * krijgt een cool-down (verdubbelt per mislukking) in een klein JSON-bestand, zodat een owner die structureel
  * revert niet elke run opnieuw gas kost. De beloning (hooguit 0,05 EURC en hooguit de helft van de fee per run) gaat
- * naar REWARD_TO, standaard het eigen adres. Het script beslist niets over bedragen of richting: het contract bepaalt of, wat en hoeveel.
+ * naar REWARD_TO, standaard het eigen adres. Het script beslist niets over bedragen of richting: het contract bepaalt
+ * of, wat en hoeveel.
  *
  * Blokcheck en blokvenster (audit M-1, review PR #18): een run mag niet als een pool in hetzelfde blok al een
  * oracle-observatie schreef, en een pool mag binnen één blok maar 6 bp van zijn beginkoers afwijken.
@@ -33,11 +34,12 @@
  *   van de vorige tip en minstens 10% boven de hoogste tip van wie de pool eerder in dat blok aanraakte, tot
  *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei) en het plafond `capFeePolicy`: tip × GAS_ESTIMATE ≤ TIP_REWARD_SHARE_BPS
  *   van de beloning + TIP_BUDGET_ETH. Met de standaardwaarden bepaalt het budget dat plafond, niet de beloning (0,025
- *   EURC, de helft van KEEPER_REWARD_EURC, is ~0,8% van 0,0015 ETH): een run op 3 gwei kost ~0,0014 ETH. Wie alleen wil bieden wat een run oplevert, zet
- *   TIP_BUDGET_ETH=0 (verificatie 579f763, K-4). De verhoogde tip wordt bewaard in FEE_STATE_FILE en geldt
- *   zolang de laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een revert telt alleen als
- *   blokkade als een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit) én een transactie vóór
- *   de eigen transactie een pool aanraakte (Swap, Mint of Burn) die zelf geen directe `execute` op de Rebalancer was.
+ *   EURC, de helft van KEEPER_REWARD_EURC, is ~0,8% van 0,0015 ETH): een run op 3 gwei kost ~0,0014 ETH. Wie alleen wil
+ *   bieden wat een run oplevert, zet TIP_BUDGET_ETH=0 (verificatie 579f763, K-4). De verhoogde tip wordt bewaard in
+ *   FEE_STATE_FILE en geldt zolang de laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een
+ *   revert telt alleen als blokkade als een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit)
+ *   én een transactie vóór de eigen transactie een pool aanraakte (Swap, Mint of Burn) die zelf geen directe `execute`
+ *   op de Rebalancer was.
  *   Een tijdelijke revert zonder blokkade (bijvoorbeeld door een directe `execute` van een ander) verhoogt de tip niet;
  *   vanaf de tweede in een run wacht het script 2, 4, … tot SEND_RETRY_BLOCKS blokken (verificatie 579f763, info a).
  * - Concurrerende keepers (eindreview F-1): staat vóór de eigen gerevertte transactie een `Executed` voor dezelfde
@@ -467,8 +469,9 @@ const readFeeState = (): FeeState | undefined => {
  * Eindreview F-1: plafond van de tip uit wat een run oplevert (`capFeePolicy`). De beloning in wei volgt uit
  * KEEPER_REWARD_EURC en de Chainlink-koersen EURC/USD (de feed van het contract) en ETH/USD. Is een koers niet te lezen,
  * dan telt de beloning als 0 en geldt alleen TIP_BUDGET_ETH: liever te weinig bieden dan te veel.
- * Het contract betaalt hooguit min(KEEPER_REWARD_EURC, fee / 2) (zelf-audit 2026-09-17, L-D). Elke run heeft een fee van
- * minstens 2 × KEEPER_REWARD_EURC (de fee van MIN_TRADE_FLOOR), dus KEEPER_REWARD_EURC / 2 is wat elke run zeker oplevert.
+ * Het contract betaalt hooguit min(KEEPER_REWARD_EURC, fee / 2) (zelf-audit 2026-09-17, L-D). Elke run heeft een fee
+ * van minstens 2 × KEEPER_REWARD_EURC (de fee van MIN_TRADE_FLOOR), dus KEEPER_REWARD_EURC / 2 is wat elke run zeker
+ * oplevert.
  */
 const readRewardWei = async (): Promise<bigint> => {
   if (/^0x0{40}$/i.test(rewardTo)) return 0n;

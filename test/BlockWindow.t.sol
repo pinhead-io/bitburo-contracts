@@ -762,8 +762,8 @@ contract BlockWindowTest is RebalancerTestBase {
 
     /// @notice Lead 3: een donatie tijdens een ronde vergroot het budget niet.
     /// @notice Zelf-audit 2026-09-17, lead 11: krimpt de wallet tijdens een ronde (opnemen of een koersdaling), dan is
-    ///         een deel nooit groter dan `maxCorrectionBps` van de waarde van dat moment. Vroeger gold het budget van de
-    ///         eerste run, zodat een deel hier tot ~23% van de gekrompen wallet kon zijn.
+    ///         een deel nooit groter dan `maxCorrectionBps` van de waarde van dat moment. Vroeger gold het budget van
+    ///         de eerste run, zodat een deel hier 375 EURC op een wallet van 3.000 EURC kon zijn.
     function test_chunk_budgetShrinksWithWallet() public {
         poolEurcUsdc.setLiquidity(2e12);
         _setUser(alice, 20_000e6, 0, _params(1000, 20e6)); // budget 2.000

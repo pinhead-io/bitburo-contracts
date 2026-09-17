@@ -133,8 +133,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///         De constructor dwingt het af; `_maxInput` rekent erop.
     int24 public constant TICK_SPACING = 10;
     uint16 public constant FEE_BPS = 25;
-    /// @notice Beloning voor de aanroeper, hooguit de helft van de fee van de run (zelf-audit 2026-09-17, L-D): zo houdt
-    ///         de treasury van elke run minstens de helft, ook als de aanroeper de owner zelf is.
+    /// @notice Beloning voor de aanroeper, hooguit de helft van de fee van de run (zelf-audit 2026-09-17, L-D): zo
+    ///         houdt de treasury van elke run minstens de helft, ook als de aanroeper de owner zelf is.
     uint256 public constant KEEPER_REWARD_EURC = 50_000; // 0,05 EURC
     uint16 public constant MAX_SLIPPAGE_BPS = 100;
     /// @notice Ondergrens voor `maxSlippageBps`: MAX_SPOT_DEVIATION_BPS + 2 × 5 bps poolfee. `amountOutMinimum`
@@ -148,8 +148,9 @@ contract Rebalancer is ReentrancyGuardTransient {
     ///         bezig kan houden: de beloning is dan 0,025 EURC (de helft van de fee, zie KEEPER_REWARD_EURC) en de
     ///         treasury krijgt de andere helft. Dat geldt voor kopen én verkopen: bij een koop is de fee-grondslag
     ///         het bruto inputbedrag, bij een verkoop max(ontvangen, verwachte opbrengst), waarbij de verwachte
-    ///         opbrengst dezelfde oraclewaarde is waarop de ondergrens is gecontroleerd (audit L-B). Bovendien is `expectedOut` bij een koop dan ≥ ~25.000
-    ///         sats bij 80.000 EURC/cbBTC, waardoor de afronding in `amountOutMinimum` onder 1 bp blijft.
+    ///         opbrengst dezelfde oraclewaarde is waarop de ondergrens is gecontroleerd (audit L-B). Bovendien is
+    ///         `expectedOut` bij een koop dan ≥ ~25.000 sats bij 80.000 EURC/cbBTC, waardoor de afronding in
+    ///         `amountOutMinimum` onder 1 bp blijft.
     uint64 public constant MIN_TRADE_FLOOR = 20e6;
     /// @notice Hoever de koers van elke pool binnen één blok van de koers aan het begin van dat blok mag
     ///         afliggen, inclusief de eigen swap (audit M-1). Onder de poolfee heen en terug (2 × 5 bp), zodat
@@ -606,8 +607,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @return price EURC-basiseenheden (6 dec) per 1 cbBTC.
     function _quote() internal view returns (uint256 price) {
         (, int256 seqAnswer, uint256 seqStartedAt,,) = SEQUENCER_FEED.latestRoundData();
-        // startedAt == 0 is een niet-geïnitialiseerde ronde van de uptime-feed en telt als "onbekend", niet als up. Een
-        // startedAt in de toekomst ook: SequencerDown in plaats van een Panic (zelf-audit 2026-09-17, Info-G).
+        // startedAt == 0 is een niet-geïnitialiseerde ronde van de uptime-feed en telt als "onbekend", niet als up.
+        // Een startedAt in de toekomst ook: SequencerDown in plaats van een Panic (zelf-audit 2026-09-17, Info-G).
         if (
             seqAnswer != 0 || seqStartedAt == 0 || seqStartedAt > block.timestamp
                 || block.timestamp - seqStartedAt < GRACE_PERIOD
