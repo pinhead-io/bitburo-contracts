@@ -31,8 +31,10 @@
  *   (een blokkade), dan verstuurt het script pas na een willekeurig aantal blokken opnieuw (gemiddeld
  *   SEND_RETRY_BLOCKS, zodat een aanvaller het moment niet kan voorspellen), met minstens het dubbele
  *   van de vorige tip en minstens 10% boven de hoogste tip van wie de pool eerder in dat blok aanraakte, tot
- *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei) en het plafond uit wat een run oplevert (`capFeePolicy`: tip × GAS_ESTIMATE
- *   ≤ TIP_REWARD_SHARE_BPS van de beloning + TIP_BUDGET_ETH). De verhoogde tip wordt bewaard in FEE_STATE_FILE en geldt
+ *   MAX_PRIORITY_FEE_GWEI (standaard 3 gwei) en het plafond `capFeePolicy`: tip × GAS_ESTIMATE ≤ TIP_REWARD_SHARE_BPS
+ *   van de beloning + TIP_BUDGET_ETH. Met de standaardwaarden bepaalt het budget dat plafond, niet de beloning (0,05
+ *   EURC is ~1,6% van 0,0015 ETH): een run op 3 gwei kost ~0,0014 ETH. Wie alleen wil bieden wat een run oplevert, zet
+ *   TIP_BUDGET_ETH=0 (verificatie 579f763, K-4). De verhoogde tip wordt bewaard in FEE_STATE_FILE en geldt
  *   zolang de laatste blokkade minder dan FEE_HOLD_SECONDS (standaard 3600) geleden is. Een revert telt alleen als
  *   blokkade als een hersimulatie op het begin van het blok slaagt (of op het blokvenster stuit) én een transactie vóór
  *   de eigen transactie een pool aanraakte (Swap, Mint of Burn) die zelf geen directe `execute` op de Rebalancer was.

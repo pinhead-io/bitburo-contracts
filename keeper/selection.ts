@@ -394,6 +394,13 @@ export const eurcToWei = (eurcBaseUnits: bigint, eurcUsd: bigint, ethUsd: bigint
  * - `gasEstimate` (GAS_ESTIMATE): gas van een geslaagde run, niet de GAS_LIMIT: de tip wordt over het verbruikte gas
  *   betaald (gemeten 475.267 voor een koop op blok 51.403.300). Een gerevertte poging verbruikt minder.
  *
+ * Verificatie 579f763 (K-4): met de standaardwaarden bepaalt vooral TIP_BUDGET_ETH het plafond, niet de beloning. De
+ * beloning van 0,05 EURC is ~2,4e13 wei (EURC 1,146 USD, ETH 2.403,58 USD), het budget 1,5e15 wei: samen ≈ 3,05 gwei,
+ * dus het plafond is de 3 gwei van MAX_PRIORITY_FEE_GWEI. Een geslaagde run op het plafond kost ~0,0014 ETH voor 0,05
+ * EURC beloning. Dat is bewust (L-3: de keeper moet een aanraker kunnen overbieden), maar wie alleen wil betalen wat een
+ * run oplevert, zet TIP_BUDGET_ETH=0. Na één blokkade met een hoge tip van de aanraker (`blockerTip`) springt de tip
+ * direct naar het plafond.
+ *
  * Zo kan concurrentie tussen keepers de tip nooit opdrijven tot boven wat de keeper per run wil betalen, ook niet als
  * die tot het plafond van MAX_PRIORITY_FEE_GWEI zou oplopen. Het plafond is nooit lager dan de basistip: die blijft
  * nodig om te versturen.

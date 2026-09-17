@@ -443,6 +443,20 @@ describe("competing keepers (final review F-1)", () => {
     for (let i = 0; i < 10; i++) fee = nextPriorityFee(fee, 3n * GWEI, withBudget);
     expect(fee).toBe(withBudget.max);
   });
+
+  test("verification 579f763 (K-4): with the defaults the budget, not the reward, sets the cap", () => {
+    const rewardWei = eurcToWei(50_000n, 114_600_000n, 240_358_000_000n);
+    const gasEstimate = 500_000n;
+    const defaults = capFeePolicy(policy, { rewardWei, rewardShareBps: BPS, budgetWei: 1_500_000_000_000_000n, gasEstimate });
+    // (2,4e13 + 1,5e15) / 500.000 ≈ 3,05 gwei: boven MAX_PRIORITY_FEE_GWEI, dus het plafond is 3 gwei.
+    expect((rewardWei + 1_500_000_000_000_000n) / gasEstimate).toBeGreaterThan(policy.max);
+    expect(defaults.max).toBe(policy.max);
+    // De beloning is ~1,6% van het budget; zonder beloning blijft het plafond gelijk.
+    expect((rewardWei * 1_000n) / 1_500_000_000_000_000n).toBe(15n);
+    expect(capFeePolicy(policy, { rewardWei: 0n, rewardShareBps: BPS, budgetWei: 1_500_000_000_000_000n, gasEstimate }).max).toBe(policy.max);
+    // Na één blokkade met een hoge aanrakerstip staat de tip meteen op het plafond.
+    expect(nextPriorityFee(policy.base, 5n * GWEI, defaults)).toBe(defaults.max);
+  });
 });
 
 describe("register scan rotation (final review F-2)", () => {
