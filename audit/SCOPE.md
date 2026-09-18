@@ -1,6 +1,6 @@
 # Rebalancer: scope for the external audit
 
-Prepared 17 September 2026, after the contract was rewritten on that day. Companion files: [`FINDINGS-STATUS.md`](FINDINGS-STATUS.md) (what became of every earlier internal finding), [`../2026-09-17-simplify/REPORT.md`](../2026-09-17-simplify/REPORT.md) (why the contract was rewritten and what it replaced), [`../2026-09-17-simplify/REVIEW-NEW-CONTRACT.md`](../2026-09-17-simplify/REVIEW-NEW-CONTRACT.md) (independent review of the new code) and [`../2026-09-17-simplify/static/triage.md`](../2026-09-17-simplify/static/triage.md) (Slither and Aderyn). The earlier version of this document described the permissionless EURC contract; it is in the git history at `b3ca31a`.
+Prepared 17 September 2026, after the contract was rewritten on that day. Companion files: [`REVIEW.md`](REVIEW.md) (independent internal review of this code) and [`static/triage.md`](static/triage.md) (Slither and Aderyn, raw output in [`static/`](static/)).
 
 ## 1. What is in scope
 
@@ -18,7 +18,7 @@ nSLOC: block comments and `//` comments removed, then every non-blank line count
 | `src/interfaces/IV3SwapRouter.sol` | 21 | 13 | yes (self-written; selector `0x04e45aaf`) |
 | `src/interfaces/IAggregatorV3.sol` | 12 | 8 | yes |
 | `script/Deploy.s.sol` | 63 | 39 | yes (constructor arguments and the checks the constructor does not do) |
-| `keeper/keeper.ts`, `keeper/selection.ts`, `keeper/lock.ts` | 389 / 343 / 134 | 309 / 218 / 86 | optional: reference keeper, not deployed on chain |
+| `keeper/keeper.ts`, `keeper/selection.ts`, `keeper/lock.ts` | 389 / 352 / 134 | 309 / 221 / 86 | optional: reference keeper, not deployed on chain |
 
 Runtime bytecode of `Rebalancer`: 6,583 bytes.
 
@@ -77,7 +77,7 @@ Tests: `test/Rebalancer.t.sol` (unit, fuzz, invariants with and without `retire`
 
 ## 4. Known and accepted risks
 
-1. **Trust in the keeper**, as described in §2. Keepers must send plain transactions from their own key and pass a tight `minAmountOut`; the app keeper currently sends through ERC-4337 and has to change that (finding A-12 of the report).
+1. **Trust in the keeper**, as described in §2. Keepers must send plain transactions from their own key and pass a tight `minAmountOut`: a keeper that sends through a bundler or relayer (ERC-4337, a sponsored send) lets that party wrap the call and trade around it. Bitburo's keeper sends plain transactions from its Privy server wallet, with a fixed gas limit and the simulated output minus 10 bps as `minAmountOut`.
 2. **Feed lag.** The bound is against Chainlink, not against the market: cbBTC/USD may lag by its 0.3% deviation threshold, more in fast markets. A dishonest keeper can time a run for that.
 3. **USDC counts as one dollar.** Deliberate: with a USDC/USD feed the contract would sell cbBTC for sinking USDC during a depeg. Without it a depeg of more than ~0.5% halts both directions.
 4. **Changing or revoking is not atomic.** One more run within all bounds can be placed in front of a `stop()`, a keeper change or an `approve(0)`.
@@ -109,4 +109,4 @@ FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge tes
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 17 Sept 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 75 passed, 1 suite skipped; `FORK_BLOCK=51425248`: 84 passed, 0 failed (61 unit and fuzz, 2 × 7 invariants, 9 fork); deep invariants: 14 passed; keeper: 40 tests passed, `tsc` exit 0. Gas on the fork: buy ~198k, sell ~209k. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`); tests that need an honest run to pass skip themselves when the pool stands more than 0.40% from the feed at that block.
+Results on 17 Sept 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 75 passed, 1 suite skipped; `FORK_BLOCK=51425248`: 84 passed, 0 failed (61 unit and fuzz, 2 × 7 invariants, 9 fork); deep invariants: 14 passed; keeper: 40 tests passed, `tsc` exit 0 (42 since the keeper fixes of 18 Sept 2026). Gas on the fork: buy ~198k, sell ~209k. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`); tests that need an honest run to pass skip themselves when the pool stands more than 0.40% from the feed at that block.
