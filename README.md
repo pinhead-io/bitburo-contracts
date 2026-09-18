@@ -4,7 +4,7 @@ Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper scri
 
 The user keeps USDC and cbBTC in their own wallet, gives the contract an ERC-20 allowance on both and calls `setMandate` with the cbBTC share they want and the keeper that may run it. When the wallet drifts more than 5% of its value away from that share, the owner or that keeper calls `execute`: the contract pulls the input token, swaps it in the Uniswap v3 USDC/cbBTC 0.05% pool, checks the result against Chainlink and sends the output back to the wallet. Bitburo holds no key that can touch funds or mandates; the treasury's only power is the one-time kill switch `retire()`.
 
-Only the owner and the keeper the owner appoints can start a run. That is a deliberate trade: a contract anyone may call has to defend every run against the caller itself (who can move the pool around the run), which takes far more code than the rebalance does. Here a keeper is trusted within the contract's bounds, can be replaced by the owner at any time, and the owner can always run their own wallet. The risks this leaves are listed in [`audit/SCOPE.md`](audit/SCOPE.md).
+Only the owner and the keeper the owner appoints can start a run. That is a deliberate trade: a contract anyone may call has to defend every run against the caller itself (who can move the pool around the run), which takes far more code than the rebalance does. Here a keeper is trusted within the contract's bounds, can be replaced by the owner at any time, and the owner can always run their own wallet.
 
 ## Deployments
 
@@ -36,11 +36,11 @@ Constants (all fixed; another profile needs a new deployment): `BAND_BPS` 500, `
 - **Start.** A correction starts when `drift` > 5% of `total`. The comparison is exact: a wallet exactly on the edge of the band is not due, at any price. A target within 5% of 0% or 100% therefore only ever trades in one direction.
 - **Size.** One run corrects the drift, at most max(10% of `total`, 20 USDC), capped by balance and allowance, and only if the run is worth at least 20 USDC. For wallets below 200 USDC the 20 USDC minimum is the budget, so there a run can be most of the wallet.
 - **Pace.** At most one run per owner per day.
-- **Finish.** A run that leaves at least 20 USDC of its correction undone (the 10% cap, or the allowance) marks the mandate `unfinished`; the run of the next day then continues to the target, also inside the band. After two days without a run, or after `setMandate`, a correction starts from the band again. Measured in the unit suite: all cash with a 74% target reaches 74% in eight daily runs; without this rule it would stop near 70%. The follow-up goes to the target from whichever side: if a price move or the owner's own transfer took the wallet past the target in the meantime, it trades back, also inside the band (a 10,000 USDC wallet that bought 1,000 USDC sells 43 USDC the next day after cbBTC rose 3%).
+- **Finish.** A run that leaves at least 20 USDC of its correction undone (the 10% cap, or the allowance) marks the mandate `unfinished`; the run of the next day then continues to the target, also inside the band. After two days without a run, or after `setMandate`, a correction starts from the band again. Measured in the unit suite: all cash with a 74% target reaches 74% in eight daily runs; without this rule it would stop near 70%.
 
 ### Price bound and maximum loss per run
 
-The contract receives the swap output itself, measures it as a balance difference and requires it to lie within `MAX_DEVIATION_BPS` (0.55%) of the Chainlink value of the input, pool fee of 0.05% included, **in both directions**, and to be at least `minAmountOut`. The pool must also have taken all of the input: SwapRouter02 does not check that, and a pool that runs dry takes only part of it, which would leave the rest in the contract and send it to the treasury with the next `sweep`. Otherwise the run reverts (`OutsidePriceBounds`, or Uniswap's own `Too little received`).
+The contract receives the swap output itself, measures it as a balance difference and requires it to lie within `MAX_DEVIATION_BPS` (0.55%) of the Chainlink value of the input, pool fee of 0.05% included, **in both directions**, and to be at least `minAmountOut`. Otherwise the run reverts (`OutsidePriceBounds`, or Uniswap's own `Too little received`).
 
 - **Lower bound.** A run can lose at most `FEE_BPS + MAX_DEVIATION_BPS` = 0.80% against the Chainlink price, whatever anyone does to the pool. Against the market the feed's lag comes on top: cbBTC/USD updates at a 0.3% deviation or every 20 minutes.
 - **Upper bound.** When the pool gives much *more* than Chainlink says, feed and pool disagree: a stuck feed, or a USDC depeg. The feed is cbBTC/USD and USDC counts as one dollar, so during a depeg the pool asks more USDC per cbBTC than the feed says: a buy then fails the lower bound and a sell the upper bound. The contract stands still instead of selling cbBTC for sinking USDC.
@@ -82,7 +82,6 @@ Afterwards users can still call `stop()` and `approve(0)`; neither is needed for
 - **One pool, one feed, one router, all immutable.** If the USDC/cbBTC 0.05% pool dries up, Chainlink replaces the cbBTC/USD feed or Circle or Coinbase blocks the contract, runs stop and a new deployment is needed. Funds are never at risk from that: they are in the users' wallets.
 - **Large wallets.** There is no splitting of a run. Measured on a fork of block 51,425,248 (pool depth ~3,350 USDC per bp): the 10% run of a wallet of 1, 2 and 3 million USDC landed 0.20%, 0.35% and 0.49% below Chainlink; the 400,000 USDC run of a 4 million wallet was refused by the bound and stays refused until the pool is deeper.
 - **Settings are constants.** Band, cap, interval, minimum and price bound cannot be changed per user.
-- **The feed is computed from DEX pools.** Chainlink lists the Base cbBTC/USD feed with the methodology `dex_state_price`: end-of-block states of onchain DEX pools, weighted by volume, with outlier and time-lag filters. A push inside one block does not reach it, but a push held long enough across those pools can move the answer, and with it the price bound. See `audit/SCOPE.md` §4.
 
 ## Components
 
@@ -94,7 +93,6 @@ Afterwards users can still call `stop()` and `approve(0)`; neither is needed for
 | `test/RebalancerFork.t.sol` | Fork tests against the real tokens, router, pool and feeds on Base, including the deploy script. |
 | `script/Deploy.s.sol` | Deploy script with the verified Base addresses and the checks the constructor does not do. |
 | `keeper/` | Keeper script in TypeScript. Anyone can run it for the owners who appointed them, or for their own wallet. |
-| `audit/` | The package for the external audit: scope, accepted risks and questions (`SCOPE.md`), the internal review of this code (`REVIEW.md`) and the Medusa/Echidna harness (`fuzz/`). |
 
 ## Commands
 
