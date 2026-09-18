@@ -388,6 +388,26 @@ contract RebalancerTest is RebalancerTestBase {
         assertFalse(due);
     }
 
+    function test_execute_followUpGoesToTheTargetFromEitherSide() public {
+        // A follow-up ignores the band and trades towards the target at that day's price, so after a price move it can
+        // trade back: day 1 buys 1,000 of the 1,030 USDC the wallet is short (the cap); cbBTC rises 3%; day 2 sells
+        // 43.26 USDC of cbBTC although the wallet is only 0.43% from its target. Without a follow-up it is not due.
+        _setUser(alice, 6030e6, 4_962_500, 5000); // 10,000 USDC of value, 39.7% cbBTC
+        _execute(alice);
+        (,, bool unfinished,) = r.mandates(alice);
+        assertTrue(unfinished);
+
+        _warp(1 days);
+        _setPrice(PRICE * 103 / 100);
+        (bool due, int256 delta) = r.isDue(alice);
+        assertTrue(due);
+        assertEq(delta, -43_263_296, "sells 43.26 USDC of cbBTC");
+        _setUser(bob, usdc.balanceOf(alice), cbbtc.balanceOf(alice), 5000);
+        (due,) = r.isDue(bob);
+        assertFalse(due, "the same wallet without a follow-up");
+        _execute(alice);
+    }
+
     function test_execute_tinyWalletMayTradeMostOfItself() public {
         // Below 200 USDC the 20 USDC minimum is the budget, so a run can be most of the wallet.
         _setUser(alice, 22e6, 0, 9500);
