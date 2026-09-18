@@ -109,6 +109,8 @@ git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 RUN_FORK=false ~/.foundry/bin/forge test
 FORK_BLOCK=51425248 ~/.foundry/bin/forge test
 FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge test --match-test invariant
+slither . --compile-force-framework foundry --filter-paths '(lib|test|script)/'   # the static analysis in static/
+aderyn . -i src -o aderyn.md
 medusa fuzz --config audit/fuzz/medusa.json --timeout 600 --corpus-dir <outside the repo>   # needs ~/.foundry/bin on PATH
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
