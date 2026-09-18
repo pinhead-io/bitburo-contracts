@@ -1,6 +1,6 @@
 # Static analysis of the rewritten Rebalancer: triage
 
-Run on 17 September 2026 at commit `882582a` with `FORK_BLOCK=51425248 bash audit/run-static.sh audit/2026-09-17-simplify/static`: solc 0.8.37 (0 known bugs), forge 1.5.1, Slither 0.11.6 (25 results), Aderyn 0.6.8 (0 High, 3 Low). Tests in the same run: 84 passed, deep invariants (1000 runs x depth 100) 14 passed. Nothing below needs a code change.
+Run on 17 September 2026 at commit `882582a` with `FORK_BLOCK=51425248 bash audit/run-static.sh audit/static`: solc 0.8.37 (0 known bugs), forge 1.5.1, Slither 0.11.6 (25 results), Aderyn 0.6.8 (0 High, 3 Low). Tests in the same run: 84 passed, deep invariants (1000 runs x depth 100) 14 passed. Nothing below needs a code change.
 
 ## Slither, results in `src/Rebalancer.sol`
 

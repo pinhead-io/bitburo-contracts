@@ -3,8 +3,8 @@
 # The AI reviews and the report are done by the /contract-audit skill; this script provides the raw output.
 #
 # Usage (from the repo root):
-#   bash audit/run-static.sh                 # writes to audit/<today>/
-#   bash audit/run-static.sh audit/2026-10-01
+#   bash audit/run-static.sh                 # writes to audit/static/, the output for the current code
+#   bash audit/run-static.sh /tmp/static     # writes elsewhere, e.g. to compare with the committed run
 #   INVARIANT_RUNS=1000 INVARIANT_DEPTH=100 SKIP_FORK=1 bash audit/run-static.sh
 #
 # Requires: Foundry (~/.foundry/bin), slither, aderyn, gh (for the compiler bug list).
@@ -12,7 +12,7 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-OUT="${1:-audit/$(date +%F)}"
+OUT="${1:-audit/static}"
 INVARIANT_RUNS="${INVARIANT_RUNS:-1000}"
 INVARIANT_DEPTH="${INVARIANT_DEPTH:-100}"
 # `forge` on the PATH may be Laravel Forge; put Foundry explicitly first.
