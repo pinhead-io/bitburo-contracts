@@ -82,6 +82,7 @@ Afterwards users can still call `stop()` and `approve(0)`; neither is needed for
 - **One pool, one feed, one router, all immutable.** If the USDC/cbBTC 0.05% pool dries up, Chainlink replaces the cbBTC/USD feed or Circle or Coinbase blocks the contract, runs stop and a new deployment is needed. Funds are never at risk from that: they are in the users' wallets.
 - **Large wallets.** There is no splitting of a run. Measured on a fork of block 51,425,248 (pool depth ~3,350 USDC per bp): the 10% run of a wallet of 1, 2 and 3 million USDC landed 0.20%, 0.35% and 0.49% below Chainlink; the 400,000 USDC run of a 4 million wallet was refused by the bound and stays refused until the pool is deeper.
 - **Settings are constants.** Band, cap, interval, minimum and price bound cannot be changed per user.
+- **The feed is computed from DEX pools.** Chainlink lists the Base cbBTC/USD feed with the methodology `dex_state_price`: end-of-block states of onchain DEX pools, weighted by volume, with outlier and time-lag filters. A push inside one block does not reach it, but a push held long enough across those pools can move the answer, and with it the price bound. See `audit/SCOPE.md` §4.
 
 ## Components
 

@@ -36,7 +36,7 @@ Base mainnet (chain id 8453). Verified on chain with `cast call` on 17 Sept 2026
 | cbBTC (8 dec) | `0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf` | decimals 8 |
 | Uniswap SwapRouter02 | `0x2626664c2603336E57B271c5C0b26F421741e481` | `exactInputSingle` selector `0x04e45aaf` in the bytecode; `factory()` = `0x3312…FDfD` |
 | Pool USDC/cbBTC 0.05% | `0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef` | `getPool(USDC, cbBTC, 500)` of that factory; 3.77M USDC + 50.45 cbBTC; in-range liquidity 2.42e12 (~3,350 USDC per bp) |
-| Chainlink cbBTC/USD | `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` | "cbBTC / USD", 8 decimals, heartbeat 20 min, deviation 0.3% |
+| Chainlink cbBTC/USD | `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` | "cbBTC / USD", 8 decimals, heartbeat 20 min, deviation 0.3%; methodology `dex_state_price` in Chainlink's feed registry (§4, risk 10) |
 | Chainlink L2 Sequencer Uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` | answer 0 (up) |
 | Treasury | `0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9` (`deploy-mainnet.sh`) | an EOA; it also owns `retire()` |
 
@@ -86,6 +86,7 @@ Tests: `test/Rebalancer.t.sol` (unit, fuzz, invariants with and without `retire`
 7. **Small wallets.** Below 200 USDC the 20 USDC minimum is the budget, so one run can be most of the wallet.
 8. **Treasury blacklisted by Circle.** Runs continue (no transfer to the treasury inside a run); `sweep(USDC)` reverts until the blacklist is lifted.
 9. **Compiler age.** solc 0.8.37 was one week old on 17 Sept 2026.
+10. **The feed is computed from DEX pools.** Chainlink's feed registry lists the Base cbBTC/USD feed with the methodology `dex_state_price`, which Chainlink documents as end-of-block states of onchain DEX pools, weighted by volume, with outlier and time-lag filters (docs.chain.link, "DEX State Price Streams"; it does not publish which pools). The price bound is therefore not fully independent of the pools on Base, possibly including the one the contract trades in. A push inside one block (a sandwich) does not reach the answer; a push held across blocks and across those pools can, and a due run then trades at the moved answer, within the bound. The attacker pays arbitrage against every monitored pool for as long as it takes the answer to follow and the keeper to run. The alternative, Chainlink BTC/USD on Base (`0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F`: CEX prices, deviation 0.1%, heartbeat 20 min, 8 decimals), would need no change to the contract's logic; sampled every 6 hours over 30 days, the pool stood at most 15.3 bps from it (p90 7.8) against 30.6 bps from cbBTC/USD (p90 21.0) (`feed-vs-pool.py`, data in `static/feed-vs-pool-30d.json`). The contract keeps cbBTC/USD; see question 6.
 
 ## 5. Questions for the auditors
 
@@ -94,6 +95,7 @@ Tests: `test/Rebalancer.t.sol` (unit, fuzz, invariants with and without `retire`
 3. With SwapRouter02 and a v3 pool as they are deployed on Base: the contract refuses a run after which the router still has an allowance, which is how it tells that the pool did not take all of the input (`_swap`, `:326-329`). Is there a partial-fill, callback or recipient case that this misses, in which input or output ends up anywhere but the contract?
 4. Is accepting the keeper trust in §2 reasonable for an immutable contract, and is there a cheap on-chain measure that would shrink it further without bringing back the removed machinery?
 5. Is pinning a one-week-old compiler with `via_ir` the right call here, or would you deploy with an older release whose known bugs this code cannot reach?
+6. Would you keep the cbBTC/USD feed, which Chainlink computes from DEX pools (§4, risk 10), or construct the contract with BTC/USD? How long and how widely would a push have to be held on Base to move the cbBTC/USD answer?
 
 ## 6. How to build and test
 
