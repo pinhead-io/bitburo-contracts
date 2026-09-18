@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "slither": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/trailofbits/slither-mcp",
+        "slither-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

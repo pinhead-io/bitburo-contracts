@@ -23,3 +23,5 @@ dist/
 skills-lock.json
 
 *.sh
+# Slither MCP cache
+artifacts/
