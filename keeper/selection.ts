@@ -137,11 +137,16 @@ const SKIP_ERRORS: readonly string[] = [
 /** Uniswap's own message when `amountOutMinimum` is not met: the same condition as OutsidePriceBounds. */
 const SKIP_REASONS: readonly string[] = ["Too little received"];
 
+/** viem decodes a plain `revert("…")` as the built-in error `Error(string)`: the name says nothing, the reason does. */
+const STRING_REVERT = "Error";
+
 export const failureAction = (failure: Failure): FailureAction => {
   if (failure.errorName === "ContractRetired") return "stop";
-  if (failure.errorName !== undefined) return SKIP_ERRORS.includes(failure.errorName) ? "skip" : "cooldown";
+  if (failure.errorName !== undefined && failure.errorName !== STRING_REVERT) {
+    return SKIP_ERRORS.includes(failure.errorName) ? "skip" : "cooldown";
+  }
   if (failure.reason !== undefined) return SKIP_REASONS.some((r) => failure.reason?.includes(r)) ? "skip" : "cooldown";
-  return "skip";
+  return failure.errorName === undefined ? "skip" : "cooldown";
 };
 
 /** Is one of our own transactions still pending? Then a new one would queue behind it; send nothing this run. */
@@ -191,9 +196,13 @@ export const clearFailure = (state: CooldownState, owner: Address): CooldownStat
   return rest;
 };
 
-/** Drop expired cool-downs so that the file does not keep growing. */
-export const pruneExpired = (state: CooldownState, nowSeconds: number): CooldownState =>
-  Object.fromEntries(Object.entries(state).filter(([, entry]) => nowSeconds < entry.until));
+/**
+ * Drop cool-downs that ended more than `keepSeconds` ago, so that the file does not keep growing. An entry outlives
+ * its own cool-down on purpose: it carries the number of consecutive failures, and an owner who fails again right
+ * after his wait must get the doubled wait, not the first one again. A success clears the entry (`clearFailure`).
+ */
+export const pruneExpired = (state: CooldownState, nowSeconds: number, keepSeconds: number): CooldownState =>
+  Object.fromEntries(Object.entries(state).filter(([, entry]) => nowSeconds < entry.until + keepSeconds));
 
 export const parseCooldownState = (json: string): CooldownState => {
   const parsed: unknown = JSON.parse(json);

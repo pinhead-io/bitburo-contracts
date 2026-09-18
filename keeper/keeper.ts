@@ -358,7 +358,7 @@ const main = async (): Promise<void> => {
   console.log(`${owners.length} owners known, ${gone.length} no longer name this keeper, ${due.length} due`);
 
   let cooldowns: CooldownState = existsSync(cooldownFile) ? parseCooldownState(readFileSync(cooldownFile, "utf8")) : {};
-  cooldowns = pruneExpired(cooldowns, nowSec());
+  cooldowns = pruneExpired(cooldowns, nowSec(), cooldownPolicy.maxSeconds);
   const counts: Record<Outcome, number> = { executed: 0, simulated: 0, skipped: 0, cooldown: 0, stop: 0 };
   try {
     for (const item of due) {
