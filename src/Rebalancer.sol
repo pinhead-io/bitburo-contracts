@@ -102,8 +102,9 @@ contract Rebalancer is ReentrancyGuardTransient {
     error SequencerDown();
     error StaleFeed();
     error InvalidFeedAnswer();
-    /// @notice The swap delivered nothing, more than MAX_DEVIATION_BPS above `expected`, or less than the lower bound.
-    ///         Too little normally shows up earlier, as the router's own "Too little received".
+    /// @notice The swap delivered nothing, more than MAX_DEVIATION_BPS above `expected`, or less than the lower bound,
+    ///         or the pool did not take all of the input. Too little normally shows up earlier, as the router's own
+    ///         "Too little received".
     error OutsidePriceBounds(uint256 received, uint256 expected);
     error ContractRetired();
     error NotTreasury();
@@ -320,8 +321,11 @@ contract Rebalancer is ReentrancyGuardTransient {
             })
         );
         received = tokenOut.balanceOf(address(this)) - balanceBefore;
-        if (received == 0 || received < minOut || received > expectedOut * (BPS + MAX_DEVIATION_BPS) / BPS) {
-            revert OutsidePriceBounds(received, expectedOut);
-        }
+        // A pool that runs dry takes only part of the input, and the router does not check that it took all of it: the
+        // rest would stay here, with the allowance, and be swept to the treasury as if it were a fee.
+        if (
+            received == 0 || received < minOut || received > expectedOut * (BPS + MAX_DEVIATION_BPS) / BPS
+                || tokenIn.allowance(address(this), address(ROUTER)) != 0
+        ) revert OutsidePriceBounds(received, expectedOut);
     }
 }

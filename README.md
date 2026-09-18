@@ -4,7 +4,7 @@ Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper scri
 
 The user keeps USDC and cbBTC in their own wallet, gives the contract an ERC-20 allowance on both and calls `setMandate` with the cbBTC share they want and the keeper that may run it. When the wallet drifts more than 5% of its value away from that share, the owner or that keeper calls `execute`: the contract pulls the input token, swaps it in the Uniswap v3 USDC/cbBTC 0.05% pool, checks the result against Chainlink and sends the output back to the wallet. Bitburo holds no key that can touch funds or mandates; the treasury's only power is the one-time kill switch `retire()`.
 
-Only the owner and the keeper the owner appoints can start a run. That is a deliberate trade: a contract anyone may call has to defend every run against the caller itself (who can move the pool around the run), which takes far more code than the rebalance does. Here a keeper is trusted within the contract's bounds, can be replaced by the owner at any time, and the owner can always run their own wallet. The risks this leaves are listed in [`audit/SCOPE.md`](audit/SCOPE.md).
+Only the owner and the keeper the owner appoints can start a run. That is a deliberate trade: a contract anyone may call has to defend every run against the caller itself (who can move the pool around the run), which takes far more code than the rebalance does. Here a keeper is trusted within the contract's bounds, can be replaced by the owner at any time, and the owner can always run their own wallet.
 
 ## Deployments
 
@@ -93,7 +93,6 @@ Afterwards users can still call `stop()` and `approve(0)`; neither is needed for
 | `test/RebalancerFork.t.sol` | Fork tests against the real tokens, router, pool and feeds on Base, including the deploy script. |
 | `script/Deploy.s.sol` | Deploy script with the verified Base addresses and the checks the constructor does not do. |
 | `keeper/` | Keeper script in TypeScript. Anyone can run it for the owners who appointed them, or for their own wallet. |
-| `audit/` | The package for the external audit: scope, accepted risks and questions (`SCOPE.md`), the internal review of this code (`REVIEW.md`) and the static analysis (`static/`, produced by `run-static.sh`). |
 
 ## Commands
 

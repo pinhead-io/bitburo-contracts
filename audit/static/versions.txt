@@ -1,6 +1,0 @@
-commit: 882582a (feature/simplify-rebalancer-keeper-usdc)
-run at: 2026-09-17 17:59:21 CEST
-FORK_BLOCK: 51425248
-forge Version: 1.5.1-stable
-slither 0.11.6
-aderyn 0.6.8
