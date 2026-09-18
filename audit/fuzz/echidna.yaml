@@ -1,0 +1,17 @@
+# Echidna run of RebalancerHarness, the same properties as medusa.json. From the repository root:
+#   echidna audit/fuzz/RebalancerHarness.sol --contract RebalancerHarness --config audit/fuzz/echidna.yaml \
+#     --corpus-dir <a directory outside the repository>
+testMode: property
+prefix: "property_"
+testLimit: 500000
+seqLen: 100
+shrinkLimit: 5000
+workers: 10
+# Small natural time steps; the harness's `warp` action makes the larger jumps.
+maxTimeDelay: 3600
+maxBlockDelay: 1800
+codeSize: 0xffffffff
+coverage: true
+coverageFormats: ["txt", "lcov"]
+# crytic-compile reads solc 0.8.37, via-IR, the optimizer runs, evm version and remappings from foundry.toml.
+cryticArgs: ["--compile-force-framework", "solc"]
