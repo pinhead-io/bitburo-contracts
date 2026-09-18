@@ -1,6 +1,6 @@
 # Rebalancer: scope for the external audit
 
-Prepared 17 September 2026, after the contract was rewritten on that day, and updated 18 September 2026. Companion files: [`REVIEW.md`](REVIEW.md) (the internal reviews of this code), [`static/triage.md`](static/triage.md) (Slither and Aderyn, raw output in [`static/`](static/)) and [`fuzz/`](fuzz/) (a Medusa and Echidna harness for the invariants in §3).
+Prepared 17 September 2026, after the contract was rewritten on that day, and updated 18 September 2026. Companion files: [`REVIEW.md`](REVIEW.md) (the internal reviews of this code) and [`fuzz/`](fuzz/) (a Medusa and Echidna harness for the invariants in §3).
 
 ## 1. What is in scope
 
@@ -86,7 +86,7 @@ Tests: `test/Rebalancer.t.sol` (unit, fuzz, invariants with and without `retire`
 7. **Small wallets.** Below 200 USDC the 20 USDC minimum is the budget, so one run can be most of the wallet.
 8. **Treasury blacklisted by Circle.** Runs continue (no transfer to the treasury inside a run); `sweep(USDC)` reverts until the blacklist is lifted.
 9. **Compiler age.** solc 0.8.37 was one week old on 17 Sept 2026; on 18 Sept its known-bugs list was still empty and there was no newer release.
-10. **The feed is computed from DEX pools.** Chainlink's feed registry lists the Base cbBTC/USD feed with the methodology `dex_state_price`, which Chainlink documents as end-of-block states of onchain DEX pools, weighted by volume, with outlier and time-lag filters (docs.chain.link, "DEX State Price Streams"; it does not publish which pools). The price bound is therefore not fully independent of the pools on Base, possibly including the one the contract trades in. A push inside one block (a sandwich) does not reach the answer; a push held across blocks and across those pools can, and a due run then trades at the moved answer, within the bound. The attacker pays arbitrage against every monitored pool for as long as it takes the answer to follow and the keeper to run. The alternative, Chainlink BTC/USD on Base (`0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F`: CEX prices, deviation 0.1%, heartbeat 20 min, 8 decimals), would need no change to the contract's logic; sampled every 6 hours over 30 days, the pool stood at most 15.3 bps from it (p90 7.8) against 30.6 bps from cbBTC/USD (p90 21.0) (`feed-vs-pool.py`, data in `static/feed-vs-pool-30d.json`). The contract keeps cbBTC/USD; see question 6.
+10. **The feed is computed from DEX pools.** Chainlink's feed registry lists the Base cbBTC/USD feed with the methodology `dex_state_price`, which Chainlink documents as end-of-block states of onchain DEX pools, weighted by volume, with outlier and time-lag filters (docs.chain.link, "DEX State Price Streams"; it does not publish which pools). The price bound is therefore not fully independent of the pools on Base, possibly including the one the contract trades in. A push inside one block (a sandwich) does not reach the answer; a push held across blocks and across those pools can, and a due run then trades at the moved answer, within the bound. The attacker pays arbitrage against every monitored pool for as long as it takes the answer to follow and the keeper to run. The alternative, Chainlink BTC/USD on Base (`0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F`: CEX prices, deviation 0.1%, heartbeat 20 min, 8 decimals), would need no change to the contract's logic; sampled every 6 hours over 30 days, the pool stood at most 15.3 bps from it (p90 7.8) against 30.6 bps from cbBTC/USD (p90 21.0) (`feed-vs-pool.py`). The contract keeps cbBTC/USD; see question 6.
 11. **A follow-up can trade back.** A run that leaves part of its correction undone lets the next day's run ignore the band. That run goes to the target at that day's price, so after a price move or the owner's own transfer it can trade in the opposite direction, inside the band: 43 USDC on a 10,000 USDC wallet 0.43% from its target in `test_execute_followUpGoesToTheTargetFromEitherSide`. Nobody can cause it for profit; the owner pays fee and slippage on that trade.
 
 ## 5. Questions for the auditors
@@ -109,8 +109,6 @@ git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 RUN_FORK=false ~/.foundry/bin/forge test
 FORK_BLOCK=51425248 ~/.foundry/bin/forge test
 FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge test --match-test invariant
-slither . --compile-force-framework foundry --filter-paths '(lib|test|script)/'   # the static analysis in static/
-aderyn . -i src -o aderyn.md
 medusa fuzz --config audit/fuzz/medusa.json --timeout 600 --corpus-dir <outside the repo>   # needs ~/.foundry/bin on PATH
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```

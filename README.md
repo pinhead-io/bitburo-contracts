@@ -94,7 +94,7 @@ Afterwards users can still call `stop()` and `approve(0)`; neither is needed for
 | `test/RebalancerFork.t.sol` | Fork tests against the real tokens, router, pool and feeds on Base, including the deploy script. |
 | `script/Deploy.s.sol` | Deploy script with the verified Base addresses and the checks the constructor does not do. |
 | `keeper/` | Keeper script in TypeScript. Anyone can run it for the owners who appointed them, or for their own wallet. |
-| `audit/` | The package for the external audit: scope, accepted risks and questions (`SCOPE.md`), the internal review of this code (`REVIEW.md`), the static analysis (`static/`: Slither, Aderyn, the compiler's known bugs and the test runs) and the Medusa/Echidna harness (`fuzz/`). |
+| `audit/` | The package for the external audit: scope, accepted risks and questions (`SCOPE.md`), the internal review of this code (`REVIEW.md`) and the Medusa/Echidna harness (`fuzz/`). |
 
 ## Commands
 

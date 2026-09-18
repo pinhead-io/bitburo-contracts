@@ -1,1 +1,0 @@
-solc 0.8.37: 0 known bugs (source: github.com/argotorg/solidity docs/bugs.json)

@@ -1,7 +1,7 @@
 # Samples, every 6 hours over 30 days on Base: Chainlink cbBTC/USD, Chainlink BTC/USD and the Uniswap v3
 # USDC/cbBTC 0.05% pool's spot price. Prints the deviations in bps.
 # The measurement behind the feed choice in SCOPE.md section 4. From the repository root:
-#   python3 audit/feed-vs-pool.py <head block> audit/static/feed-vs-pool-30d.json
+#   python3 audit/feed-vs-pool.py <head block> <out.json>
 # Needs Foundry's `cast`; the public RPC rate-limits, hence two threads and the back-off.
 import json
 import os
