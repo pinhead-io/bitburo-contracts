@@ -532,6 +532,28 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(usdc.allowance(address(r), address(router)), 0, "a reverted run leaves no allowance behind");
     }
 
+    function test_execute_partialFillWithinTheBoundIsRefused() public {
+        // The pool takes 99.6% of the input and pays 0.2% better than Chainlink for it: what arrives lies within the
+        // bound on the whole input, but the rest of the input would stay in the contract and be swept to the treasury.
+        _setUser(alice, 1000e6, 0, 8000);
+        _setUser(bob, 0, 0.0125e8, 5000);
+        router.setFillBps(9960);
+        router.setWorseBps(-20);
+        vm.startPrank(keeper);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.OutsidePriceBounds.selector, 124_436, 124_687));
+        r.execute(alice, 0);
+        vm.expectRevert(abi.encodeWithSelector(Rebalancer.OutsidePriceBounds.selector, 99_799_200, 100e6));
+        r.execute(bob, 0);
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(alice), 1000e6, "nothing moved");
+        assertEq(cbbtc.balanceOf(bob), 0.0125e8, "nothing moved");
+        assertEq(usdc.balanceOf(address(r)) + cbbtc.balanceOf(address(r)), 0);
+
+        router.setFillBps(10_000);
+        _execute(alice);
+        _execute(bob);
+    }
+
     function test_execute_zeroOutputIsRefused() public {
         _setUser(alice, 1000e6, 0, 8000);
         router.setIgnoreMinimum(true);

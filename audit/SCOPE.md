@@ -6,7 +6,7 @@ Prepared 17 September 2026, after the contract was rewritten on that day. Compan
 
 ### 1.1 Audit version
 
-The latest commit on `development` when the audit starts; we confirm the hash when we contact the auditor. All `file:line` references below were checked on 17 Sept 2026.
+The latest commit on `development` when the audit starts; we confirm the hash when we contact the auditor. All `file:line` references below were checked on 18 Sept 2026.
 
 ### 1.2 Files and size
 
@@ -14,13 +14,13 @@ nSLOC: block comments and `//` comments removed, then every non-blank line count
 
 | File | Lines | nSLOC | In scope |
 |---|---|---|---|
-| `src/Rebalancer.sol` | 327 | 215 | **yes, primary** |
+| `src/Rebalancer.sol` | 331 | 216 | **yes, primary** |
 | `src/interfaces/IV3SwapRouter.sol` | 21 | 13 | yes (self-written; selector `0x04e45aaf`) |
 | `src/interfaces/IAggregatorV3.sol` | 12 | 8 | yes |
 | `script/Deploy.s.sol` | 63 | 39 | yes (constructor arguments and the checks the constructor does not do) |
 | `keeper/keeper.ts`, `keeper/selection.ts`, `keeper/lock.ts` | 389 / 352 / 134 | 309 / 221 / 86 | optional: reference keeper, not deployed on chain |
 
-Runtime bytecode of `Rebalancer`: 6,583 bytes.
+Runtime bytecode of `Rebalancer`: 6,694 bytes.
 
 ### 1.3 Compiler and settings
 
@@ -48,7 +48,7 @@ The deployed legacy contracts `0xE577…2104` and `0xED47…e6e5`, the Bitburo a
 
 ## 2. System overview and trust model
 
-An owner gives the contract an ERC-20 allowance on USDC and cbBTC and calls `setMandate(targetBps, keeper)` (`:142`). Funds stay in the owner's wallet. When the wallet's cbBTC share drifts more than 5% of its value from the target, the owner or the keeper that owner appointed calls `execute(owner, minAmountOut)` (`:193`): the contract pulls the input token, swaps it through SwapRouter02 `exactInputSingle` in the USDC/cbBTC 0.05% pool with itself as recipient, checks what arrived against Chainlink (`_swap`, `:302`), keeps 25 bps of the USDC leg as fee and sends the rest to the owner. Anyone can forward the collected fees to the treasury with `sweep` (`:228`).
+An owner gives the contract an ERC-20 allowance on USDC and cbBTC and calls `setMandate(targetBps, keeper)` (`:143`). Funds stay in the owner's wallet. When the wallet's cbBTC share drifts more than 5% of its value from the target, the owner or the keeper that owner appointed calls `execute(owner, minAmountOut)` (`:194`): the contract pulls the input token, swaps it through SwapRouter02 `exactInputSingle` in the USDC/cbBTC 0.05% pool with itself as recipient, checks what arrived against Chainlink and that the pool took all of the input (`_swap`, `:303`), keeps 25 bps of the USDC leg as fee and sends the rest to the owner. Anyone can forward the collected fees to the treasury with `sweep` (`:229`).
 
 | Actor | Can | Cannot |
 |---|---|---|
@@ -69,8 +69,8 @@ Tests: `test/Rebalancer.t.sol` (unit, fuzz, invariants with and without `retire`
 2. **Loss bound per run.** Against the Chainlink price a run loses at most `FEE_BPS + MAX_DEVIATION_BPS` = 80 bps, enforced on the measured balance difference, also if the router did not enforce its own minimum. `test_execute_lowerBound`, `test_execute_ownBoundHoldsWhenTheRouterDoesNotEnforceTheMinimum`, `test_execute_partialFillIsRefused`, `test_execute_zeroOutputIsRefused`, `testFuzz_lossPerRunBoundedByFeePlusDeviation`, `invariant_lossPerRunWithinFeePlusDeviation`, `test_fork_pushedPoolAgainstTheRunIsRefused`.
 3. **Upper bound.** A swap that yields more than 55 bps above the Chainlink value is refused: a stuck feed or a USDC depeg halts both directions. `test_execute_upperBoundStopsARunThatIsTooGood`, `test_execute_usdcDepegStopsBothDirections`, `test_fork_poolFarBetterThanTheFeedIsRefused`.
 4. **`minAmountOut` only tightens.** `test_execute_minAmountOutCanOnlyTighten`, `test_fork_keeperCanDemandTheQuotedOutput`.
-5. **The rule** (`_plan`, `:269`). Start outside the band (exact comparison), run ≤ max(10% of the value, 20 USDC), ≥ 20 USDC, towards the target and not past it, capped by balance and allowance; at most one run per owner per day; an unfinished correction continues on the next days and the flag expires after two days. `test_execute_buy_exactAmounts`, `test_execute_sell_exactAmounts`, `test_execute_bandEdgeDoesNotDependOnRounding`, `test_execute_correctionLargerThanTheCapIsFinishedOnTheNextDays`, `test_execute_unfinishedCorrectionExpiresAfterTwoIntervals`, `testFuzz_runMovesTowardsTheTargetWithinTheCap`, `invariant_atMostOneRunPerInterval`, `invariant_runWithinMinimumAndCap`.
-6. **Accounting.** Between calls the contract holds only uncollected fees (and tokens sent to it by mistake), never cbBTC or an allowance to the router, and what it holds never leaks into a run. `invariant_contractHoldsOnlyUnsweptFeesAndDonations`, `invariant_routerAllowanceIsZeroBetweenCalls`, `test_sell_isNotAffectedByCollectedFees`.
+5. **The rule** (`_plan`, `:270`). Start outside the band (exact comparison), run ≤ max(10% of the value, 20 USDC), ≥ 20 USDC, towards the target and not past it, capped by balance and allowance; at most one run per owner per day; an unfinished correction continues on the next days and the flag expires after two days. `test_execute_buy_exactAmounts`, `test_execute_sell_exactAmounts`, `test_execute_bandEdgeDoesNotDependOnRounding`, `test_execute_correctionLargerThanTheCapIsFinishedOnTheNextDays`, `test_execute_unfinishedCorrectionExpiresAfterTwoIntervals`, `testFuzz_runMovesTowardsTheTargetWithinTheCap`, `invariant_atMostOneRunPerInterval`, `invariant_runWithinMinimumAndCap`.
+6. **Accounting.** Between calls the contract holds only uncollected fees (and tokens sent to it by mistake), never cbBTC or an allowance to the router, and what it holds never leaks into a run. A run in which the pool took only part of the input is refused, also when what arrived meets the bound: the router does not check that the pool took everything, and the rest would stay in the contract. `invariant_contractHoldsOnlyUnsweptFeesAndDonations`, `invariant_routerAllowanceIsZeroBetweenCalls`, `test_sell_isNotAffectedByCollectedFees`, `test_execute_partialFillIsRefused`, `test_execute_partialFillWithinTheBoundIsRefused`, `test_fork_tokensLowerTheAllowanceOnTransferFrom`.
 7. **Oracle.** Sequencer up and past the grace period, answer > 0 and not rounding to 0, age ≤ 1500 s, no future timestamps. `test_quote_revertsSequencerDown`, `test_quote_revertsStaleFeed`, `test_quote_revertsInvalidAnswer`, `test_fork_feedIsFreshAndCloseToThePool`.
 8. **`retire`, `stop`, the interval.** `test_retire_*`, `test_stop_*`, `test_setMandate_doesNotShortenTheInterval`, `invariant_noRunAfterRetire`.
 9. **Reentrancy.** `test_sweep_maliciousTokenCannotReenter` (fails without the guard).
@@ -89,9 +89,9 @@ Tests: `test/Rebalancer.t.sol` (unit, fuzz, invariants with and without `retire`
 
 ## 5. Questions for the auditors
 
-1. Is the two-sided bound on the measured balance difference (`_swap`, `:302-326`) a sound replacement for a separate pool-spot check, including its role as a halt during a USDC depeg or with a stuck feed? Any rounding or decimals case in which a run passes outside 55 bps, or in which honest runs of the minimum size can never pass?
-2. Can any sequence of `setMandate`, `stop`, runs, price moves, donations and allowance changes bypass the daily interval, run inside the band without an unfinished correction, flip direction at a loss, or keep a wallet trading every day (`_finishing`, `:262`; `_plan`, `:269-298`)?
-3. With SwapRouter02 and a v3 pool as they are deployed on Base: is there a partial-fill, callback or recipient case in which input or output can end up anywhere but the contract, or in which allowance to the router survives a call?
+1. Is the two-sided bound on the measured balance difference (`_swap`, `:303-330`) a sound replacement for a separate pool-spot check, including its role as a halt during a USDC depeg or with a stuck feed? Any rounding or decimals case in which a run passes outside 55 bps, or in which honest runs of the minimum size can never pass?
+2. Can any sequence of `setMandate`, `stop`, runs, price moves, donations and allowance changes bypass the daily interval, run inside the band without an unfinished correction, flip direction at a loss, or keep a wallet trading every day (`_finishing`, `:263`; `_plan`, `:270-299`)?
+3. With SwapRouter02 and a v3 pool as they are deployed on Base: the contract refuses a run after which the router still has an allowance, which is how it tells that the pool did not take all of the input (`_swap`, `:326-329`). Is there a partial-fill, callback or recipient case that this misses, in which input or output ends up anywhere but the contract?
 4. Is accepting the keeper trust in §2 reasonable for an immutable contract, and is there a cheap on-chain measure that would shrink it further without bringing back the removed machinery?
 5. Is pinning a one-week-old compiler with `via_ir` the right call here, or would you deploy with an older release whose known bugs this code cannot reach?
 

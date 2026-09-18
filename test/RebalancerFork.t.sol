@@ -226,4 +226,18 @@ contract RebalancerForkTest is Test {
         r.execute(buyer, quoted);
         assertEq(CBBTC.balanceOf(buyer), quoted);
     }
+
+    /// @dev The contract reads the router's allowance after a swap to tell whether the pool took all of the input, so
+    ///      USDC and cbBTC must lower an allowance by what `transferFrom` moves.
+    function test_fork_tokensLowerTheAllowanceOnTransferFrom() public {
+        IERC20[2] memory tokens = [USDC, CBBTC];
+        for (uint256 i; i < 2; i++) {
+            deal(address(tokens[i]), buyer, 100);
+            vm.prank(buyer);
+            assertTrue(tokens[i].approve(seller, 100));
+            vm.prank(seller);
+            assertTrue(tokens[i].transferFrom(buyer, seller, 40));
+            assertEq(tokens[i].allowance(buyer, seller), 60);
+        }
+    }
 }
