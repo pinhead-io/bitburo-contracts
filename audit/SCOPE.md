@@ -18,7 +18,7 @@ nSLOC: block comments and `//` comments removed, then every non-blank line count
 | `src/interfaces/IV3SwapRouter.sol` | 21 | 13 | yes (self-written; selector `0x04e45aaf`) |
 | `src/interfaces/IAggregatorV3.sol` | 12 | 8 | yes |
 | `script/Deploy.s.sol` | 63 | 39 | yes (constructor arguments and the checks the constructor does not do) |
-| `keeper/keeper.ts`, `keeper/selection.ts`, `keeper/lock.ts` | 389 / 343 / 134 | 309 / 218 / 86 | optional: reference keeper, not deployed on chain |
+| `keeper/keeper.ts`, `keeper/selection.ts`, `keeper/lock.ts` | 389 / 352 / 134 | 309 / 221 / 86 | optional: reference keeper, not deployed on chain |
 
 Runtime bytecode of `Rebalancer`: 6,583 bytes.
 
