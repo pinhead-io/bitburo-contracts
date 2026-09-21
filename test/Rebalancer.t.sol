@@ -409,10 +409,10 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_tinyWalletMayTradeMostOfItself() public {
-        // Below 10 USDC the 1 USDC minimum is the budget, so a run can be a fifth of the wallet.
-        _setUser(alice, 5e6, 0, 9500);
+        // Below 50 USDC the 5 USDC minimum is the budget, so a run can be a fifth of the wallet.
+        _setUser(alice, 25e6, 0, 9500);
         _execute(alice);
-        assertEq(usdc.balanceOf(alice), 4e6, "a run of 1 USDC out of 5");
+        assertEq(usdc.balanceOf(alice), 20e6, "a run of 5 USDC out of 25");
     }
 
     function test_execute_emptyWalletIsNothingToDo() public {
@@ -422,9 +422,9 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_smallWalletUsesTheMinimumAsBudget() public {
-        _setUser(alice, 8e6, 0, 8000); // 10% would be 0.80 USDC, below the minimum of 1
+        _setUser(alice, 40e6, 0, 8000); // 10% would be 4 USDC, below the minimum of 5
         _execute(alice);
-        assertEq(usdc.balanceOf(alice), 7e6);
+        assertEq(usdc.balanceOf(alice), 35e6);
     }
 
     function test_execute_driftBelowTheMinimumIsNothingToDo() public {
@@ -718,14 +718,17 @@ contract RebalancerTest is RebalancerTestBase {
         uint256 cap = total / 10 > minTrade ? total / 10 : minTrade;
         assertLe(run, cap + price / 1e8 + 1, "above the cap"); // + 1 sat of rounding on a sell
 
-        // Towards the target and not past it (the fee leaves the run slightly short).
+        // Towards the target and not past it (the fee leaves the run slightly short). The margin is one satoshi,
+        // not one basis point: a sell rounds its amount up to whole satoshi, and on a small wallet at a high price
+        // one satoshi is worth several basis points of it. It collapses back to one basis point on a large wallet.
         uint256 shareAfter = _shareBps(alice);
+        uint256 satBps = (price / 1e8) * BPS / total + 1;
         if (delta > 0) {
             assertGt(shareAfter, shareBefore);
-            assertLe(shareAfter, uint256(target) + 1);
+            assertLe(shareAfter, uint256(target) + satBps);
         } else {
             assertLt(shareAfter, shareBefore);
-            assertGe(shareAfter + 1, uint256(target));
+            assertGe(shareAfter + satBps, uint256(target));
         }
     }
 
