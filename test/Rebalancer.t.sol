@@ -409,10 +409,10 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_tinyWalletMayTradeMostOfItself() public {
-        // Below 200 USDC the 20 USDC minimum is the budget, so a run can be most of the wallet.
-        _setUser(alice, 22e6, 0, 9500);
+        // Below 10 USDC the 1 USDC minimum is the budget, so a run can be a fifth of the wallet.
+        _setUser(alice, 5e6, 0, 9500);
         _execute(alice);
-        assertEq(usdc.balanceOf(alice), 2e6, "a run of 20 USDC out of 22");
+        assertEq(usdc.balanceOf(alice), 4e6, "a run of 1 USDC out of 5");
     }
 
     function test_execute_emptyWalletIsNothingToDo() public {
@@ -422,13 +422,13 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_smallWalletUsesTheMinimumAsBudget() public {
-        _setUser(alice, 100e6, 0, 8000); // 10% would be 10 USDC, below the minimum of 20
+        _setUser(alice, 8e6, 0, 8000); // 10% would be 0.80 USDC, below the minimum of 1
         _execute(alice);
-        assertEq(usdc.balanceOf(alice), 80e6);
+        assertEq(usdc.balanceOf(alice), 7e6);
     }
 
     function test_execute_driftBelowTheMinimumIsNothingToDo() public {
-        _setUser(alice, 300e6, 0, 600); // drift 18 USDC: outside the band of 15, below the minimum of 20
+        _setUser(alice, 15e6, 0, 600); // drift 0.90 USDC: outside the band of 0.75, below the minimum of 1
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         _execute(alice);
         (bool due,) = r.isDue(alice);
@@ -449,7 +449,7 @@ contract RebalancerTest is RebalancerTestBase {
     function test_execute_allowanceBelowTheMinimumIsNothingToDo() public {
         _setUser(alice, 1000e6, 0, 8000);
         vm.prank(alice);
-        usdc.approve(address(r), 19e6);
+        usdc.approve(address(r), 500_000);
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         _execute(alice);
         vm.prank(alice);
@@ -713,8 +713,9 @@ contract RebalancerTest is RebalancerTestBase {
 
         uint256 run = delta > 0 ? uint256(delta) : uint256(-delta);
         // forge-lint: disable-end(unsafe-typecast)
-        assertGe(run, 20e6, "below the minimum");
-        uint256 cap = total / 10 > 20e6 ? total / 10 : 20e6;
+        uint256 minTrade = r.MIN_TRADE_USDC();
+        assertGe(run, minTrade, "below the minimum");
+        uint256 cap = total / 10 > minTrade ? total / 10 : minTrade;
         assertLe(run, cap + price / 1e8 + 1, "above the cap"); // + 1 sat of rounding on a sell
 
         // Towards the target and not past it (the fee leaves the run slightly short).
@@ -1072,8 +1073,9 @@ contract RebalancerHandler is Test {
             uint256 totalAfter = USDC.balanceOf(owner) + CBBTC.balanceOf(owner) * price / 1e8;
             uint256 loss = total > totalAfter ? total - totalAfter : 0;
             if (loss > run * 80 / BPS + price / 1e8 * 3) lossBoundBroken = true;
-            uint256 cap = total / 10 > 20e6 ? total / 10 : 20e6;
-            if (run > cap + price / 1e8 || run + price / 1e8 < 20e6) capBroken = true;
+            uint256 minTrade = R.MIN_TRADE_USDC();
+            uint256 cap = total / 10 > minTrade ? total / 10 : minTrade;
+            if (run > cap + price / 1e8 || run + price / 1e8 < minTrade) capBroken = true;
         } catch {}
     }
 

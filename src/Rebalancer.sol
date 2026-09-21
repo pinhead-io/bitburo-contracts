@@ -55,7 +55,14 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 public constant MAX_TARGET_BPS = 9500;
     uint256 public constant BAND_BPS = 500;
     uint256 public constant MAX_CORRECTION_BPS = 1000; // per run, share of the total value
-    uint256 public constant MIN_TRADE_USDC = 20e6;
+    /// @notice The smallest run that is worth making, and the step that separates a finished correction from an
+    ///         unfinished one in `_plan`. It has to be strictly positive: at 0 a run that finishes its correction
+    ///         would still mark itself unfinished, which drops the band for the next day and never stops.
+    /// @dev 1 USDC. The fee of the smallest run (25 bps, $0.0025) is under what a run costs the keeper in gas
+    ///      (~$0.004 on Base), so the very smallest runs are slightly loss-making. That is the deliberate price of
+    ///      serving wallets from ~$20 without a minimum deposit. Rounding stays small as well: a buy of 1 USDC is
+    ///      ~1,200 satoshi, so the single unit `_swap` can round away is under 10 bps of the 55 bps price bound.
+    uint256 public constant MIN_TRADE_USDC = 1e6;
     uint256 public constant INTERVAL = 1 days; // between two runs of one owner
     /// @notice How far the received output may lie from the Chainlink value of the input, pool fee (5 bps) included.
     uint256 public constant MAX_DEVIATION_BPS = 55;
