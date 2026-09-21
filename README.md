@@ -10,7 +10,7 @@ Only the owner and the keeper the owner appoints can start a run. That is a deli
 
 | What | Address | Note |
 |---|---|---|
-| Rebalancer (this code) | not deployed yet | Deploy only after Arjan's explicit approval. |
+| Rebalancer (this code) | `0x1Df884A2A28BbD729714D4f9697972293872BB42` | Live since 21 September 2026, block 51,604,724, tx `0xc062d3a63e5d4d995162a66471f462c7d09574d5c686fbc1c18dfa5f7c1b0ce4`. Code: commit `ef39299`. Verified on Basescan. |
 | Rebalancer v1.1 (EURC, permissionless) | `0xE577D68948883FDF8e2694e38dF656D2D9CA2104` | Legacy. Predates `retire()`; users revoke with `setParams(active = false)` and `approve(0)`. Code: tag `v1.1.0` and commit `b3ca31a`. |
 | Rebalancer v1.0 | `0xED47…e6e5` | Legacy. |
 
