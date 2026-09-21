@@ -58,11 +58,13 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @notice The smallest run that is worth making, and the step that separates a finished correction from an
     ///         unfinished one in `_plan`. It has to be strictly positive: at 0 a run that finishes its correction
     ///         would still mark itself unfinished, which drops the band for the next day and never stops.
-    /// @dev 1 USDC. The fee of the smallest run (25 bps, $0.0025) is under what a run costs the keeper in gas
-    ///      (~$0.004 on Base), so the very smallest runs are slightly loss-making. That is the deliberate price of
-    ///      serving wallets from ~$20 without a minimum deposit. Rounding stays small as well: a buy of 1 USDC is
-    ///      ~1,200 satoshi, so the single unit `_swap` can round away is under 10 bps of the 55 bps price bound.
-    uint256 public constant MIN_TRADE_USDC = 1e6;
+    /// @dev 5 USDC, which is set by the rounding rather than by the economics. A run is measured in whole satoshi,
+    ///      so the single unit a swap can round away is worth `price / 1e8` — a share of the run that grows as the
+    ///      run shrinks and as cbBTC gets dearer. It has to stay well inside MAX_DEVIATION_BPS, which the pool's own
+    ///      distance to the feed and the pool fee already eat into, or a run reverts on a bound that rounding alone
+    ///      pushed it past. At 5 USDC that unit is 1.7 bps of the run at 85,000 USDC per cbBTC and 5 bps at 250,000;
+    ///      at 1 USDC it would be 8.5 and 25 bps. It serves wallets from ~100 USDC, against ~400 at the old 20 USDC.
+    uint256 public constant MIN_TRADE_USDC = 5e6;
     uint256 public constant INTERVAL = 1 days; // between two runs of one owner
     /// @notice How far the received output may lie from the Chainlink value of the input, pool fee (5 bps) included.
     uint256 public constant MAX_DEVIATION_BPS = 55;
