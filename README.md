@@ -133,6 +133,34 @@ One run of the script: find the owners that named this keeper (the `MandateSet` 
 
 The script was run end to end against a local anvil fork of Base on 17 September 2026 (real router, pool and feeds): it found the owner from the event, ran a buy of 1,000 USDC and a sell of 0.02 cbBTC, found nothing to do in the next run, and forgot an owner that called `stop()`.
 
+## Deployment run book
+
+What a mainnet deploy looked like on 21 September 2026, in the order it has to happen. Every step here caught something at least once.
+
+**Before the deploy**
+
+1. `~/.foundry/bin/forge clean && ~/.foundry/bin/forge build`. Without it `forge` reports "compilation skipped" and deploys bytecode from a cache that may hold artifacts of files that no longer exist. A deploy cannot be undone; a two-minute rebuild can.
+2. `~/.foundry/bin/forge test` on that clean build. On 21 September this alone turned up a fuzz counterexample the cached run had not produced.
+3. Fuzz far past the default: `--fuzz-runs 20000` for the suite, `--fuzz-runs 150000 --match-test testFuzz_`. The two rounding bugs of that day appeared at 20,000 and never at 256.
+4. Changed a constant? Grep the tests for assumptions that leaned on the old value — a header saying "the smallest run is >= 8,000 sats" silently encodes `MIN_TRADE_USDC` at 20 USDC and stops being true the moment you lower it.
+5. Check the deployer's balance and today's gas price: `cast balance <deployer> --rpc-url <base> --ether` and `cast gas-price`. A deploy is around 1.58M gas.
+6. Read the deployer's nonce and compute the address it will produce: `cast nonce` then `cast compute-address <deployer> --nonce <n>`. Knowing the address in advance lets you prepare the app's configuration, and it warns you not to send anything else from that key until the deploy has landed.
+7. `deploy-mainnet.sh dry`. It runs the three on-chain checks the constructor does not — the router's USDC/cbBTC 0.05% pool, the cbBTC/USD feed and the sequencer feed — and prints `quote()`. Check that price against the market: a dead feed shows up here.
+8. Prove the constant you changed is really in the bytecode: `forge inspect src/Rebalancer.sol:Rebalancer bytecode` and grep for its hex (5,000,000 is `4c4b40`). Cheap, and it rules out a stale build for good.
+
+**The deploy**
+
+9. `FORCE_REDEPLOY=1 bash deploy-mainnet.sh go`, with `BASESCAN_API_KEY` loaded so verification runs straight away. The flag is needed whenever `broadcast/` still holds an earlier deploy; it is a brake, not an error.
+10. Write the address, block and commit down outside this machine. `broadcast/` is gitignored.
+
+**After the deploy**
+
+11. Read the deployed contract back over RPC — constants, token addresses, treasury, `retired()`, `quote()` — rather than trusting the deploy log.
+12. Record address, block, tx and commit in the Deployments table above.
+13. In the app: `BITBURO_REBALANCER_ADDRESS` and `BITBURO_REBALANCER_DEPLOY_BLOCK` together, never one without the other, or the sweep searches a quarter of a million empty blocks. Leave `BITBURO_REBALANCER_LEGACY_ADDRESSES` empty when nobody holds an allowance on the previous contract; check that on chain rather than assuming it.
+14. `php artisan bitburo:setup-keeper-wallet --update`, or Privy refuses every keeper send. One policy serves test and production, so this takes effect immediately in both.
+15. Prove the chain is readable end to end before anyone signs a mandate: `bitburo:sweep-executions` (books nothing yet, but must complete) and `bitburo:run-keeper --dry-run` (reads the contract, checks it is not retired, sends nothing).
+
 ## Standing rules
 
 - Never deploy to mainnet without Arjan's explicit approval.
