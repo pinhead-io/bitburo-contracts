@@ -4,6 +4,8 @@
       "type": "stdio",
       "command": "uvx",
       "args": [
+        "--with",
+        "fastmcp==2.14.5",
         "--from",
         "git+https://github.com/trailofbits/slither-mcp",
         "slither-mcp"
