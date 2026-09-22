@@ -1,5 +1,7 @@
 # bitburo-contracts
 
+> **Audit version:** tag `audit-2026-09-22`. Its `src/` is identical to commit `ef39299`, deployed on Base at `0x1Df884A2A28BbD729714D4f9697972293872BB42`.
+
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
 The user keeps USDC and cbBTC in their own wallet, gives the contract an ERC-20 allowance on both and calls `setMandate` with the cbBTC share they want and the keeper that may run it. When the wallet drifts more than 5% of its value away from that share, the owner or that keeper calls `execute`: the contract pulls the input token, swaps it in the Uniswap v3 USDC/cbBTC 0.05% pool, checks the result against Chainlink and sends the output back to the wallet. Bitburo holds no key that can touch funds or mandates; the treasury's only power is the one-time kill switch `retire()`.
@@ -17,7 +19,7 @@ The application is the interface; this contract does the work. That split is del
 - **The user can leave at any moment**, with `stop()` or by revoking the allowance, and the contract keeps working without Bitburo: anyone can run the open keeper script in `keeper/` for their own wallet, or appoint someone else.
 - **Nothing in this contract gives Bitburo a way to move a user's funds.** Its keeper can only call `execute` for owners who appointed it, within the rule; the treasury can only receive fees and, once, `retire()` the contract.
 
-How the application uses the contract, for context (the app is not in scope):
+How the application uses the contract:
 
 | Step | Who | What |
 |---|---|---|
@@ -34,31 +36,27 @@ How the application uses the contract, for context (the app is not in scope):
 |---|---|---|
 | Rebalancer (this code) | `0x1Df884A2A28BbD729714D4f9697972293872BB42` | Live since 21 September 2026, block 51,604,724, tx `0xc062d3a63e5d4d995162a66471f462c7d09574d5c686fbc1c18dfa5f7c1b0ce4`. Code: commit `ef39299`. Verified on Basescan. |
 
-## Audit guide
+## Audit reference
 
-### Focus: nobody can steal the funds
+### Version
 
-The focus of this audit is security. Users give this contract an allowance on the USDC and cbBTC in their own wallets, so above all this audit should establish that the contract cannot be used to steal those funds: not by an outside attacker, not by the keeper a user appoints, not by the treasury, and not by Bitburo. Please test that thoroughly, and report any way in which funds could be taken, moved outside the rule, or lost beyond the bounds described below (invariants 1, 2 and 6, and risk 1).
+- **Tag:** `audit-2026-09-22`. `development` moves on as new work is merged; the tag does not.
+- **Source:** `src/` is identical at the tag and at commit `ef39299`, from which the live contract was deployed (`git diff --quiet ef39299 audit-2026-09-22 -- src/`).
+- **Deployed:** `0x1Df884A2A28BbD729714D4f9697972293872BB42` on Base (chain id 8453), block 51,604,724, verified on Basescan. Runtime bytecode 6,685 bytes.
 
-### Target
-
-- **Code under audit:** `src/` in this repository. It is identical at commit `ef39299`, from which the live contract was deployed, and at the head of `development`; check with `git diff --quiet ef39299 HEAD -- src/`. The commit that carries this guide changes documentation only.
-- **Tag:** `audit-2026-09-22` marks the version handed to the auditor. Check out the tag rather than `development`: the tag always points at this version, while `development` moves on as new work is merged.
-- **Deployed instance:** `0x1Df884A2A28BbD729714D4f9697972293872BB42` on Base (chain id 8453), block 51,604,724, verified on Basescan with the settings below. Runtime bytecode 6,685 bytes.
-
-### Scope
+### Files
 
 nSLOC: comment lines and blank lines removed, every remaining line counted.
 
-| File | Lines | nSLOC | In scope |
-|---|---|---|---|
-| `src/Rebalancer.sol` | 340 | 216 | **yes, primary** |
-| `src/interfaces/IV3SwapRouter.sol` | 21 | 13 | yes (self-written; `exactInputSingle` selector `0x04e45aaf`) |
-| `src/interfaces/IAggregatorV3.sol` | 12 | 8 | yes |
-| `script/Deploy.s.sol` | 66 | 40 | yes: the constructor arguments, and the checks the constructor does not do |
-| `keeper/keeper.ts`, `keeper/selection.ts`, `keeper/lock.ts` | 389 / 352 / 134 | 309 / 225 / 86 | optional: the open reference keeper, not deployed on chain |
-
-**Out of scope:** the Bitburo application (`pinheadio/bitburo`) and its own keeper, which mirrors `keeper/`; Privy; Uniswap, Chainlink, USDC and cbBTC themselves; `test/`; `deploy-mainnet.sh`.
+| File | Lines | nSLOC |
+|---|---|---|
+| `src/Rebalancer.sol` | 340 | 216 |
+| `src/interfaces/IV3SwapRouter.sol` | 21 | 13 |
+| `src/interfaces/IAggregatorV3.sol` | 12 | 8 |
+| `script/Deploy.s.sol` | 66 | 40 |
+| `keeper/keeper.ts` | 389 | 309 |
+| `keeper/selection.ts` | 352 | 225 |
+| `keeper/lock.ts` | 134 | 86 |
 
 ### Compiler and dependencies
 
@@ -70,56 +68,18 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 
 | Role | Address | Notes |
 |---|---|---|
-| USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | 6 decimals; counted as exactly one dollar |
+| USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | 6 decimals |
 | cbBTC | `0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf` | 8 decimals |
 | Uniswap SwapRouter02 | `0x2626664c2603336E57B271c5C0b26F421741e481` | only `exactInputSingle` is called |
-| Pool USDC/cbBTC 0.05% | `0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef` | not called directly; on 22 Sept 2026 (block 51,640,408) it held 5,035,935 USDC and 24.38 cbBTC |
-| Chainlink cbBTC/USD | `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` | 8 decimals, heartbeat 20 min, deviation 0.3%; see risk 10 |
+| Pool USDC/cbBTC 0.05% | `0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef` | not called directly |
+| Chainlink cbBTC/USD | `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` | 8 decimals, heartbeat 20 min, deviation 0.3% |
 | Chainlink L2 Sequencer Uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` | answer 0 = up |
-| Treasury | `0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9` | an EOA; receives fees and alone can call `retire()` |
-
-### Invariants and the tests that check them
-
-`test/Rebalancer.t.sol` holds the unit and fuzz tests and two invariant suites (with and without `retire`); `test/RebalancerFork.t.sol` runs against the real tokens, router, pool and feeds.
-
-1. **Custody.** A user's tokens only move in a run the rule prescribes, started by that user or the keeper they appointed, and the output only goes to that user. `test_execute_revertsForStranger`, `test_execute_replacedKeeperIsRefused`, `test_execute_ownerWithoutKeeper`, `test_execute_treasuryHasNoSpecialRights`, `invariant_onlyOwnerOrKeeperRuns`, `test_fork_strangerIsRefused`.
-2. **Loss bound per run.** Against the Chainlink price a run loses at most `FEE_BPS + MAX_DEVIATION_BPS` = 80 bps, enforced on the measured balance difference, also when the router does not enforce its own minimum. `test_execute_lowerBound`, `test_execute_ownBoundHoldsWhenTheRouterDoesNotEnforceTheMinimum`, `test_execute_zeroOutputIsRefused`, `testFuzz_lossPerRunBoundedByFeePlusDeviation`, `invariant_lossPerRunWithinFeePlusDeviation`, `test_fork_pushedPoolAgainstTheRunIsRefused`.
-3. **Upper bound.** A swap that yields more than 55 bps above the Chainlink value is refused, so a stuck feed or a USDC depeg halts both directions. `test_execute_upperBoundStopsARunThatIsTooGood`, `test_execute_usdcDepegStopsBothDirections`, `test_fork_poolFarBetterThanTheFeedIsRefused`.
-4. **`minAmountOut` only tightens the bound.** `test_execute_minAmountOutCanOnlyTighten`, `test_fork_keeperCanDemandTheQuotedOutput`.
-5. **The rule** (`_plan`, `Rebalancer.sol:279`). A correction starts only outside the band (exact comparison); a run is at most max(10% of the value, 5 USDC) and at least 5 USDC, goes towards the target and not past it, and is capped by balance and allowance; at most one run per owner per day; an unfinished correction continues on the next days and its flag expires after two days. `test_execute_buy_exactAmounts`, `test_execute_sell_exactAmounts`, `test_execute_bandEdgeDoesNotDependOnRounding`, `test_execute_correctionLargerThanTheCapIsFinishedOnTheNextDays`, `test_execute_unfinishedCorrectionExpiresAfterTwoIntervals`, `test_execute_followUpGoesToTheTargetFromEitherSide`, `testFuzz_runMovesTowardsTheTargetWithinTheCap`, `invariant_atMostOneRunPerInterval`, `invariant_runWithinMinimumAndCap`.
-6. **Accounting.** Between calls the contract holds only uncollected fees and tokens sent to it by mistake, never cbBTC and never an allowance to the router, and what it holds never leaks into a run. A run in which the pool took only part of the input is refused, also when what arrived meets the bound. `invariant_contractHoldsOnlyUnsweptFeesAndDonations`, `invariant_routerAllowanceIsZeroBetweenCalls`, `test_sell_isNotAffectedByCollectedFees`, `test_execute_partialFillIsRefused`, `test_execute_partialFillWithinTheBoundIsRefused`, `test_fork_tokensLowerTheAllowanceOnTransferFrom`.
-7. **Oracle.** The sequencer is up and past its grace period; the answer is above 0 and does not round to 0; it is at most 1,500 s old and not from the future. `test_quote_revertsSequencerDown`, `test_quote_revertsStaleFeed`, `test_quote_revertsInvalidAnswer`, `test_fork_feedIsFreshAndCloseToThePool`.
-8. **`retire`, `stop` and the interval.** `test_retire_*`, `test_stop_*`, `test_setMandate_doesNotShortenTheInterval`, `invariant_noRunAfterRetire`.
-9. **Reentrancy.** `test_sweep_maliciousTokenCannotReenter`, which fails without the guard.
-
-### Known and accepted risks
-
-1. **Trust in the keeper.** A dishonest keeper, or whoever composes its transactions, can trade around the run it triggers and push the owner's price to the lower bound: at most 0.55% of the traded amount, once a day, on at most 10% of the wallet, and only while a correction is due. This is the price of the owner-appointed keeper; the owner can replace it at any moment. Keepers must send plain transactions (see *Keepers must send plain transactions*).
-2. **Feed lag.** The bound is against Chainlink, not against the market. cbBTC/USD may lag by its 0.3% deviation threshold, more in fast markets, and a dishonest keeper can time a run for that.
-3. **USDC counts as one dollar.** Deliberate: with a USDC/USD feed the contract would sell cbBTC for sinking USDC during a depeg. Without one, a depeg of more than about 0.5% halts both directions.
-4. **Changing or revoking is not atomic.** One more run within all bounds can be placed in front of a `stop()`, a keeper change or an `approve(0)`.
-5. **One pool, one feed, one router, all immutable.** If any of them goes away, or Circle or Coinbase blocks the contract, runs stop and a new deployment is needed. Funds are never at risk from that; they are in the users' wallets. `MAX_FEED_AGE` (1,500 s) left 268 s above the largest heartbeat gap in a 59-hour sample taken on 18 September 2026.
-6. **No splitting of large runs.** Measured on a fork of block 51,425,248: the 10% run of a wallet of 1, 2 and 3 million USDC landed 0.20%, 0.35% and 0.49% below Chainlink; the 400,000 USDC run of a 4 million wallet was refused by the bound. How much fits depends on the pool at that moment: on 21 September 2026 the pool stood 17 bps above the feed and a 100,000 USDC buy did not fit, while at the deploy block it did. `test_fork_runOf100kFitsTheBound` therefore skips itself when the pool stands more than 20 bps from the feed, and the fork suite should be run at a pinned block.
-7. **Small wallets.** The minimum run is 5 USDC. Below 50 USDC that minimum is the budget, so one run can be most of a very small wallet; below about 100 USDC the band is effectively wider than 5%, because the drift must reach 5 USDC before a run is worth making. The minimum is set by rounding, not by economics: a run is measured in whole satoshi, and one satoshi is 1.7 bps of a 5 USDC run at 85,000 USDC per cbBTC and 5 bps at 250,000, against a price bound of 55 bps (at 1 USDC it would be 8.5 and 25 bps). It must also stay strictly positive: at 0, `unfinished = drift >= value + MIN_TRADE_USDC` is always true and every run would mark itself unfinished.
-8. **Treasury blacklisted by Circle.** Runs continue, because no transfer to the treasury happens inside a run; `sweep(USDC)` reverts until the blacklist is lifted.
-9. **Compiler age.** solc 0.8.37 was released on 10 September 2026, eleven days before the deploy.
-10. **The feed is computed from DEX pools.** Chainlink's feed registry lists the Base cbBTC/USD feed with the methodology `dex_state_price`: end-of-block states of on-chain DEX pools, weighted by volume, with outlier and time-lag filters (docs.chain.link, "DEX State Price Streams"; the pools are not published). The price bound is therefore not fully independent of the pools on Base, possibly including the one the contract trades in. A push within one block (a sandwich) does not reach the answer; a push held across blocks and across those pools can, and a due run then trades at the moved answer, within the bound, while the attacker pays arbitrage against every monitored pool meanwhile. The alternative, Chainlink BTC/USD on Base (`0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F`: CEX prices, deviation 0.1%, heartbeat 20 min, 8 decimals), would need no change to the logic. In a 30-day sample taken on 18 September 2026, every 6 hours, the pool stood at most 15.3 bps from BTC/USD (p90 7.8) against 30.6 bps from cbBTC/USD (p90 21.0). The contract keeps cbBTC/USD; see question 6.
-11. **A follow-up can trade back.** A run that leaves part of its correction undone lets the next day's run ignore the band. That run goes to the target at that day's price, so after a price move or the owner's own transfer it can trade in the opposite direction, inside the band (`test_execute_followUpGoesToTheTargetFromEitherSide`). Nobody can cause this for profit; the owner pays the fee and slippage on that trade.
-12. **The treasury is a single EOA.** Its key can collect fees and stop the contract for good with `retire()`. It cannot touch funds, mandates or allowances, so a leaked treasury key means a halted contract, not lost funds.
-
-### Questions for the auditors
-
-1. Is the two-sided bound on the measured balance difference (`_swap`, `Rebalancer.sol:312-339`) a sound replacement for a separate pool-spot check, including its role as a halt during a USDC depeg or with a stuck feed? Is there a rounding or decimals case in which a run passes outside 55 bps, or in which honest runs of the minimum size can never pass?
-2. Can any sequence of `setMandate`, `stop`, runs, price moves, donations and allowance changes bypass the daily interval, run inside the band without an unfinished correction, flip direction at a loss, or keep a wallet trading every day (`_finishing`, `:272`; `_plan`, `:279-308`)? A follow-up that reverses direction is known and accepted (risk 11).
-3. The contract tells that the pool did not take all of the input by the allowance the router has left (`_swap`, `:337`). With SwapRouter02 and a v3 pool as deployed on Base, is there a partial-fill, callback or recipient case this misses, in which input or output ends up anywhere but the contract?
-4. Is the keeper trust of risk 1 reasonable for an immutable contract, and is there a cheap on-chain measure that would shrink it further without opening `execute` to everyone?
-5. Is pinning a recent compiler with `via_ir` the right call here, or would you have deployed with an older release whose known bugs this code cannot reach?
-6. Would you keep the cbBTC/USD feed, which Chainlink computes from DEX pools (risk 10), or deploy with BTC/USD? How long and how widely would a push have to be held on Base to move the cbBTC/USD answer?
+| Treasury | `0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9` | an EOA |
 
 ### Build and test
 
 ```bash
-git clone https://github.com/pinheadio/bitburo-contracts && cd bitburo-contracts
+git clone https://github.com/mediaproc/bitburo-contracts && cd bitburo-contracts
 git checkout audit-2026-09-22
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
@@ -130,7 +90,7 @@ FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge tes
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 22 September 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 77 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51604724`: 87 passed, 0 failed (63 unit and fuzz, 2 × 7 invariants, 10 fork); deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`). The first live run on the deployed contract (tx `0xda082875c2812db7e0ee43fd07cd793f01b9217a12c8266cedf6c1da08fcc880`, a 5 USDC buy) used 242,494 gas.
+Results on 22 September 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 77 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51604724`: 87 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 
