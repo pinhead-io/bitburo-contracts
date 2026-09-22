@@ -36,6 +36,10 @@ How the application uses the contract, for context (the app is not in scope):
 
 ## Audit guide
 
+### Focus: nobody can steal the funds
+
+The focus of this audit is security. Users give this contract an allowance on the USDC and cbBTC in their own wallets, so above all this audit should establish that the contract cannot be used to steal those funds: not by an outside attacker, not by the keeper a user appoints, not by the treasury, and not by Bitburo. Please test that thoroughly, and report any way in which funds could be taken, moved outside the rule, or lost beyond the bounds described below (invariants 1, 2 and 6, and risk 1).
+
 ### Target
 
 - **Code under audit:** `src/` in this repository. It is identical at commit `ef39299`, from which the live contract was deployed, and at the head of `development`; check with `git diff --quiet ef39299 HEAD -- src/`. The commit that carries this guide changes documentation only.
