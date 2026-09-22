@@ -316,7 +316,7 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_nothingToDoInsideAndOnTheBand() public {
-        _setUser(alice, 2500e6, 0.09375e8, 8000); // exactly 75% cbBTC: drift == band
+        _setUser(alice, 2200e6, 0.0975e8, 8000); // exactly 78% cbBTC: drift == band
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         _execute(alice);
         (bool due,) = r.isDue(alice);
@@ -331,8 +331,9 @@ contract RebalancerTest is RebalancerTestBase {
     function test_execute_bandEdgeDoesNotDependOnRounding() public {
         // At a price that is not round, a wallet exactly on the edge of the band is never due.
         _setPrice(79_999_123_457);
-        _setUser(alice, 0, 1.23456789e8, 9500); // all cbBTC, target 95%: drift is exactly the band
-        _setUser(bob, 98_765_432_101, 0, 500); // all USDC, target 5%
+        // 4 cbBTC and the price in USDC: exactly 80% cbBTC, so 2 points from both a 78% and an 82% target.
+        _setUser(alice, 79_999_123_457, 4e8, 7800);
+        _setUser(bob, 79_999_123_457, 4e8, 8200);
         (bool due,) = r.isDue(alice);
         assertFalse(due);
         (due,) = r.isDue(bob);
@@ -340,9 +341,9 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_correctionLargerThanTheCapIsFinishedOnTheNextDays() public {
-        // All cash, target 74%: seven runs of 10% bring the wallet to ~70%, inside the band. The correction still
+        // All cash, target 71%: seven runs of 10% bring the wallet to ~70%, inside the band. The correction still
         // continues to the target, because the run before it left part of the correction undone.
-        _setUser(alice, 10_000e6, 0, 7400);
+        _setUser(alice, 10_000e6, 0, 7100);
         uint256 runs;
         for (; runs < 20; runs++) {
             (bool due,) = r.isDue(alice);
@@ -351,20 +352,21 @@ contract RebalancerTest is RebalancerTestBase {
             _warp(1 days);
         }
         assertEq(runs, 8);
-        assertApproxEqAbs(_shareBps(alice), 7400, 25, "fees leave the share a fraction short of the target");
+        assertApproxEqAbs(_shareBps(alice), 7100, 25, "fees leave the share a fraction short of the target");
         (,, bool unfinished,) = r.mandates(alice);
         assertFalse(unfinished);
     }
 
     function test_execute_unfinishedCorrectionExpiresAfterTwoIntervals() public {
-        _setUser(alice, 10_000e6, 0, 7400);
+        _setUser(alice, 10_000e6, 0, 7100);
         for (uint256 i; i < 7; i++) {
             _execute(alice);
             _warp(1 days);
         }
         (,, bool unfinished,) = r.mandates(alice);
         assertTrue(unfinished);
-        assertLt(_shareBps(alice), 7400 - 300, "inside the band, short of the target");
+        assertLt(_shareBps(alice), 7100 - 50, "short of the target");
+        assertGt(_shareBps(alice), 7100 - 200, "inside the band");
         (bool due,) = r.isDue(alice);
         assertTrue(due, "the day after: follow-up run");
         _warp(1 days); // two days after the last run: the band applies again
@@ -375,13 +377,13 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_setMandate_startsFromTheBandAgain() public {
-        _setUser(alice, 10_000e6, 0, 7400);
+        _setUser(alice, 10_000e6, 0, 7100);
         for (uint256 i; i < 7; i++) {
             _execute(alice);
             _warp(1 days);
         }
         vm.prank(alice);
-        r.setMandate(7400, keeper);
+        r.setMandate(7100, keeper);
         (,, bool unfinished,) = r.mandates(alice);
         assertFalse(unfinished);
         (bool due,) = r.isDue(alice);
@@ -409,10 +411,10 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_tinyWalletMayTradeMostOfItself() public {
-        // Below 50 USDC the 5 USDC minimum is the budget, so a run can be a fifth of the wallet.
-        _setUser(alice, 25e6, 0, 9500);
+        // Below 20 USDC the 2 USDC minimum is the budget, so a run can be a fifth of the wallet.
+        _setUser(alice, 10e6, 0, 9500);
         _execute(alice);
-        assertEq(usdc.balanceOf(alice), 20e6, "a run of 5 USDC out of 25");
+        assertEq(usdc.balanceOf(alice), 8e6, "a run of 2 USDC out of 10");
     }
 
     function test_execute_emptyWalletIsNothingToDo() public {
@@ -422,13 +424,13 @@ contract RebalancerTest is RebalancerTestBase {
     }
 
     function test_execute_smallWalletUsesTheMinimumAsBudget() public {
-        _setUser(alice, 40e6, 0, 8000); // 10% would be 4 USDC, below the minimum of 5
+        _setUser(alice, 15e6, 0, 8000); // 10% would be 1.50 USDC, below the minimum of 2
         _execute(alice);
-        assertEq(usdc.balanceOf(alice), 35e6);
+        assertEq(usdc.balanceOf(alice), 13e6);
     }
 
     function test_execute_driftBelowTheMinimumIsNothingToDo() public {
-        _setUser(alice, 15e6, 0, 600); // drift 0.90 USDC: outside the band of 0.75, below the minimum of 1
+        _setUser(alice, 15e6, 0, 600); // drift 0.90 USDC: outside the band of 0.30, below the minimum of 2
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         _execute(alice);
         (bool due,) = r.isDue(alice);
@@ -470,7 +472,7 @@ contract RebalancerTest is RebalancerTestBase {
 
     function test_execute_sellAtANonRoundPrice() public {
         _setPrice(79_999_123_457); // the conversion back and forth must not drop the run below the minimum
-        _setUser(alice, 0, 0.0003e8, 500); // ~24 USDC of cbBTC, target 5%: the run is exactly the minimum of 20
+        _setUser(alice, 0, 0.00025e8, 500); // ~20 USDC of cbBTC, target 5%: the run is exactly the minimum of 2
         (bool due,) = r.isDue(alice);
         assertTrue(due);
         _execute(alice);
@@ -658,8 +660,10 @@ contract RebalancerTest is RebalancerTestBase {
         int256 worseBps,
         uint256 price
     ) public {
-        // Up to 250,000 USDC per cbBTC the smallest run is >= 8,000 sats, so 5 bps of margin covers the rounding.
-        _setPrice(bound(price, 1_000e6, 250_000e6));
+        // Up to 100,000 USDC per cbBTC the smallest run is >= 2,000 sats, so one sat is at most 5 bps of it and a pool
+        // 50 bps off the feed still lands inside MAX_DEVIATION_BPS. Above that price a run of the minimum can revert
+        // on a pool that far off; it is retried the next hour and loses nothing.
+        _setPrice(bound(price, 1_000e6, 100_000e6));
         cash = bound(cash, 0, 1e13);
         btc = bound(btc, 0, 1e11);
         target = uint16(bound(target, 500, 9500));

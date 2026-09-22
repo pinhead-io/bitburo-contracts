@@ -4,7 +4,7 @@
 
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
-The user keeps USDC and cbBTC in their own wallet, gives the contract an ERC-20 allowance on both and calls `setMandate` with the cbBTC share they want and the keeper that may run it. When the wallet drifts more than 5% of its value away from that share, the owner or that keeper calls `execute`: the contract pulls the input token, swaps it in the Uniswap v3 USDC/cbBTC 0.05% pool, checks the result against Chainlink and sends the output back to the wallet. Bitburo holds no key that can touch funds or mandates; the treasury's only power is the one-time kill switch `retire()`.
+The user keeps USDC and cbBTC in their own wallet, gives the contract an ERC-20 allowance on both and calls `setMandate` with the cbBTC share they want and the keeper that may run it. When the wallet drifts more than 2% of its value away from that share, the owner or that keeper calls `execute`: the contract pulls the input token, swaps it in the Uniswap v3 USDC/cbBTC 0.05% pool, checks the result against Chainlink and sends the output back to the wallet. Bitburo holds no key that can touch funds or mandates; the treasury's only power is the one-time kill switch `retire()`.
 
 Only the owner and the keeper the owner appoints can start a run. That is a deliberate trade: a contract anyone may call has to defend every run against the caller itself (who can move the pool around the run), which takes far more code than the rebalance does. Here a keeper is trusted within the contract's bounds, can be replaced by the owner at any time, and the owner can always run their own wallet.
 
@@ -105,16 +105,16 @@ Results on 22 September 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 77 p
 | `sweep(token)` | Forwards the contract's whole balance of `token` to the treasury: the collected USDC fees, or tokens sent there by mistake. Anyone may call it. |
 | `retire()` / `retired()` | Irreversible kill switch, only `TREASURY`. After it `execute` and `setMandate` revert and `isDue` reports nothing; `stop` and `sweep` keep working. It cannot touch funds or allowances. |
 
-Constants (all fixed; another profile needs a new deployment): `BAND_BPS` 500, `MAX_CORRECTION_BPS` 1000 per run, `MIN_TRADE_USDC` 5 USDC, `INTERVAL` 1 day, `FEE_BPS` 25, `MAX_DEVIATION_BPS` 55, `POOL_FEE` 500, `MIN_TARGET_BPS` 500 / `MAX_TARGET_BPS` 9500, `GRACE_PERIOD` 1 hour, `MAX_FEED_AGE` 1500 s.
+Constants (all fixed; another profile needs a new deployment): `BAND_BPS` 200, `MAX_CORRECTION_BPS` 1000 per run, `MIN_TRADE_USDC` 2 USDC, `INTERVAL` 1 day, `FEE_BPS` 25, `MAX_DEVIATION_BPS` 55, `POOL_FEE` 500, `MIN_TARGET_BPS` 500 / `MAX_TARGET_BPS` 9500, `GRACE_PERIOD` 1 hour, `MAX_FEED_AGE` 1500 s.
 
 ### The rule
 
 `position` = cbBTC balance at the Chainlink price, `total` = USDC balance + `position`, `drift` = |`position` − `total` × target|.
 
-- **Start.** A correction starts when `drift` > 5% of `total`. The comparison is exact: a wallet exactly on the edge of the band is not due, at any price. A target within 5% of 0% or 100% therefore only ever trades in one direction. The two ends of the range are the extreme case of that: a buy needs the position below `total` × (target − 500) / 10,000 and a sell needs it above `total` × (target + 500) / 10,000, so `MIN_TARGET_BPS` (500) can never buy and `MAX_TARGET_BPS` (9500) can never sell, whatever the wallet holds. Both are sell-only and buy-only mandates respectively, and a wallet that holds none of the token it would have to buy simply stays inside the band for good.
-- **Size.** One run corrects the drift, at most max(10% of `total`, 5 USDC), capped by balance and allowance, and only if the run is worth at least 5 USDC. For wallets below 50 USDC the 5 USDC minimum is the budget, so there a run can be a fifth of the wallet.
+- **Start.** A correction starts when `drift` > 2% of `total`. The comparison is exact: a wallet exactly on the edge of the band is not due, at any price. A buy needs the position below `total` × (target − 200) / 10,000 and a sell needs it above `total` × (target + 200) / 10,000. A target within 2% of 0% or 100% would only ever trade in one direction, but the range (500 to 9500) stays clear of that: every mandate can trade both ways.
+- **Size.** One run corrects the drift, at most max(10% of `total`, 2 USDC), capped by balance and allowance, and only if the run is worth at least 2 USDC. For wallets below 20 USDC the 2 USDC minimum is the budget, so there a run can be a fifth of the wallet. A run of the minimum is measured in whole satoshi: up to 100,000 USDC per cbBTC one satoshi is at most 5 bps of it, so a pool 50 bps off the feed still executes; above that price such a run can revert on a pool that far off, harmlessly, until the next attempt.
 - **Pace.** At most one run per owner per day.
-- **Finish.** A run that leaves at least 5 USDC of its correction undone (the 10% cap, or the allowance) marks the mandate `unfinished`; the run of the next day then continues to the target, also inside the band. After two days without a run, or after `setMandate`, a correction starts from the band again. Measured in the unit suite: all cash with a 74% target reaches 74% in eight daily runs; without this rule it would stop near 70%.
+- **Finish.** A run that leaves at least 2 USDC of its correction undone (the 10% cap, or the allowance) marks the mandate `unfinished`; the run of the next day then continues to the target, also inside the band. After two days without a run, or after `setMandate`, a correction starts from the band again. Measured in the unit suite: all cash with a 71% target reaches 71% in eight daily runs; without this rule it would stop near 70%.
 
 ### Price bound and maximum loss per run
 
@@ -133,7 +133,7 @@ The contract receives the swap output itself, measures it as a balance differenc
 | Anyone | `sweep` to the treasury | send it anywhere else |
 | Treasury | receive fees; `retire()` once | touch funds, mandates or allowances; undo `retire` |
 
-**What a dishonest keeper can do.** It can trade around the run it triggers (push the pool, run, push back) and so move the owner's price down to the lower bound: at most 0.55% of the traded amount per run, one run per day, at most 10% of the wallet per run (5 USDC for the smallest wallets), and only while a correction is due. It cannot make a wallet due: that takes a donation of more than 5% of the wallet to gain at most 0.055% of it. Every run and its price are visible in `Executed`. The owner can replace the keeper at any moment, and the treasury can stop everything with `retire()`.
+**What a dishonest keeper can do.** It can trade around the run it triggers (push the pool, run, push back) and so move the owner's price down to the lower bound: at most 0.55% of the traded amount per run, one run per day, at most 10% of the wallet per run (2 USDC for the smallest wallets), and only while a correction is due. It cannot make a wallet due: that takes a donation of more than 2% of the wallet to gain at most 0.055% of it. Every run and its price are visible in `Executed`. The owner can replace the keeper at any moment, and the treasury can stop everything with `retire()`.
 
 **Keepers must send plain transactions.** `execute` checks `msg.sender`, not who composed the transaction. If a keeper sends through a bundler or relayer (ERC-4337, a sponsored send), that party can wrap the call and trade around it. The keeper script therefore sends from its own key, straight to the sequencer, and passes the simulated output minus a small tolerance as `minAmountOut`, so that wrapping it gains nothing.
 
@@ -218,7 +218,7 @@ What a mainnet deploy looked like on 21 September 2026, in the order it has to h
 5. Check the deployer's balance and today's gas price: `cast balance <deployer> --rpc-url <base> --ether` and `cast gas-price`. A deploy is around 1.58M gas.
 6. Read the deployer's nonce and compute the address it will produce: `cast nonce` then `cast compute-address <deployer> --nonce <n>`. Knowing the address in advance lets you prepare the app's configuration, and it warns you not to send anything else from that key until the deploy has landed.
 7. `deploy-mainnet.sh dry`. It runs the three on-chain checks the constructor does not — the router's USDC/cbBTC 0.05% pool, the cbBTC/USD feed and the sequencer feed — and prints `quote()` and the treasury as the contract stored it. Check that price against the market — a dead feed shows up here — and check the treasury letter by letter: it receives every fee and alone can call `retire()`, and it can never be changed after the deploy.
-8. Prove the constant you changed is really in the bytecode: `forge inspect src/Rebalancer.sol:Rebalancer bytecode` and grep for its hex (5,000,000 is `4c4b40`). Cheap, and it rules out a stale build for good.
+8. Prove the constant you changed is really in the bytecode: `forge inspect src/Rebalancer.sol:Rebalancer bytecode` and grep for its hex (2,000,000 is `1e8480`). Cheap, and it rules out a stale build for good.
 
 **The deploy**
 

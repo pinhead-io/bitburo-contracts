@@ -53,18 +53,20 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 public constant FEE_BPS = 25;
     uint256 public constant MIN_TARGET_BPS = 500;
     uint256 public constant MAX_TARGET_BPS = 9500;
-    uint256 public constant BAND_BPS = 500;
+    uint256 public constant BAND_BPS = 200;
     uint256 public constant MAX_CORRECTION_BPS = 1000; // per run, share of the total value
     /// @notice The smallest run that is worth making, and the step that separates a finished correction from an
     ///         unfinished one in `_plan`. It has to be strictly positive: at 0 a run that finishes its correction
     ///         would still mark itself unfinished, which drops the band for the next day and never stops.
-    /// @dev 5 USDC, which is set by the rounding rather than by the economics. A run is measured in whole satoshi,
+    /// @dev 2 USDC, which is set by the rounding rather than by the economics. A run is measured in whole satoshi,
     ///      so the single unit a swap can round away is worth `price / 1e8` — a share of the run that grows as the
     ///      run shrinks and as cbBTC gets dearer. It has to stay well inside MAX_DEVIATION_BPS, which the pool's own
     ///      distance to the feed and the pool fee already eat into, or a run reverts on a bound that rounding alone
-    ///      pushed it past. At 5 USDC that unit is 1.7 bps of the run at 85,000 USDC per cbBTC and 5 bps at 250,000;
-    ///      at 1 USDC it would be 8.5 and 25 bps. It serves wallets from ~100 USDC, against ~400 at the old 20 USDC.
-    uint256 public constant MIN_TRADE_USDC = 5e6;
+    ///      pushed it past. At 2 USDC that unit is 4.25 bps of the run at 85,000 USDC per cbBTC and 5 bps at
+    ///      100,000: up to there a pool 50 bps off the feed still executes a run of the minimum. Above 100,000 such
+    ///      a run needs a pool closer to the feed or it reverts, harmlessly, until the next attempt. It serves
+    ///      wallets from ~40 USDC, against ~100 at 5 USDC.
+    uint256 public constant MIN_TRADE_USDC = 2e6;
     uint256 public constant INTERVAL = 1 days; // between two runs of one owner
     /// @notice How far the received output may lie from the Chainlink value of the input, pool fee (5 bps) included.
     uint256 public constant MAX_DEVIATION_BPS = 55;
