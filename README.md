@@ -41,6 +41,7 @@ How the application uses the contract, for context (the app is not in scope):
 ### Target
 
 - **Code under audit:** `src/` in this repository. It is identical at commit `ef39299`, from which the live contract was deployed, and at the head of `development`; check with `git diff --quiet ef39299 HEAD -- src/`. The commit that carries this guide changes documentation only.
+- **Tag:** `audit-2026-09-22` marks the version handed to the auditor. Check out the tag rather than `development`: the tag always points at this version, while `development` moves on as new work is merged.
 - **Deployed instance:** `0x1Df884A2A28BbD729714D4f9697972293872BB42` on Base (chain id 8453), block 51,604,724, verified on Basescan with the settings below. Runtime bytecode 6,685 bytes.
 
 ### Scope
@@ -117,7 +118,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 
 ```bash
 git clone https://github.com/pinheadio/bitburo-contracts && cd bitburo-contracts
-git checkout development
+git checkout audit-2026-09-22
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ~/.foundry/bin/forge fmt --check
