@@ -145,7 +145,7 @@ What a mainnet deploy looked like on 21 September 2026, in the order it has to h
 4. Changed a constant? Grep the tests for assumptions that leaned on the old value — a header saying "the smallest run is >= 8,000 sats" silently encodes `MIN_TRADE_USDC` at 20 USDC and stops being true the moment you lower it.
 5. Check the deployer's balance and today's gas price: `cast balance <deployer> --rpc-url <base> --ether` and `cast gas-price`. A deploy is around 1.58M gas.
 6. Read the deployer's nonce and compute the address it will produce: `cast nonce` then `cast compute-address <deployer> --nonce <n>`. Knowing the address in advance lets you prepare the app's configuration, and it warns you not to send anything else from that key until the deploy has landed.
-7. `deploy-mainnet.sh dry`. It runs the three on-chain checks the constructor does not — the router's USDC/cbBTC 0.05% pool, the cbBTC/USD feed and the sequencer feed — and prints `quote()`. Check that price against the market: a dead feed shows up here.
+7. `deploy-mainnet.sh dry`. It runs the three on-chain checks the constructor does not — the router's USDC/cbBTC 0.05% pool, the cbBTC/USD feed and the sequencer feed — and prints `quote()` and the treasury as the contract stored it. Check that price against the market — a dead feed shows up here — and check the treasury letter by letter: it receives every fee and alone can call `retire()`, and it can never be changed after the deploy.
 8. Prove the constant you changed is really in the bytecode: `forge inspect src/Rebalancer.sol:Rebalancer bytecode` and grep for its hex (5,000,000 is `4c4b40`). Cheap, and it rules out a stale build for good.
 
 **The deploy**

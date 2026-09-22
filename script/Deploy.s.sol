@@ -54,6 +54,9 @@ contract DeployRebalancer is Script {
         vm.stopBroadcast();
 
         console.log("Rebalancer:", address(rebalancer));
+        // Read back from the contract rather than echoing the input: this is the address that holds the fees and
+        // `retire()` for good, so the dry run should show what the constructor actually stored.
+        console.log("Treasury (immutable):", rebalancer.TREASURY());
         console.log("Chainlink price, USDC base units per cbBTC:", rebalancer.quote());
     }
 
