@@ -1,6 +1,6 @@
 # bitburo-contracts
 
-> **Audit version:** tag `audit-2026-09-22`. Its `src/` is identical to commit `ef39299`, deployed on Base at `0x1Df884A2A28BbD729714D4f9697972293872BB42`.
+> **Audit version:** tag `audit-2026-09-22`. Its `src/` is identical to commit `d6f81f9`, deployed on Base at `0xc80b56e539c45CEB593410EdCc65F0157f80597d`.
 
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
@@ -34,15 +34,15 @@ How the application uses the contract:
 
 | What | Address | Note |
 |---|---|---|
-| Rebalancer (this code) | `0x1Df884A2A28BbD729714D4f9697972293872BB42` | Live since 21 September 2026, block 51,604,724, tx `0xc062d3a63e5d4d995162a66471f462c7d09574d5c686fbc1c18dfa5f7c1b0ce4`. Code: commit `ef39299`. Verified on Basescan. |
+| Rebalancer (this code) | `0xc80b56e539c45CEB593410EdCc65F0157f80597d` | Live since 22 September 2026, block 51,657,846, tx `0xa3a15fe3a2f75673fa1598c4df86ef9cb2c963b0f789ed285f4c63e93885e557`. Code: commit `d6f81f9`. Verified on Basescan. Replaces `0x1Df884A2A28BbD729714D4f9697972293872BB42` (band 5%, minimum 5 USDC, block 51,604,724, commit `ef39299`), which stays on chain without mandates. |
 
 ## Audit reference
 
 ### Version
 
 - **Tag:** `audit-2026-09-22`. `development` moves on as new work is merged; the tag does not.
-- **Source:** `src/` is identical at the tag and at commit `ef39299`, from which the live contract was deployed (`git diff --quiet ef39299 audit-2026-09-22 -- src/`).
-- **Deployed:** `0x1Df884A2A28BbD729714D4f9697972293872BB42` on Base (chain id 8453), block 51,604,724, verified on Basescan. Runtime bytecode 6,685 bytes.
+- **Source:** `src/` is identical at the tag and at commit `d6f81f9`, from which the live contract was deployed (`git diff --quiet d6f81f9 audit-2026-09-22 -- src/`).
+- **Deployed:** `0xc80b56e539c45CEB593410EdCc65F0157f80597d` on Base (chain id 8453), block 51,657,846, verified on Basescan. Runtime bytecode 6,705 bytes.
 
 ### Files
 
@@ -85,12 +85,12 @@ git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ~/.foundry/bin/forge fmt --check
 RUN_FORK=false ~/.foundry/bin/forge test                  # unit, fuzz, invariants; no RPC needed
-FORK_BLOCK=51604724 ~/.foundry/bin/forge test             # everything, fork suite at the deploy block
+FORK_BLOCK=51657846 ~/.foundry/bin/forge test             # everything, fork suite at the deploy block
 FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge test --match-test invariant
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 22 September 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 77 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51604724`: 87 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
+Results on 22 September 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 77 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 87 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 
