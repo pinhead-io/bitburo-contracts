@@ -26,15 +26,13 @@ How the application uses the contract, for context (the app is not in scope):
 | Booking | Bitburo's server, hourly | Reads the `Executed` logs up to the chain's safe block and books them in the app's ledger, so a run the owner started himself is recorded too. |
 | Revenue | anyone | 25 bps of the USDC leg of every run stays in the contract until someone calls `sweep(USDC)`, which sends it to the treasury. |
 
-**Status.** Live on Base since 21 September 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded. Earlier contracts (see *Deployments*) let anyone call `execute` for a fixed reward; that design needed far more code to defend a run against its own caller and was replaced by the owner-appointed keeper.
+**Status.** Live on Base since 21 September 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
 
 ## Deployments
 
 | What | Address | Note |
 |---|---|---|
 | Rebalancer (this code) | `0x1Df884A2A28BbD729714D4f9697972293872BB42` | Live since 21 September 2026, block 51,604,724, tx `0xc062d3a63e5d4d995162a66471f462c7d09574d5c686fbc1c18dfa5f7c1b0ce4`. Code: commit `ef39299`. Verified on Basescan. |
-| Rebalancer v1.1 (EURC, permissionless) | `0xE577D68948883FDF8e2694e38dF656D2D9CA2104` | Legacy. Predates `retire()`; users revoke with `setParams(active = false)` and `approve(0)`. Code: tag `v1.1.0` and commit `b3ca31a`. |
-| Rebalancer v1.0 | `0xED47…e6e5` | Legacy. |
 
 ## Audit guide
 
@@ -56,7 +54,7 @@ nSLOC: comment lines and blank lines removed, every remaining line counted.
 | `script/Deploy.s.sol` | 66 | 40 | yes: the constructor arguments, and the checks the constructor does not do |
 | `keeper/keeper.ts`, `keeper/selection.ts`, `keeper/lock.ts` | 389 / 352 / 134 | 309 / 225 / 86 | optional: the open reference keeper, not deployed on chain |
 
-**Out of scope:** the legacy contracts `0xE577…2104` and `0xED47…e6e5`; the Bitburo application (`pinheadio/bitburo`) and its own keeper, which mirrors `keeper/`; Privy; Uniswap, Chainlink, USDC and cbBTC themselves; `test/`; `deploy-mainnet.sh`.
+**Out of scope:** the Bitburo application (`pinheadio/bitburo`) and its own keeper, which mirrors `keeper/`; Privy; Uniswap, Chainlink, USDC and cbBTC themselves; `test/`; `deploy-mainnet.sh`.
 
 ### Compiler and dependencies
 
@@ -110,7 +108,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 1. Is the two-sided bound on the measured balance difference (`_swap`, `Rebalancer.sol:312-339`) a sound replacement for a separate pool-spot check, including its role as a halt during a USDC depeg or with a stuck feed? Is there a rounding or decimals case in which a run passes outside 55 bps, or in which honest runs of the minimum size can never pass?
 2. Can any sequence of `setMandate`, `stop`, runs, price moves, donations and allowance changes bypass the daily interval, run inside the band without an unfinished correction, flip direction at a loss, or keep a wallet trading every day (`_finishing`, `:272`; `_plan`, `:279-308`)? A follow-up that reverses direction is known and accepted (risk 11).
 3. The contract tells that the pool did not take all of the input by the allowance the router has left (`_swap`, `:337`). With SwapRouter02 and a v3 pool as deployed on Base, is there a partial-fill, callback or recipient case this misses, in which input or output ends up anywhere but the contract?
-4. Is the keeper trust of risk 1 reasonable for an immutable contract, and is there a cheap on-chain measure that would shrink it further without returning to a permissionless `execute`?
+4. Is the keeper trust of risk 1 reasonable for an immutable contract, and is there a cheap on-chain measure that would shrink it further without opening `execute` to everyone?
 5. Is pinning a recent compiler with `via_ir` the right call here, or would you have deployed with an older release whose known bugs this code cannot reach?
 6. Would you keep the cbBTC/USD feed, which Chainlink computes from DEX pools (risk 10), or deploy with BTC/USD? How long and how widely would a push have to be held on Base to move the cbBTC/USD answer?
 
