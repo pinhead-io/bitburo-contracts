@@ -1,6 +1,6 @@
 # bitburo-contracts
 
-> **Audit version:** tag `audit-2026-09-22`. Its `src/` is identical to commit `d6f81f9`, deployed on Base at `0xc80b56e539c45CEB593410EdCc65F0157f80597d`. The `src/` in this checkout differs from both: a run also takes a remainder of the drift below the minimum (see *The rule*). That change is neither audited nor deployed; a new audit tag will follow.
+> **Audit version:** tag `audit-2026-09-24`. Its `src/` is identical to commit `b8d5e43`, deployed on Base at `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091`.
 
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
@@ -34,15 +34,15 @@ How the application uses the contract:
 
 | What | Address | Note |
 |---|---|---|
-| Rebalancer (live) | `0xc80b56e539c45CEB593410EdCc65F0157f80597d` | Live since 22 September 2026, block 51,657,846, tx `0xa3a15fe3a2f75673fa1598c4df86ef9cb2c963b0f789ed285f4c63e93885e557`. Code: commit `d6f81f9`. Verified on Basescan. Replaces `0x1Df884A2A28BbD729714D4f9697972293872BB42` (band 5%, minimum 5 USDC, block 51,604,724, commit `ef39299`), which stays on chain without mandates. |
+| Rebalancer (live) | `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` | Live since 24 September 2026, block 51,743,786, tx `0x3ea18df9d8ec57626772def1b68d683d2c8ad716b550faef40ba1de252a22a84`. Code: commit `b8d5e43`. Not yet verified on Basescan. Replaces `0xc80b56e539c45CEB593410EdCc65F0157f80597d` (a run stops at the cap even when less than the minimum is left, block 51,657,846, commit `d6f81f9`), which stays on chain. |
 
 ## Audit reference
 
 ### Version
 
-- **Tag:** `audit-2026-09-22`. `development` moves on as new work is merged; the tag does not.
-- **Source:** `src/` is identical at the tag and at commit `d6f81f9`, from which the live contract was deployed (`git diff --quiet d6f81f9 audit-2026-09-22 -- src/`). The `src/` in this checkout is not: it adds the remainder rule under *Size*. A new audit tag will follow.
-- **Deployed:** `0xc80b56e539c45CEB593410EdCc65F0157f80597d` on Base (chain id 8453), block 51,657,846, verified on Basescan. Runtime bytecode 6,705 bytes.
+- **Tag:** `audit-2026-09-24`. `development` moves on as new work is merged; the tag does not. The previous tag, `audit-2026-09-22`, marks the code of the replaced contract.
+- **Source:** `src/` is identical at the tag and at commit `b8d5e43`, from which the live contract was deployed (`git diff --quiet b8d5e43 audit-2026-09-24 -- src/`).
+- **Deployed:** `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` on Base (chain id 8453), block 51,743,786, not yet verified on Basescan. Runtime bytecode 6,713 bytes, identical to a build of `b8d5e43` apart from the six immutables.
 
 ### Files
 
@@ -80,7 +80,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 
 ```bash
 git clone https://github.com/mediaproc/bitburo-contracts && cd bitburo-contracts
-git checkout audit-2026-09-22
+git checkout audit-2026-09-24
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ~/.foundry/bin/forge fmt --check
@@ -90,7 +90,7 @@ FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge tes
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 24 September 2026, for this checkout rather than the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 82 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 92 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
+Results on 24 September 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 82 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 92 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 

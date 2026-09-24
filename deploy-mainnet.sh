@@ -108,7 +108,8 @@ MSG
   else
     echo "No BASESCAN_API_KEY: the contract will not be verified. Run 'verify' afterwards." >&2
   fi
-  "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" "${SIGNER[@]}" --broadcast "${VERIFY[@]}"
+  # The ${…+…} form, because the bash 3.2 that macOS ships treats an empty array under `set -u` as unbound.
+  "$FORGE" script script/Deploy.s.sol --rpc-url "$BASE_RPC_URL" "${SIGNER[@]}" --broadcast ${VERIFY[@]+"${VERIFY[@]}"}
   echo
   echo "Done. Address: $(deployed_address), from commit $(deployed_commit)."
   echo "Record that address in README.md and in the app; broadcast/ is in .gitignore."
