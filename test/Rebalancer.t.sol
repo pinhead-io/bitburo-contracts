@@ -358,6 +358,22 @@ contract RebalancerTest is RebalancerTestBase {
         assertTrue(due, "the next day finishes it");
     }
 
+    function test_execute_sellRoundingCanLeaveJustUnderTheMinimum() public {
+        // 10,000.0008 USDC of value, target 50%: drift 1,002.0004 = cap 1,000.00008 + 2.00032, so the run stays at
+        // the cap. Rounded up to whole satoshi it sells 1,250,001 sats, worth 1,000.0008: 0.00072 more than the cap,
+        // which leaves 1.9996 USDC of the drift. Less than the minimum, so it is not followed up.
+        _setUser(alice, 3998e6, 7_502_501, 5000);
+        (, int256 delta) = r.isDue(alice);
+        assertEq(delta, -1_000_000_800);
+        _execute(alice);
+        assertEq(cbbtc.balanceOf(alice), 7_502_501 - 1_250_001);
+        (,, bool unfinished,) = r.mandates(alice);
+        assertFalse(unfinished, "1.9996 USDC left: just under the minimum");
+        _warp(1 days);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due, "nothing left to follow up");
+    }
+
     function test_execute_takingTheRemainderIsStillBoundedByAllowance() public {
         // Drift 1,001: the run takes the whole drift, then the allowance cuts it.
         _setUser(alice, 3001e6, 8_748_750, 8000);
@@ -1195,6 +1211,38 @@ contract RebalancerHandler is Test {
     function donate(uint256 seed, uint256 cash, uint256 btc) external {
         USDC.mint(_owner(seed), bound(cash, 0, 20_000e6));
         CBBTC.mint(_owner(seed), bound(btc, 0, 0.2e8));
+    }
+
+    /// @dev Rebuilds one wallet so that its drift lies 0.5 to 1.5 USDC (plus less than one satoshi) past its cap, so the
+    ///      next run takes the rest of the drift: the other actions practically never land there. The allowances go
+    ///      back to the maximum, so that they do not cut that run short.
+    function driftJustPastTheCap(uint256 seed, uint256 total, uint256 excess, bool isBuy) external {
+        address owner = _owner(seed);
+        (uint16 target,,,) = R.mandates(owner);
+        if (target == 0) return;
+        uint256 price = ROUTER.price();
+        total = bound(total, 1_000e6, 200_000e6); // cap = total / 10, above the minimum
+        excess = bound(excess, R.MIN_TRADE_USDC() / 4, R.MIN_TRADE_USDC() * 3 / 4);
+        uint256 cap = total / 10;
+
+        // The drift as `_plan` measures it, with the position rounded so that it only grows, by less than one satoshi.
+        uint256 btc;
+        if (isBuy) {
+            uint256 targetValue = total * target / BPS;
+            if (targetValue < cap + excess) return; // a target of about 10% or less has no buy past the cap
+            btc = (targetValue - cap - excess) * 1e8 / price;
+        } else {
+            uint256 position = (total * target + BPS - 1) / BPS + cap + excess;
+            btc = (position * 1e8 + price - 1) / price;
+            if (btc * price / 1e8 > total) return; // a target of about 90% or more has no sell past the cap
+        }
+
+        deal(address(USDC), owner, total - btc * price / 1e8);
+        deal(address(CBBTC), owner, btc);
+        vm.startPrank(owner);
+        USDC.approve(address(R), type(uint256).max);
+        CBBTC.approve(address(R), type(uint256).max);
+        vm.stopPrank();
     }
 
     function setAllowance(uint256 seed, bool ofUsdc, uint256 amount) external {

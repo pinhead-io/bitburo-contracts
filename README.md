@@ -90,7 +90,7 @@ FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge tes
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 24 September 2026, for this checkout rather than the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 81 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 91 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
+Results on 24 September 2026, for this checkout rather than the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 82 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 92 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 
