@@ -26,9 +26,10 @@ import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
  *
  *      The rule. position = cbBTC balance at the Chainlink price, total = USDC balance + position,
  *      drift = |position − total × target|. A correction starts when drift > BAND_BPS of the total. One run corrects
- *      the drift, at most max(MAX_CORRECTION_BPS of the total, MIN_TRADE_USDC), capped by balance and allowance, never
- *      less than MIN_TRADE_USDC, and at most once per INTERVAL. A run that leaves part of its correction undone is
- *      followed up on the next days until the target is reached, also inside the band.
+ *      the drift, at most max(MAX_CORRECTION_BPS of the total, MIN_TRADE_USDC); when that would leave less than
+ *      MIN_TRADE_USDC of the drift, the run takes the whole drift instead. Balance and allowance cap it, it is never
+ *      less than MIN_TRADE_USDC, and it runs at most once per INTERVAL. A run that leaves at least MIN_TRADE_USDC of
+ *      its correction undone is followed up on the next days until the target is reached, also inside the band.
  *
  *      Price bound. The output the contract actually receives must lie within MAX_DEVIATION_BPS of the Chainlink
  *      value of the input, pool fee included, in both directions. The lower bound caps what a run can lose to a
@@ -54,10 +55,13 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 public constant MIN_TARGET_BPS = 500;
     uint256 public constant MAX_TARGET_BPS = 9500;
     uint256 public constant BAND_BPS = 200;
-    uint256 public constant MAX_CORRECTION_BPS = 1000; // per run, share of the total value
-    /// @notice The smallest run that is worth making, and the step that separates a finished correction from an
-    ///         unfinished one in `_plan`. It has to be strictly positive: at 0 a run that finishes its correction
-    ///         would still mark itself unfinished, which drops the band for the next day and never stops.
+    /// @notice Per run, share of the total value. A run that this cap would leave less than MIN_TRADE_USDC short of
+    ///         the target takes that remainder too, so it can exceed the cap by just under MIN_TRADE_USDC.
+    uint256 public constant MAX_CORRECTION_BPS = 1000;
+    /// @notice The smallest run that is worth making, the smallest remainder the cap leaves for a next run (on a sell
+    ///         up to one satoshi less, see `_plan`), and the step that separates a finished correction from an
+    ///         unfinished one in `_plan`. It has to be strictly positive: at 0 a run that finishes its correction would
+    ///         still mark itself unfinished, which drops the band for the next day and never stops.
     /// @dev 2 USDC, which is set by the rounding rather than by the economics. A run is measured in whole satoshi,
     ///      so the single unit a swap can round away is worth `price / 1e8` — a share of the run that grows as the
     ///      run shrinks and as cbBTC gets dearer. It has to stay well inside MAX_DEVIATION_BPS, which the pool's own
@@ -277,7 +281,9 @@ contract Rebalancer is ReentrancyGuardTransient {
 
     /// @dev The rule from the contract header. `finishing`: this run follows up an unfinished correction, so the band
     ///      does not apply. `amountIn` is in the input token (USDC for a buy, cbBTC for a sell); 0 = do nothing.
-    ///      `unfinished`: at least MIN_TRADE_USDC of the drift is left after this run.
+    ///      `unfinished`: at least MIN_TRADE_USDC of the drift is left after this run. The cap never leaves a smaller
+    ///      remainder: the run then takes the whole drift. A sell, rounded up to whole satoshi, can leave up to one
+    ///      satoshi less; balance and allowance come after, so they can leave less too. Neither is followed up.
     function _plan(address owner, uint256 targetBps, bool finishing, uint256 price)
         internal
         view
@@ -294,6 +300,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (!finishing && drift <= total * BAND_BPS) return (isBuy, 0, total, false);
         drift /= BPS;
         uint256 run = Math.min(drift, Math.max(total * MAX_CORRECTION_BPS / BPS, MIN_TRADE_USDC));
+        if (drift - run < MIN_TRADE_USDC) run = drift; // a remainder too small for a run of its own is taken now
 
         uint256 value; // of `amountIn`, in USDC at the Chainlink price
         if (isBuy) {

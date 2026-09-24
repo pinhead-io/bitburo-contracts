@@ -1,6 +1,6 @@
 # bitburo-contracts
 
-> **Audit version:** tag `audit-2026-09-22`. Its `src/` is identical to commit `d6f81f9`, deployed on Base at `0xc80b56e539c45CEB593410EdCc65F0157f80597d`.
+> **Audit version:** tag `audit-2026-09-22`. Its `src/` is identical to commit `d6f81f9`, deployed on Base at `0xc80b56e539c45CEB593410EdCc65F0157f80597d`. The `src/` in this checkout differs from both: a run also takes a remainder of the drift below the minimum (see *The rule*). That change is neither audited nor deployed; a new audit tag will follow.
 
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
@@ -34,14 +34,14 @@ How the application uses the contract:
 
 | What | Address | Note |
 |---|---|---|
-| Rebalancer (this code) | `0xc80b56e539c45CEB593410EdCc65F0157f80597d` | Live since 22 September 2026, block 51,657,846, tx `0xa3a15fe3a2f75673fa1598c4df86ef9cb2c963b0f789ed285f4c63e93885e557`. Code: commit `d6f81f9`. Verified on Basescan. Replaces `0x1Df884A2A28BbD729714D4f9697972293872BB42` (band 5%, minimum 5 USDC, block 51,604,724, commit `ef39299`), which stays on chain without mandates. |
+| Rebalancer (live) | `0xc80b56e539c45CEB593410EdCc65F0157f80597d` | Live since 22 September 2026, block 51,657,846, tx `0xa3a15fe3a2f75673fa1598c4df86ef9cb2c963b0f789ed285f4c63e93885e557`. Code: commit `d6f81f9`. Verified on Basescan. Replaces `0x1Df884A2A28BbD729714D4f9697972293872BB42` (band 5%, minimum 5 USDC, block 51,604,724, commit `ef39299`), which stays on chain without mandates. |
 
 ## Audit reference
 
 ### Version
 
 - **Tag:** `audit-2026-09-22`. `development` moves on as new work is merged; the tag does not.
-- **Source:** `src/` is identical at the tag and at commit `d6f81f9`, from which the live contract was deployed (`git diff --quiet d6f81f9 audit-2026-09-22 -- src/`).
+- **Source:** `src/` is identical at the tag and at commit `d6f81f9`, from which the live contract was deployed (`git diff --quiet d6f81f9 audit-2026-09-22 -- src/`). The `src/` in this checkout is not: it adds the remainder rule under *Size*. A new audit tag will follow.
 - **Deployed:** `0xc80b56e539c45CEB593410EdCc65F0157f80597d` on Base (chain id 8453), block 51,657,846, verified on Basescan. Runtime bytecode 6,705 bytes.
 
 ### Files
@@ -50,7 +50,7 @@ nSLOC: comment lines and blank lines removed, every remaining line counted.
 
 | File | Lines | nSLOC |
 |---|---|---|
-| `src/Rebalancer.sol` | 342 | 216 |
+| `src/Rebalancer.sol` | 349 | 217 |
 | `src/interfaces/IV3SwapRouter.sol` | 21 | 13 |
 | `src/interfaces/IAggregatorV3.sol` | 12 | 8 |
 | `script/Deploy.s.sol` | 66 | 40 |
@@ -90,7 +90,7 @@ FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge tes
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 22 September 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 77 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 87 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
+Results on 24 September 2026, for this checkout rather than the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 82 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 92 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 
@@ -101,20 +101,20 @@ Results on 22 September 2026: `forge fmt --check` exit 0; `RUN_FORK=false`: 77 p
 | `execute(owner, minAmountOut) → swapOutput` | One rebalance run. Only `owner` or the keeper that owner appointed; anyone else gets `NotOwnerOrKeeper`. `minAmountOut` can only make the price bound stricter (0 = only the Chainlink bound). Returns what the swap delivered (cbBTC for a buy, USDC before the fee for a sell), so a keeper can simulate with 0 and demand that amount in the transaction. |
 | `isDue(owner) → (bool, int256)` | Would `execute` trade now, and how much USDC (+ buy, − sell, at the Chainlink price)? Same code path as `execute`. Reverts, like `execute`, when the sequencer or the price feed fails. It does not look at the pool: whether the price bound holds only shows when the swap runs, so simulate `execute` before sending it. |
 | `quote() → uint256` | Chainlink price in USDC base units per cbBTC, with USDC counted as one dollar. |
-| `mandates(owner) → (targetBps, lastExecutedAt, unfinished, keeper)` | The stored mandate. `targetBps` 0 = none. `unfinished` = the last run left part of its correction undone. |
+| `mandates(owner) → (targetBps, lastExecutedAt, unfinished, keeper)` | The stored mandate. `targetBps` 0 = none. `unfinished` = the last run left at least 2 USDC of its correction undone. |
 | `sweep(token)` | Forwards the contract's whole balance of `token` to the treasury: the collected USDC fees, or tokens sent there by mistake. Anyone may call it. |
 | `retire()` / `retired()` | Irreversible kill switch, only `TREASURY`. After it `execute` and `setMandate` revert and `isDue` reports nothing; `stop` and `sweep` keep working. It cannot touch funds or allowances. |
 
-Constants (all fixed; another profile needs a new deployment): `BAND_BPS` 200, `MAX_CORRECTION_BPS` 1000 per run, `MIN_TRADE_USDC` 2 USDC, `INTERVAL` 1 day, `FEE_BPS` 25, `MAX_DEVIATION_BPS` 55, `POOL_FEE` 500, `MIN_TARGET_BPS` 500 / `MAX_TARGET_BPS` 9500, `GRACE_PERIOD` 1 hour, `MAX_FEED_AGE` 1500 s.
+Constants (all fixed; another profile needs a new deployment): `BAND_BPS` 200, `MAX_CORRECTION_BPS` 1000 per run (plus a remainder below the minimum), `MIN_TRADE_USDC` 2 USDC, `INTERVAL` 1 day, `FEE_BPS` 25, `MAX_DEVIATION_BPS` 55, `POOL_FEE` 500, `MIN_TARGET_BPS` 500 / `MAX_TARGET_BPS` 9500, `GRACE_PERIOD` 1 hour, `MAX_FEED_AGE` 1500 s.
 
 ### The rule
 
 `position` = cbBTC balance at the Chainlink price, `total` = USDC balance + `position`, `drift` = |`position` − `total` × target|.
 
 - **Start.** A correction starts when `drift` > 2% of `total`. The comparison is exact: a wallet exactly on the edge of the band is not due, at any price. A buy needs the position below `total` × (target − 200) / 10,000 and a sell needs it above `total` × (target + 200) / 10,000. A target within 2% of 0% or 100% would only ever trade in one direction, but the range (500 to 9500) stays clear of that: every mandate can trade both ways.
-- **Size.** One run corrects the drift, at most max(10% of `total`, 2 USDC), capped by balance and allowance, and only if the run is worth at least 2 USDC. For wallets below 20 USDC the 2 USDC minimum is the budget, so there a run can be a fifth of the wallet. A run of the minimum is measured in whole satoshi: up to 100,000 USDC per cbBTC one satoshi is at most 5 bps of it, so a pool 50 bps off the feed still executes; above that price such a run can revert on a pool that far off, harmlessly, until the next attempt.
+- **Size.** One run corrects the drift, at most max(10% of `total`, 2 USDC). When that would leave less than 2 USDC of the drift, too little for a run of its own, the run takes the whole drift instead, so a correction ends on the target rather than just short of it. The fee is not compensated: such a run still ends off the target by part of its fee. Balance and allowance cap the run after that, and it only goes ahead if it is worth at least 2 USDC. For wallets below 20 USDC the 2 USDC minimum is the budget, so there a run can be a fifth of the wallet, and just under 4 USDC when it takes the remainder. A run of the minimum is measured in whole satoshi: up to 100,000 USDC per cbBTC one satoshi is at most 5 bps of it, so a pool 50 bps off the feed still executes; above that price such a run can revert on a pool that far off, harmlessly, until the next attempt.
 - **Pace.** At most one run per owner per day.
-- **Finish.** A run that leaves at least 2 USDC of its correction undone (the 10% cap, or the allowance) marks the mandate `unfinished`; the run of the next day then continues to the target, also inside the band. After two days without a run, or after `setMandate`, a correction starts from the band again. Measured in the unit suite: all cash with a 71% target reaches 71% in eight daily runs; without this rule it would stop near 70%.
+- **Finish.** A run that leaves at least 2 USDC of its correction undone (the 10% cap, or the balance or allowance) marks the mandate `unfinished`; the run of the next day then continues to the target, also inside the band. The cap never leaves less than 2 USDC, except that a sell, rounded up to whole satoshi, can leave up to one satoshi less; balance or allowance can leave less too. Such a remainder is not followed up. After two days without a run, or after `setMandate`, a correction starts from the band again. Measured in the unit suite: all cash with a 71% target reaches 71% in eight daily runs; without this rule it would stop near 70%.
 
 ### Price bound and maximum loss per run
 
@@ -133,7 +133,7 @@ The contract receives the swap output itself, measures it as a balance differenc
 | Anyone | `sweep` to the treasury | send it anywhere else |
 | Treasury | receive fees; `retire()` once | touch funds, mandates or allowances; undo `retire` |
 
-**What a dishonest keeper can do.** It can trade around the run it triggers (push the pool, run, push back) and so move the owner's price down to the lower bound: at most 0.55% of the traded amount per run, one run per day, at most 10% of the wallet per run (2 USDC for the smallest wallets), and only while a correction is due. It cannot make a wallet due: that takes a donation of more than 2% of the wallet to gain at most 0.055% of it. Every run and its price are visible in `Executed`. The owner can replace the keeper at any moment, and the treasury can stop everything with `retire()`.
+**What a dishonest keeper can do.** It can trade around the run it triggers (push the pool, run, push back) and so move the owner's price down to the lower bound: at most 0.55% of the traded amount per run, one run per day, at most 10% of the wallet plus less than 2 USDC per run (less than 4 USDC for the smallest wallets), and only while a correction is due. It cannot make a wallet due: that takes a donation of more than 2% of the wallet to gain at most 0.055% of it. Every run and its price are visible in `Executed`. The owner can replace the keeper at any moment, and the treasury can stop everything with `retire()`.
 
 **Keepers must send plain transactions.** `execute` checks `msg.sender`, not who composed the transaction. If a keeper sends through a bundler or relayer (ERC-4337, a sponsored send), that party can wrap the call and trade around it. The keeper script therefore sends from its own key, straight to the sequencer, and passes the simulated output minus a small tolerance as `minAmountOut`, so that wrapping it gains nothing.
 
