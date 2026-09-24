@@ -28,7 +28,7 @@ How the application uses the contract:
 | Booking | Bitburo's server, hourly | Reads the `Executed` logs up to the chain's safe block and books them in the app's ledger, so a run the owner started himself is recorded too. |
 | Revenue | anyone | 25 bps of the USDC leg of every run stays in the contract until someone calls `sweep(USDC)`, which sends it to the treasury. |
 
-**Status.** Live on Base since 21 September 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
+**Status.** Live on Base since 22 September 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
 
 ## Deployments
 
@@ -50,7 +50,7 @@ nSLOC: comment lines and blank lines removed, every remaining line counted.
 
 | File | Lines | nSLOC |
 |---|---|---|
-| `src/Rebalancer.sol` | 340 | 216 |
+| `src/Rebalancer.sol` | 342 | 216 |
 | `src/interfaces/IV3SwapRouter.sol` | 21 | 13 |
 | `src/interfaces/IAggregatorV3.sol` | 12 | 8 |
 | `script/Deploy.s.sol` | 66 | 40 |
