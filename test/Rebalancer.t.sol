@@ -315,6 +315,70 @@ contract RebalancerTest is RebalancerTestBase {
         assertApproxEqAbs(_shareBps(alice), 8000, 3, "one run reaches the target");
     }
 
+    function test_execute_buyTakesARemainderBelowTheMinimum() public {
+        // 10,000 USDC of value, 69.99% cbBTC, target 80%: drift 1,001 against a cap of 1,000. The cap would leave
+        // 1 USDC, too little for a run of its own, so this run takes the whole drift.
+        _setUser(alice, 3001e6, 8_748_750, 8000);
+        (, int256 delta) = r.isDue(alice);
+        assertEq(delta, 1001e6);
+        _execute(alice);
+        assertEq(usdc.balanceOf(alice), 2000e6);
+        (,, bool unfinished,) = r.mandates(alice);
+        assertFalse(unfinished);
+        assertApproxEqAbs(_shareBps(alice), 8000, 1, "only the fee short of the target");
+        _warp(1 days);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due, "nothing left to follow up");
+    }
+
+    function test_execute_sellTakesARemainderBelowTheMinimum() public {
+        // 10,000 USDC of value, 60.01% cbBTC, target 50%: drift 1,001 against a cap of 1,000.
+        _setUser(alice, 3999e6, 7_501_250, 5000);
+        (, int256 delta) = r.isDue(alice);
+        assertEq(delta, -1001e6);
+        _execute(alice);
+        assertEq(cbbtc.balanceOf(alice), 6_250_000, "a position of exactly 5,000 USDC");
+        (,, bool unfinished,) = r.mandates(alice);
+        assertFalse(unfinished);
+        _warp(1 days);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due, "nothing left to follow up");
+    }
+
+    function test_execute_remainderOfExactlyTheMinimumIsLeftToTheNextRun() public {
+        // Drift 1,002 = cap + minimum: the 2 USDC left is a run of its own, so this run stays at the cap.
+        _setUser(alice, 3002e6, 8_747_500, 8000);
+        (, int256 delta) = r.isDue(alice);
+        assertEq(delta, 1000e6);
+        _execute(alice);
+        (,, bool unfinished,) = r.mandates(alice);
+        assertTrue(unfinished);
+        _warp(1 days);
+        (bool due,) = r.isDue(alice);
+        assertTrue(due, "the next day finishes it");
+    }
+
+    function test_execute_takingTheRemainderIsStillBoundedByAllowance() public {
+        // Drift 1,001: the run takes the whole drift, then the allowance cuts it.
+        _setUser(alice, 3001e6, 8_748_750, 8000);
+        vm.prank(alice);
+        usdc.approve(address(r), 1000.5e6);
+        (, int256 delta) = r.isDue(alice);
+        assertEq(delta, 1000.5e6);
+        _execute(alice);
+        (,, bool unfinished,) = r.mandates(alice);
+        assertFalse(unfinished, "0.50 USDC left: less than the minimum, not followed up");
+
+        _setUser(bob, 3001e6, 8_748_750, 8000);
+        vm.prank(bob);
+        usdc.approve(address(r), 500e6);
+        (, delta) = r.isDue(bob);
+        assertEq(delta, 500e6);
+        _execute(bob);
+        (,, unfinished,) = r.mandates(bob);
+        assertTrue(unfinished, "501 USDC left: followed up");
+    }
+
     function test_execute_nothingToDoInsideAndOnTheBand() public {
         _setUser(alice, 2200e6, 0.0975e8, 8000); // exactly 78% cbBTC: drift == band
         vm.expectRevert(Rebalancer.NothingToDo.selector);
@@ -692,9 +756,12 @@ contract RebalancerTest is RebalancerTestBase {
 
     // ─── The rule, fuzzed ───────────────────────────────────────────────────────────────────────────────────
 
-    function testFuzz_runMovesTowardsTheTargetWithinTheCap(uint256 cash, uint256 btc, uint16 target, uint256 price)
-        public
-    {
+    function testFuzz_runMovesTowardsTheTargetWithinTheCapOrFinishes(
+        uint256 cash,
+        uint256 btc,
+        uint16 target,
+        uint256 price
+    ) public {
         price = bound(price, 1_000e6, 1_000_000e6);
         _setPrice(price);
         cash = bound(cash, 0, 1e13);
@@ -720,7 +787,8 @@ contract RebalancerTest is RebalancerTestBase {
         uint256 minTrade = r.MIN_TRADE_USDC();
         assertGe(run, minTrade, "below the minimum");
         uint256 cap = total / 10 > minTrade ? total / 10 : minTrade;
-        assertLe(run, cap + price / 1e8 + 1, "above the cap"); // + 1 sat of rounding on a sell
+        // A run may exceed the cap by less than the minimum to take the rest of the drift; + 1 sat of rounding on a sell.
+        assertLe(run, cap + minTrade + price / 1e8 + 1, "above the cap plus the minimum");
 
         // Towards the target and not past it (the fee leaves the run slightly short). The margin is one satoshi,
         // not one basis point: a sell rounds its amount up to whole satoshi, and on a small wallet at a high price
@@ -733,6 +801,14 @@ contract RebalancerTest is RebalancerTestBase {
         } else {
             assertLt(shareAfter, shareBefore);
             assertGe(shareAfter + satBps, uint256(target));
+        }
+
+        // A run beyond the cap took the whole drift: it finishes the correction, and only the fee and one satoshi
+        // stand between the wallet and its target.
+        if (run > cap + price / 1e8 + 1) {
+            (,, bool unfinished,) = r.mandates(alice);
+            assertFalse(unfinished, "a run beyond the cap is unfinished");
+            assertApproxEqAbs(shareAfter, target, satBps + run * r.FEE_BPS() / total + 1, "short of the target");
         }
     }
 
@@ -1082,7 +1158,10 @@ contract RebalancerHandler is Test {
             if (loss > run * 80 / BPS + price / 1e8 * 3) lossBoundBroken = true;
             uint256 minTrade = R.MIN_TRADE_USDC();
             uint256 cap = total / 10 > minTrade ? total / 10 : minTrade;
-            if (run > cap + price / 1e8 || run + price / 1e8 < minTrade) capBroken = true;
+            if (run > cap + minTrade + price / 1e8 || run + price / 1e8 < minTrade) capBroken = true;
+            // Beyond the cap only to take the rest of the drift, so such a run leaves nothing to follow up.
+            (,, bool unfinished,) = R.mandates(owner);
+            if (run > cap + price / 1e8 && unfinished) capBroken = true;
         } catch {}
     }
 
