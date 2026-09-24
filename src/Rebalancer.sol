@@ -58,10 +58,10 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @notice Per run, share of the total value. A run that this cap would leave less than MIN_TRADE_USDC short of
     ///         the target takes that remainder too, so it can exceed the cap by just under MIN_TRADE_USDC.
     uint256 public constant MAX_CORRECTION_BPS = 1000;
-    /// @notice The smallest run that is worth making, the smallest remainder the cap leaves for a next run, and the
-    ///         step that separates a finished correction from an unfinished one in `_plan`. It has to be strictly
-    ///         positive: at 0 a run that finishes its correction would still mark itself unfinished, which drops the
-    ///         band for the next day and never stops.
+    /// @notice The smallest run that is worth making, the smallest remainder the cap leaves for a next run (on a sell
+    ///         up to one satoshi less, see `_plan`), and the step that separates a finished correction from an
+    ///         unfinished one in `_plan`. It has to be strictly positive: at 0 a run that finishes its correction would
+    ///         still mark itself unfinished, which drops the band for the next day and never stops.
     /// @dev 2 USDC, which is set by the rounding rather than by the economics. A run is measured in whole satoshi,
     ///      so the single unit a swap can round away is worth `price / 1e8` — a share of the run that grows as the
     ///      run shrinks and as cbBTC gets dearer. It has to stay well inside MAX_DEVIATION_BPS, which the pool's own
@@ -282,8 +282,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @dev The rule from the contract header. `finishing`: this run follows up an unfinished correction, so the band
     ///      does not apply. `amountIn` is in the input token (USDC for a buy, cbBTC for a sell); 0 = do nothing.
     ///      `unfinished`: at least MIN_TRADE_USDC of the drift is left after this run. The cap never leaves a smaller
-    ///      remainder: the run then takes the whole drift. Balance and allowance come after, so they can leave less,
-    ///      which is not followed up.
+    ///      remainder: the run then takes the whole drift. A sell, rounded up to whole satoshi, can leave up to one
+    ///      satoshi less; balance and allowance come after, so they can leave less too. Neither is followed up.
     function _plan(address owner, uint256 targetBps, bool finishing, uint256 price)
         internal
         view
