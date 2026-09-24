@@ -40,7 +40,7 @@ How the application uses the contract:
 
 ### Version
 
-- **Tag:** `audit-2026-09-24`. `development` moves on as new work is merged; the tag does not. The previous tag, `audit-2026-09-22`, marks the code of the replaced contract.
+- **Tag:** `audit-2026-09-24`. `development` moves on as new work is merged; the tag does not.
 - **Source:** `src/` is identical at the tag and at commit `b8d5e43`, from which the live contract was deployed (`git diff --quiet b8d5e43 audit-2026-09-24 -- src/`).
 - **Deployed:** `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` on Base (chain id 8453), block 51,743,786, verified on Basescan. Runtime bytecode 6,713 bytes, identical to a build of `b8d5e43` apart from the six immutables.
 
