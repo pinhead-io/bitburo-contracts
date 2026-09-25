@@ -21,6 +21,7 @@ dist/
 .agents/
 .claude/
 skills-lock.json
+.mcp.json
 
 *.sh
 # Slither MCP cache

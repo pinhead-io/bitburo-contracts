@@ -28,7 +28,7 @@ How the application uses the contract:
 | Booking | Bitburo's server, hourly | Reads the `Executed` logs up to the chain's safe block and books them in the app's ledger, so a run the owner started himself is recorded too. |
 | Revenue | anyone | 25 bps of the USDC leg of every run stays in the contract until someone calls `sweep(USDC)`, which sends it to the treasury. |
 
-**Status.** Live on Base since 22 September 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
+**Status.** Live on Base since 24 September 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
 
 ## Deployments
 
@@ -85,12 +85,12 @@ git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ~/.foundry/bin/forge fmt --check
 RUN_FORK=false ~/.foundry/bin/forge test                  # unit, fuzz, invariants; no RPC needed
-FORK_BLOCK=51657846 ~/.foundry/bin/forge test             # everything, fork suite at the deploy block
+FORK_BLOCK=51743786 ~/.foundry/bin/forge test             # everything, fork suite at the deploy block
 FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge test --match-test invariant
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 24 September 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 82 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51657846`: 92 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
+Results on 25 September 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 82 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51743786`: 92 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 
