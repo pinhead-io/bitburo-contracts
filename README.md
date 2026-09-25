@@ -1,6 +1,6 @@
 # bitburo_contracts
 
-> **Audit version:** tag `audit-2026-09-24`. Its `src/` is identical to commit `b8d5e43`, deployed on Base at `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091`.
+> **Audit version:** tag `audit-2026-09-24`. Its `src/` is the code of the live contract on Base at `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091`.
 
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
@@ -34,15 +34,14 @@ How the application uses the contract:
 
 | What | Address | Note |
 |---|---|---|
-| Rebalancer (live) | `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` | Live since 24 September 2026, block 51,743,786, tx `0x3ea18df9d8ec57626772def1b68d683d2c8ad716b550faef40ba1de252a22a84`. Code: commit `b8d5e43`. Verified on Basescan. Replaces `0xc80b56e539c45CEB593410EdCc65F0157f80597d` (a run stops at the cap even when less than the minimum is left, block 51,657,846, commit `d6f81f9`), which stays on chain. |
+| Rebalancer (live) | `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` | Live since 24 September 2026, block 51,743,786, tx `0x3ea18df9d8ec57626772def1b68d683d2c8ad716b550faef40ba1de252a22a84`. Code: `src/` at tag `audit-2026-09-24`. Verified on Basescan. |
 
 ## Audit reference
 
 ### Version
 
 - **Tag:** `audit-2026-09-24`. `development` moves on as new work is merged; the tag does not.
-- **Source:** `src/` is identical at the tag and at commit `b8d5e43`, from which the live contract was deployed (`git diff --quiet b8d5e43 audit-2026-09-24 -- src/`).
-- **Deployed:** `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` on Base (chain id 8453), block 51,743,786, verified on Basescan. Runtime bytecode 6,713 bytes, identical to a build of `b8d5e43` apart from the six immutables.
+- **Deployed:** `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` on Base (chain id 8453), block 51,743,786, verified on Basescan. Runtime bytecode 6,713 bytes, identical to a build of the tag apart from the six immutables.
 
 ### Files
 
