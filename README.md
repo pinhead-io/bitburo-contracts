@@ -79,7 +79,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 ### Build and test
 
 ```bash
-git clone https://github.com/mediaproc/bitburo_contracts && cd bitburo_contracts
+git clone https://github.com/pinhead-io/bitburo_contracts && cd bitburo_contracts
 git checkout audit-2026-09-24
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
