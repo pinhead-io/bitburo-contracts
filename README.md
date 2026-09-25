@@ -1,4 +1,4 @@
-# bitburo-contracts
+# bitburo_contracts
 
 > **Audit version:** tag `audit-2026-09-24`. Its `src/` is identical to commit `b8d5e43`, deployed on Base at `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091`.
 
@@ -79,7 +79,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 ### Build and test
 
 ```bash
-git clone https://github.com/mediaproc/bitburo-contracts && cd bitburo-contracts
+git clone https://github.com/mediaproc/bitburo_contracts && cd bitburo_contracts
 git checkout audit-2026-09-24
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
