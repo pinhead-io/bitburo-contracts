@@ -24,9 +24,9 @@ How the application uses the contract:
 | Step | Who | What |
 |---|---|---|
 | Mandate | the user, in the browser | Signs `approve` for USDC and cbBTC and `setMandate(8000, <Bitburo keeper>)`. Privy sponsors the gas, so the user needs no ETH. |
-| Run | Bitburo's keeper, hourly | Reads `mandates` and `isDue` for its own users through Multicall3, simulates `execute(owner, 0)` from the keeper address, then sends `execute(owner, simulated − 10 bps)` as a plain transaction with a fixed gas limit of 500,000. The keeper is a Privy server wallet (`0xDE89810E6a9013860FE1e529b349C7ba906C8f56`) whose Privy policy allows only `execute(address,uint256)` on this contract. It pays its own gas; it is deliberately not sponsored (see *Keepers must send plain transactions* below). |
+| Run | Bitburo's keeper, hourly | Reads `mandates` and `isDue` for its own users through Multicall3, simulates `execute(owner, 0)` from the keeper address, then sends `execute(owner, simulated − 10 bps)` as a plain transaction with a fixed gas limit of 500,000. The keeper is a Privy server wallet (`0xDE89810E6a9013860FE1e529b349C7ba906C8f56`) whose Privy policy allows only `execute(address,uint256)` and `sweep(address)` with the USDC address on this contract. It pays its own gas; it is deliberately not sponsored (see *Keepers must send plain transactions* below). |
 | Booking | Bitburo's server, hourly | Reads the `Executed` logs up to the chain's safe block and books them in the app's ledger, so a run the owner started himself is recorded too. |
-| Revenue | anyone | 25 bps of the USDC leg of every run stays in the contract until someone calls `sweep(USDC)`, which sends it to the treasury. |
+| Revenue | Bitburo's keeper, daily | 25 bps of the USDC leg of every run stays in the contract until someone calls `sweep(USDC)`, which sends it to the treasury. Anyone may call it; the keeper does once a day, as soon as the contract holds at least 1 USDC. |
 
 **Status.** Live on Base since 1 October 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
 
@@ -183,6 +183,7 @@ Deploying to Base mainnet:
 
 ```bash
 cast wallet import bitburo-deployer --interactive     # one-off, puts the key in a keystore
+export BITBURO_TREASURY=0x…                           # receives the fees and may call retire(); fixed for good by the deploy
 DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh dry
 DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh go
 DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh verify
