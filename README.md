@@ -1,6 +1,6 @@
 # bitburo_contracts
 
-> **Audit version:** tag `audit-2026-09-24`. Its `src/` is the code of the live contract on Base at `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091`.
+> **Audit version:** tag `audit-2026-10-01`. It is not deployed yet: the live contract on Base at `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` runs the code of tag `audit-2026-09-24`, which lacks the age check on the sequencer feed, and is replaced once this version has been checked.
 
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
@@ -40,8 +40,8 @@ How the application uses the contract:
 
 ### Version
 
-- **Tag:** `audit-2026-09-24`. `development` moves on as new work is merged; the tag does not.
-- **Deployed:** `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` on Base (chain id 8453), block 51,743,786, verified on Basescan. Runtime bytecode 6,713 bytes, identical to a build of the tag apart from the six immutables.
+- **Tag:** `audit-2026-10-01`. `development` moves on as new work is merged; the tag does not.
+- **Deployed:** not yet. A build of the tag has 6,794 bytes of runtime bytecode. The live contract `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` on Base (chain id 8453), block 51,743,786, verified on Basescan, is the build of tag `audit-2026-09-24`: 6,713 bytes, identical to a build of that tag apart from the six immutables.
 
 ### Files
 
@@ -79,7 +79,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 
 ```bash
 git clone https://github.com/pinhead-io/bitburo_contracts && cd bitburo_contracts
-git checkout audit-2026-09-24
+git checkout audit-2026-10-01
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ~/.foundry/bin/forge fmt --check
@@ -89,7 +89,7 @@ FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge tes
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 25 September 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 82 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51743786`: 92 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
+Results on 1 October 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 83 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51743786`: 93 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 
