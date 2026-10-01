@@ -118,6 +118,8 @@ contract RebalancerForkTest is Test {
         (, int256 answer,, uint256 updatedAt,) = IAggregatorV3(FEED_CBBTC_USD).latestRoundData();
         assertGt(answer, 0);
         assertLe(block.timestamp - updatedAt, r.MAX_FEED_AGE(), "feed older than MAX_FEED_AGE");
+        (,,, uint256 sequencerUpdatedAt,) = IAggregatorV3(SEQUENCER).latestRoundData();
+        assertLe(block.timestamp - sequencerUpdatedAt, 1 days + 1 hours, "sequencer feed not refreshed within a day");
         assertEq(IAggregatorV3(FEED_CBBTC_USD).decimals(), 8);
         console.log("Chainlink USDC per cbBTC:", r.quote());
         console.log("pool      USDC per cbBTC:", _spot());

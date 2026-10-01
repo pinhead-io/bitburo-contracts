@@ -76,6 +76,10 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 public constant MAX_DEVIATION_BPS = 55;
     uint256 public constant GRACE_PERIOD = 1 hours; // after the sequencer comes back up
     uint256 public constant MAX_FEED_AGE = 1500; // cbBTC/USD heartbeat of 20 minutes + 25%
+    /// @notice The uptime feed reports every change of status and is refreshed in between: on Base once a day, as
+    ///         measured in September 2026. One that is older than this has stopped reporting, so its last "up" says
+    ///         nothing about now. Three of those days, so that two missed refreshes do not stop the contract.
+    uint256 public constant MAX_SEQUENCER_FEED_AGE = 3 days;
     uint256 private constant BPS = 10_000;
     uint256 private constant CBBTC_UNIT = 1e8;
     uint256 private constant FEED_UNITS_PER_USDC_UNIT = 100; // the feed has 8 decimals, USDC has 6
@@ -257,12 +261,15 @@ contract Rebalancer is ReentrancyGuardTransient {
 
     /// @return price USDC base units (6 decimals) per cbBTC, from the 8-decimal cbBTC/USD feed.
     function _quote() internal view returns (uint256 price) {
-        (, int256 sequencerAnswer, uint256 upSince,,) = SEQUENCER_FEED.latestRoundData();
+        (, int256 sequencerAnswer, uint256 upSince, uint256 sequencerUpdatedAt,) = SEQUENCER_FEED.latestRoundData();
         // upSince 0 is an uninitialized round and counts as down, like a time in the future.
         if (
             sequencerAnswer != 0 || upSince == 0 || upSince > block.timestamp
                 || block.timestamp - upSince < GRACE_PERIOD
         ) revert SequencerDown();
+        if (sequencerUpdatedAt > block.timestamp || block.timestamp - sequencerUpdatedAt > MAX_SEQUENCER_FEED_AGE) {
+            revert StaleFeed();
+        }
 
         (, int256 answer,, uint256 updatedAt,) = FEED_CBBTC_USD.latestRoundData();
         if (answer <= 0) revert InvalidFeedAnswer();

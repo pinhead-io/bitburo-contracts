@@ -879,6 +879,18 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(r.quote(), PRICE);
     }
 
+    function test_quote_revertsStaleSequencerFeed() public {
+        uint256 nowTs = block.timestamp;
+        sequencer.set(0, nowTs - 100 days, nowTs - 3 days - 1); // up, but the feed stopped reporting
+        vm.expectRevert(Rebalancer.StaleFeed.selector);
+        r.quote();
+        sequencer.set(0, nowTs - 100 days, nowTs + 1); // in the future
+        vm.expectRevert(Rebalancer.StaleFeed.selector);
+        r.quote();
+        sequencer.set(0, nowTs - 100 days, nowTs - 3 days);
+        assertEq(r.quote(), PRICE);
+    }
+
     function test_quote_revertsStaleFeed() public {
         uint256 nowTs = block.timestamp;
         // forge-lint: disable-start(unsafe-typecast)
