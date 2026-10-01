@@ -19,7 +19,8 @@
  *    Send it straight to the sequencer: a relayer or bundler that wraps the call can trade around it.
  *
  * Failures: market and oracle conditions and a state that changed since `isDue` are skipped until the next run;
- * anything else puts the owner on a cool-down that doubles per failure (COOLDOWN_FILE). See `failureAction`.
+ * anything else, a transaction that ran out of GAS_LIMIT included, puts the owner on a cool-down that doubles per
+ * failure (COOLDOWN_FILE). See `failureAction`.
  * One run at a time (LOCK_FILE); nothing is sent while an earlier transaction of this key is still pending.
  *
  * The contract allows one run per owner per day, so running this every 10 to 60 minutes is plenty.
@@ -324,20 +325,30 @@ const run = async ({ owner, usdcDelta }: Due): Promise<{ outcome: Outcome; detai
   if (receipt.status === "success") return { outcome: "executed", detail: `${label}: ${hash}` };
 
   // Reverted on chain. Ask the node why, on the state after that block: usually the price moved past `minAmountOut`.
-  try {
-    await publicClient.simulateContract({
+  const resimulate = (gas?: bigint) =>
+    publicClient.simulateContract({
       address: rebalancer,
       abi,
       functionName: "execute",
       args: [owner, demanded],
       account: keeper,
       blockNumber: receipt.blockNumber,
+      gas,
     });
-    return { outcome: "skipped", detail: `${label}: ${hash} reverted, a new simulation passes; next run` };
+  try {
+    await resimulate();
   } catch (error) {
     const action = failureAction(failureOf(error));
     return { outcome: action === "skip" ? "skipped" : action, detail: `${label}: ${hash} reverted: ${describeError(error)}` };
   }
+  // It passes without a gas limit. If it fails with the limit of the transaction, the run needs more gas than
+  // GAS_LIMIT. That does not go away by itself, and every attempt costs a transaction.
+  try {
+    await resimulate(gasLimit);
+  } catch {
+    return { outcome: "cooldown", detail: `${label}: ${hash} ran out of gas (GAS_LIMIT ${gasLimit}); raise GAS_LIMIT` };
+  }
+  return { outcome: "skipped", detail: `${label}: ${hash} reverted, a new simulation passes; next run` };
 };
 
 // ─── Main ──────────────────────────────────────────────────────────────────────────────────────────────────────
