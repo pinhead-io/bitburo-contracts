@@ -6,6 +6,8 @@
 #   go      deploys for real; refuses if there is already a deploy in broadcast/
 #   verify  verifies the latest broadcast on Basescan
 #
+# The treasury address comes from the environment: BITBURO_TREASURY=0x…
+#
 # Signing, preferably with a keystore so that the key does not end up in the process table:
 #   DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh dry
 # Or, with the key from a .env (forge then gets it via --private-key, visible in `ps`):
@@ -20,7 +22,9 @@ MODE="${1:-dry}"
 FORGE="$HOME/.foundry/bin/forge"
 BROADCAST="broadcast/Deploy.s.sol/8453/run-latest.json"
 
-export TREASURY="0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9"        # same treasury as the current contract
+# The treasury receives every fee and alone can call retire(); it can never be changed after the deploy.
+: "${BITBURO_TREASURY:?BITBURO_TREASURY is missing: set the treasury address in the environment, for example in the .env you source}"
+export TREASURY="$BITBURO_TREASURY"        # the name script/Deploy.s.sol reads
 export BASE_RPC_URL="${BASE_RPC_URL:-https://mainnet.base.org}"
 export BASESCAN_API_KEY="${BASESCAN_API_KEY:-${ETHERSCAN_API_KEY:-}}"
 
