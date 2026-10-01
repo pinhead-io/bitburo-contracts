@@ -408,6 +408,30 @@ contract RebalancerTest is RebalancerTestBase {
         assertTrue(due);
     }
 
+    function test_execute_donationPutsAWalletOnTheBandOverIt() public {
+        // A wallet on the edge of the band is one small donation away from a run, and that run corrects the whole
+        // drift, not only what lies outside the band. What it can lose stays within the price bound.
+        _setUser(alice, 2200e6, 0.0975e8, 8000); // exactly 78% cbBTC: drift == band
+        (bool due,) = r.isDue(alice);
+        assertFalse(due);
+
+        usdc.mint(keeper, 1e6);
+        vm.prank(keeper);
+        assertTrue(usdc.transfer(alice, 1e6));
+        int256 delta;
+        (due, delta) = r.isDue(alice);
+        assertTrue(due);
+        assertEq(delta, 200.8e6, "80% of 10,001 USDC minus the 7,800 USDC position");
+
+        router.setWorseBps(54); // the keeper pushed the pool as far as the bound allows
+        uint256 valueBefore = _valueOf(alice);
+        _execute(alice);
+        assertEq(usdc.balanceOf(alice), 2201e6 - 200.8e6);
+        assertApproxEqAbs(_shareBps(alice), 8000, 1);
+        uint256 loss = valueBefore - _valueOf(alice);
+        assertLe(loss, 200.8e6 * (r.FEE_BPS() + r.MAX_DEVIATION_BPS()) / BPS, "0.80% of the run: 0.016% of the wallet");
+    }
+
     function test_execute_bandEdgeDoesNotDependOnRounding() public {
         // At a price that is not round, a wallet exactly on the edge of the band is never due.
         _setPrice(79_999_123_457);
