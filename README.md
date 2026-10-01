@@ -49,11 +49,11 @@ nSLOC: comment lines and blank lines removed, every remaining line counted.
 
 | File | Lines | nSLOC |
 |---|---|---|
-| `src/Rebalancer.sol` | 349 | 217 |
+| `src/Rebalancer.sol` | 356 | 221 |
 | `src/interfaces/IV3SwapRouter.sol` | 21 | 13 |
 | `src/interfaces/IAggregatorV3.sol` | 12 | 8 |
 | `script/Deploy.s.sol` | 66 | 40 |
-| `keeper/keeper.ts` | 389 | 309 |
+| `keeper/keeper.ts` | 400 | 317 |
 | `keeper/selection.ts` | 352 | 225 |
 | `keeper/lock.ts` | 134 | 86 |
 
@@ -72,7 +72,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 | Uniswap SwapRouter02 | `0x2626664c2603336E57B271c5C0b26F421741e481` | only `exactInputSingle` is called |
 | Pool USDC/cbBTC 0.05% | `0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef` | not called directly |
 | Chainlink cbBTC/USD | `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` | 8 decimals, heartbeat 20 min, deviation 0.3% |
-| Chainlink L2 Sequencer Uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` | answer 0 = up |
+| Chainlink L2 Sequencer Uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` | answer 0 = up; refreshed once a day, refused when older than 3 days |
 | Treasury | `0xD6a4f92C9c2c35B4816deC5147231226Fb7598a9` | an EOA |
 
 ### Build and test
@@ -104,7 +104,7 @@ Results on 25 September 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=
 | `sweep(token)` | Forwards the contract's whole balance of `token` to the treasury: the collected USDC fees, or tokens sent there by mistake. Anyone may call it. |
 | `retire()` / `retired()` | Irreversible kill switch, only `TREASURY`. After it `execute` and `setMandate` revert and `isDue` reports nothing; `stop` and `sweep` keep working. It cannot touch funds or allowances. |
 
-Constants (all fixed; another profile needs a new deployment): `BAND_BPS` 200, `MAX_CORRECTION_BPS` 1000 per run (plus a remainder below the minimum), `MIN_TRADE_USDC` 2 USDC, `INTERVAL` 1 day, `FEE_BPS` 25, `MAX_DEVIATION_BPS` 55, `POOL_FEE` 500, `MIN_TARGET_BPS` 500 / `MAX_TARGET_BPS` 9500, `GRACE_PERIOD` 1 hour, `MAX_FEED_AGE` 1500 s.
+Constants (all fixed; another profile needs a new deployment): `BAND_BPS` 200, `MAX_CORRECTION_BPS` 1000 per run (plus a remainder below the minimum), `MIN_TRADE_USDC` 2 USDC, `INTERVAL` 1 day, `FEE_BPS` 25, `MAX_DEVIATION_BPS` 55, `POOL_FEE` 500, `MIN_TARGET_BPS` 500 / `MAX_TARGET_BPS` 9500, `GRACE_PERIOD` 1 hour, `MAX_FEED_AGE` 1500 s, `MAX_SEQUENCER_FEED_AGE` 3 days.
 
 ### The rule
 
@@ -140,7 +140,7 @@ The contract receives the swap output itself, measures it as a balance differenc
 
 ### Fee
 
-25 bps of the USDC leg of every run: of the gross USDC for a buy, of the USDC received for a sell. The fee stays in the contract and `sweep(USDC)` forwards it to the treasury, so a run never depends on the treasury being able to receive (Circle can blacklist an address). Between transactions the contract holds nothing but those uncollected fees.
+25 bps of the USDC leg of every run: of the gross USDC for a buy, of the USDC received for a sell. The fee stays in the contract and `sweep(USDC)` forwards it to the treasury, so a run never depends on the treasury being able to receive (Circle can blacklist an address). If Circle blacklists the contract itself, every run and every `sweep` reverts and the fees not yet swept are frozen for as long as that lasts; the users' funds are in their own wallets and stay out of it. Between transactions the contract holds nothing but those uncollected fees.
 
 ### Retiring the contract
 
@@ -200,7 +200,7 @@ bun test            # the pure logic in selection.ts and the lock
 bun run typecheck
 ```
 
-One run of the script: find the owners that named this keeper (the `MandateSet` events from `FROM_BLOCK`, remembered in `keeper-owners.json`, plus an optional `OWNERS_FILE`), ask `mandates` and `isDue` per page in a Multicall3 (owners that no longer name this keeper are forgotten, so that events naming it for empty or foreign wallets do not make the list grow for ever), simulate `execute(owner, 0)` for every due owner, and send `execute(owner, simulated output − TOLERANCE_BPS)` as a plain transaction. Market and oracle conditions and a state that changed since `isDue` are skipped until the next run; any other revert puts the owner on a cool-down that doubles per failure (`keeper-cooldowns.json`). One run at a time (`keeper.lock`), and nothing is sent while an earlier transaction of the key is still pending. The contract allows one run per owner per day, so every 10 to 60 minutes is plenty. All settings: the header of `keeper/keeper.ts`.
+One run of the script: find the owners that named this keeper (the `MandateSet` events from `FROM_BLOCK`, remembered in `keeper-owners.json`, plus an optional `OWNERS_FILE`), ask `mandates` and `isDue` per page in a Multicall3 (owners that no longer name this keeper are forgotten, so that events naming it for empty or foreign wallets do not make the list grow for ever), simulate `execute(owner, 0)` for every due owner, and send `execute(owner, simulated output − TOLERANCE_BPS)` as a plain transaction. Market and oracle conditions and a state that changed since `isDue` are skipped until the next run; any other revert, and a transaction that ran out of `GAS_LIMIT`, puts the owner on a cool-down that doubles per failure (`keeper-cooldowns.json`). One run at a time (`keeper.lock`), and nothing is sent while an earlier transaction of the key is still pending. The contract allows one run per owner per day, so every 10 to 60 minutes is plenty. All settings: the header of `keeper/keeper.ts`.
 
 The script was run end to end against a local anvil fork of Base on 17 September 2026 (real router, pool and feeds): it found the owner from the event, ran a buy of 1,000 USDC and a sell of 0.02 cbBTC, found nothing to do in the next run, and forgot an owner that called `stop()`.
 
