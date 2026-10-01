@@ -1,6 +1,6 @@
 # bitburo_contracts
 
-> **Audit version:** tag `audit-2026-10-01`. It is not deployed yet: the live contract on Base at `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` runs the code of tag `audit-2026-09-24`, which lacks the age check on the sequencer feed, and is replaced once this version has been checked.
+> **Audit version:** tag `audit-2026-10-01`. Its `src/` is the code of the live contract on Base at `0x0C83C3785deF69B25c08b190C607D5890dfACE66`.
 
 Bitburo's immutable `Rebalancer` contract for Base mainnet, plus the keeper script that runs it.
 
@@ -28,20 +28,20 @@ How the application uses the contract:
 | Booking | Bitburo's server, hourly | Reads the `Executed` logs up to the chain's safe block and books them in the app's ledger, so a run the owner started himself is recorded too. |
 | Revenue | anyone | 25 bps of the USDC leg of every run stays in the contract until someone calls `sweep(USDC)`, which sends it to the treasury. |
 
-**Status.** Live on Base since 24 September 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
+**Status.** Live on Base since 1 October 2026 (address below). Private beta: no third-party funds will be accepted until this audit is concluded.
 
 ## Deployments
 
 | What | Address | Note |
 |---|---|---|
-| Rebalancer (live) | `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` | Live since 24 September 2026, block 51,743,786, tx `0x3ea18df9d8ec57626772def1b68d683d2c8ad716b550faef40ba1de252a22a84`. Code: `src/` at tag `audit-2026-09-24`. Verified on Basescan. |
+| Rebalancer (live) | `0x0C83C3785deF69B25c08b190C607D5890dfACE66` | Live since 1 October 2026, block 52,034,272, tx `0x08c18b0ac3e77c8bec825287867d28ba23e72f5d41823990f87fbfe554731ae2`. Code: `src/` at tag `audit-2026-10-01`. Verified on Basescan. |
 
 ## Audit reference
 
 ### Version
 
 - **Tag:** `audit-2026-10-01`. `development` moves on as new work is merged; the tag does not.
-- **Deployed:** not yet. A build of the tag has 6,794 bytes of runtime bytecode. The live contract `0xc8e2aEBc5cf5f843506d3f69Cd682A07351d8091` on Base (chain id 8453), block 51,743,786, verified on Basescan, is the build of tag `audit-2026-09-24`: 6,713 bytes, identical to a build of that tag apart from the six immutables.
+- **Deployed:** `0x0C83C3785deF69B25c08b190C607D5890dfACE66` on Base (chain id 8453), block 52,034,272, verified on Basescan. Runtime bytecode 6,794 bytes, identical to a build of the tag apart from the six immutables.
 
 ### Files
 
@@ -84,12 +84,12 @@ git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
 ~/.foundry/bin/forge fmt --check
 RUN_FORK=false ~/.foundry/bin/forge test                  # unit, fuzz, invariants; no RPC needed
-FORK_BLOCK=51743786 ~/.foundry/bin/forge test             # everything, fork suite at the deploy block
+FORK_BLOCK=52034272 ~/.foundry/bin/forge test             # everything, fork suite at the deploy block
 FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge test --match-test invariant
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-Results on 1 October 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 83 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=51743786`: 93 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
+Results on 1 October 2026, at the tag: `forge fmt --check` exit 0; `RUN_FORK=false`: 83 passed, 0 failed, 1 skipped (the fork suite); `FORK_BLOCK=52034272`: 93 passed, 0 failed; deep invariants: 14 passed; keeper: 42 tests passed, `tsc` exit 0. The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`).
 
 ## Contract interface
 
