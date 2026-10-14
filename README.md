@@ -1,4 +1,4 @@
-# bitburo_contracts
+# bitburo-contracts
 
 > **Audit version:** tag `audit-2026-10-01`. Its `src/` is the code of the live contract on Base at `0x0C83C3785deF69B25c08b190C607D5890dfACE66`.
 
@@ -78,7 +78,7 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 ### Build and test
 
 ```bash
-git clone https://github.com/pinhead-io/bitburo_contracts && cd bitburo_contracts
+git clone https://github.com/pinhead-io/bitburo-contracts && cd bitburo-contracts
 git checkout audit-2026-10-01
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
