@@ -172,7 +172,7 @@ The script was run end to end against a local anvil fork of Base on 13 November 
 ### Build and test
 
 ```bash
-git clone https://github.com/pinhead-io/bitburo-contracts && cd bitburo-contracts
+git clone https://github.com/bitburo/bitburo-contracts && cd bitburo-contracts
 git checkout audit-2026-10-01                             # the audited, deployed code; skip for the latest
 git submodule update --init lib/openzeppelin-contracts   # forge-std is vendored
 ~/.foundry/bin/forge build --sizes                        # "forge" on PATH may be another tool
