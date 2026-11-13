@@ -21,6 +21,7 @@ import {
   parseLock,
   parseOwnersFile,
   parseOwnersState,
+  parseWholeNumber,
   withoutOwners,
   pruneExpired,
   recordFailure,
@@ -35,7 +36,7 @@ const ZERO = "0x0000000000000000000000000000000000000000" as Address;
 const policy = { baseSeconds: 3600, maxSeconds: 86_400 };
 
 describe("which owners", () => {
-  const mandate = (targetBps: number, keeper: Address): Mandate => ({ targetBps, lastExecutedAt: 0n, unfinished: false, keeper });
+  const mandate = (targetBps: number, keeper: Address): Mandate => ({ targetBps, keeper });
 
   test("mayRun follows the contract: the owner or the keeper the owner appointed, and only with a mandate", () => {
     expect(mayRun(mandate(8000, KEEPER), OWNER, KEEPER)).toBe(true);
@@ -135,6 +136,19 @@ describe("the price the keeper demands", () => {
   test("a tolerance outside 0-10000 bps is a configuration error", () => {
     expect(() => minAmountOut(1n, -1n)).toThrow("between 0 and 10000");
     expect(() => minAmountOut(1n, 10_001n)).toThrow("between 0 and 10000");
+  });
+});
+
+describe("whole-number settings", () => {
+  test("digits only are accepted", () => {
+    expect(parseWholeNumber("FROM_BLOCK", "0")).toBe(0n);
+    expect(parseWholeNumber("FROM_BLOCK", "52034272")).toBe(52_034_272n);
+  });
+
+  test("empty, negative, decimal, hex and padded text are errors that name the setting", () => {
+    for (const text of ["", "-1", "1.5", "0x10", "1e3", " 5", "ten"]) {
+      expect(() => parseWholeNumber("TOLERANCE_BPS", text)).toThrow("TOLERANCE_BPS must be a whole number >= 0");
+    }
   });
 });
 

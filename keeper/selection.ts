@@ -9,8 +9,8 @@ const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCas
 
 // ─── Which owners ──────────────────────────────────────────────────────────────────────────────────────────────
 
-/** `mandates(owner)` of the Rebalancer. `targetBps` 0 = no mandate. */
-export type Mandate = { targetBps: number; lastExecutedAt: bigint; unfinished: boolean; keeper: Address };
+/** The part of `mandates(owner)` of the Rebalancer that decides who may run. `targetBps` 0 = no mandate. */
+export type Mandate = { targetBps: number; keeper: Address };
 
 /** The contract's own rule: `execute(owner, …)` only accepts the owner or the keeper that owner appointed. */
 export const mayRun = (mandate: Mandate, owner: Address, caller: Address): boolean =>
@@ -48,6 +48,12 @@ export const mergeOwners = (...lists: readonly (readonly Address[])[]): Address[
     out.push(owner);
   }
   return out;
+};
+
+/** An environment setting that is a whole number >= 0. Empty, negative, decimal or non-numeric text is an error. */
+export const parseWholeNumber = (name: string, text: string): bigint => {
+  if (!/^\d+$/.test(text)) throw new Error(`${name} must be a whole number >= 0`);
+  return BigInt(text);
 };
 
 export const chunks = <T>(items: readonly T[], size: number): T[][] => {

@@ -75,6 +75,7 @@ import {
   parseLock,
   parseOwnersFile,
   parseOwnersState,
+  parseWholeNumber,
   pruneExpired,
   recordFailure,
   redactRpcUrl,
@@ -119,11 +120,11 @@ const rebalancer = getAddress(rebalancerInput);
 const dryRun = process.env.DRY_RUN === "1";
 const ownersFile = process.env.OWNERS_FILE;
 const ownersStateFile = env("OWNERS_STATE_FILE", "./keeper-owners.json");
-const fromBlock = process.env.FROM_BLOCK === undefined ? undefined : BigInt(process.env.FROM_BLOCK);
+const fromBlock = process.env.FROM_BLOCK === undefined ? undefined : parseWholeNumber("FROM_BLOCK", process.env.FROM_BLOCK);
 const logRangeBlocks = BigInt(positiveInt("LOG_RANGE_BLOCKS", "5000"));
 const searchSeconds = positiveInt("SEARCH_SECONDS", "120");
 const pageSize = positiveInt("PAGE_SIZE", "50");
-const toleranceBps = BigInt(env("TOLERANCE_BPS", "10"));
+const toleranceBps = parseWholeNumber("TOLERANCE_BPS", env("TOLERANCE_BPS", "10"));
 const gasLimit = BigInt(positiveInt("GAS_LIMIT", "500000"));
 const txWaitSeconds = positiveInt("TX_WAIT_SECONDS", "120");
 const cooldownFile = env("COOLDOWN_FILE", "./keeper-cooldowns.json");
@@ -226,12 +227,15 @@ const failureOf = (error: unknown): Failure => {
 /** First line of an error, with the contract error if there is one. Never the RPC URL (it may hold an API key). */
 const describeError = (error: unknown): string => {
   const reverted = revertOf(error);
-  if (reverted?.data?.errorName) return `${reverted.data.errorName}(${(reverted.data.args ?? []).join(", ")})`;
-  if (reverted?.reason) return reverted.reason;
-  // An error outside the ABI: viem puts its selector on the second line of the message, and only the first is kept.
-  if (reverted?.signature) return `unknown error ${reverted.signature}`;
-  if (error instanceof BaseError) return redactRpcUrl(error.shortMessage, rpcUrl);
-  return redactRpcUrl(String((error as Error)?.message ?? error).split("\n")[0], rpcUrl);
+  const text = (): string => {
+    if (reverted?.data?.errorName) return `${reverted.data.errorName}(${(reverted.data.args ?? []).join(", ")})`;
+    if (reverted?.reason) return reverted.reason;
+    // An error outside the ABI: viem puts its selector on the second line of the message, and only the first is kept.
+    if (reverted?.signature) return `unknown error ${reverted.signature}`;
+    if (error instanceof BaseError) return error.shortMessage;
+    return String((error as Error)?.message ?? error).split("\n")[0];
+  };
+  return redactRpcUrl(text(), rpcUrl);
 };
 
 // ─── 1. Owners ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -292,8 +296,8 @@ const readDue = async (owners: readonly Address[], blockNumber: bigint): Promise
       });
       page.forEach((owner, i) => {
         const dueResult = dues[i];
-        const [targetBps, lastExecutedAt, unfinished, appointed] = mandates[i];
-        const mandate: Mandate = { targetBps, lastExecutedAt, unfinished, keeper: appointed };
+        const [targetBps, , , appointed] = mandates[i];
+        const mandate: Mandate = { targetBps, keeper: appointed };
         if (!mayRun(mandate, owner, keeper)) {
           gone.push(owner);
           return;
@@ -398,7 +402,7 @@ const main = async (): Promise<void> => {
   if (found !== undefined && gone.length > 0) writeFileSync(ownersStateFile, formatOwnersState(withoutOwners(found, gone)));
   console.log(`${owners.length} owners known, ${gone.length} no longer name this keeper, ${due.length} due`);
 
-  const counts: Record<Outcome, number> = { executed: 0, simulated: 0, skipped: 0, cooldown: 0, stop: 0 };
+  const counts = { executed: 0, simulated: 0, skipped: 0, cooldown: 0 };
   try {
     for (const item of due) {
       if (isCoolingDown(cooldowns, item.owner, nowSec())) {
@@ -406,11 +410,11 @@ const main = async (): Promise<void> => {
         continue;
       }
       const { outcome, detail } = await run(item);
-      counts[outcome]++;
       console.log(`${item.owner}: ${outcome}: ${detail}`);
+      if (outcome === "stop") break;
+      counts[outcome]++;
       if (outcome === "executed") cooldowns = clearFailure(cooldowns, item.owner);
       if (outcome === "cooldown") cooldowns = recordFailure(cooldowns, item.owner, nowSec(), detail, cooldownPolicy);
-      if (outcome === "stop") break;
     }
   } finally {
     saveCooldowns();
