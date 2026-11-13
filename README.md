@@ -156,7 +156,7 @@ One run of the script: find the owners that named this keeper (the `MandateSet` 
 
 The first command above is a dry run (`DRY_RUN=1`). It needs no key, sends nothing and writes nothing: it reads `keeper-owners.json` and `keeper-cooldowns.json` but leaves both as they are, and it takes no lock, so it can run next to a real run. Because it does not save how far it searched, every dry run searches the events again from the position in `keeper-owners.json` (from `FROM_BLOCK` without that file), for at most `SEARCH_SECONDS`.
 
-The script was run end to end against a local anvil fork of Base on 17 September 2026 (real router, pool and feeds): it found the owner from the event, ran a buy of 1,000 USDC and a sell of 0.02 cbBTC, found nothing to do in the next run, and forgot an owner that called `stop()`.
+The script was run end to end against a local anvil fork of Base on 13 November 2026 (real router, pool and sequencer feed; after the one-day warp the price feed was replaced by a stand-in with the same answer and a fresh timestamp): it found the owner from the event, ran a buy of 106.94 USDC and a day later a sell of 75.30 USDC, found nothing to do in the next run, forgot an owner that called `stop()`, refused an owners state file of another contract, and wrote nothing in a dry run.
 
 ## Development
 
