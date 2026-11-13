@@ -110,6 +110,8 @@ contract RebalancerForkTest is Test {
         assertEq(address(deployed.USDC()), address(USDC));
         assertEq(address(deployed.CBBTC()), address(CBBTC));
         assertEq(address(deployed.ROUTER()), ROUTER);
+        assertEq(address(deployed.FEED_CBBTC_USD()), FEED_CBBTC_USD);
+        assertEq(address(deployed.SEQUENCER_FEED()), SEQUENCER);
         assertEq(deployed.TREASURY(), treasury);
         assertGt(deployed.quote(), 0);
     }
