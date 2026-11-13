@@ -11,8 +11,11 @@
  *    (searched from FROM_BLOCK in ranges of LOG_RANGE_BLOCKS, for at most SEARCH_SECONDS; OWNERS_STATE_FILE remembers
  *    where the next run continues). That file belongs to one contract and one keeper: a run for another REBALANCER
  *    or keeper refuses it, because continuing from its position would miss the earlier events of the new pair.
- * 2. One Multicall3 per PAGE_SIZE owners: `mandates(owner)` (still ours?) and `isDue(owner)`. Owners that no longer
- *    name this keeper are forgotten; a new `MandateSet` event brings them back.
+ * 2. Two multicalls per PAGE_SIZE owners (Multicall3; viem splits a large one over several requests):
+ *    `mandates(owner)` (still ours?) and `isDue(owner)`, both at the block where the search of step 1 ends. Owners
+ *    that no longer name this keeper are forgotten; a new `MandateSet` event brings them back. A node that has not
+ *    reached that block fails the read and the page is skipped this run: its older state would show an owner with a
+ *    fresh mandate as one that left, and no later event would bring him back.
  * 3. Per due owner: simulate `execute(owner, 0)` with `eth_call`. It returns what the swap yields right now; the
  *    transaction then demands that amount minus TOLERANCE_BPS as `minAmountOut`. So a swap that someone pushes
  *    between the simulation and the transaction reverts instead of trading at the contract's wider Chainlink bound.
@@ -179,10 +182,22 @@ process.on("exit", () => {
     // already gone
   }
 });
-// A run that hangs stops itself before its lock expires.
+/** Read under the lock and before any network work: a damaged file stops the run here, not after the search. */
+let cooldowns: CooldownState = pruneExpired(
+  existsSync(cooldownFile) ? parseCooldownState(readFileSync(cooldownFile, "utf8")) : {},
+  nowSec(),
+  cooldownPolicy.maxSeconds,
+);
+const saveCooldowns = (): void => writeFileSync(cooldownFile, `${JSON.stringify(cooldowns, null, 2)}\n`);
+// A run that hangs stops itself before its lock expires. `process.exit` skips the `finally` in `main`, so the
+// cool-downs of this run are saved here: without the one for too little gas, every run would waste a transaction.
 setTimeout(() => {
   console.error(`run exceeds ${lockWatchdogSeconds(lockMaxSeconds)} s (LOCK_MAX_SECONDS ${lockMaxSeconds}); stopped`);
-  process.exit(1);
+  try {
+    saveCooldowns();
+  } finally {
+    process.exit(1);
+  }
 }, lockWatchdogSeconds(lockMaxSeconds) * 1000).unref();
 
 // ─── Chain access ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -221,13 +236,12 @@ const describeError = (error: unknown): string => {
 
 // ─── 1. Owners ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Owners that named this keeper, from the events. Continues where the previous run stopped. */
-const findOwners = async (): Promise<OwnersState | undefined> => {
+/** Owners that named this keeper, from the events up to `latest`. Continues where the previous run stopped. */
+const findOwners = async (latest: bigint): Promise<OwnersState | undefined> => {
   let state: OwnersState;
   if (existsSync(ownersStateFile)) state = parseOwnersState(readFileSync(ownersStateFile, "utf8"), { rebalancer, keeper });
   else if (fromBlock !== undefined) state = { rebalancer, keeper, nextBlock: fromBlock, owners: [] };
   else return undefined;
-  const latest = await publicClient.getBlockNumber();
   for (const range of logRanges(state.nextBlock, latest, logRangeBlocks)) {
     if (nowSec() - startSeconds >= searchSeconds) {
       console.warn(`search time (${searchSeconds} s) used up at block ${range.fromBlock}; the next run continues there`);
@@ -256,25 +270,29 @@ const findOwners = async (): Promise<OwnersState | undefined> => {
 
 type Due = { owner: Address; usdcDelta: bigint };
 
-/** @returns the due owners, and the owners whose mandate no longer names this keeper. */
-const readDue = async (owners: readonly Address[]): Promise<{ due: Due[]; gone: Address[] }> => {
+/**
+ * Reads at `blockNumber`, the block the search ended at. `mandates` cannot revert, so its multicall throws when the
+ * node fails, a node that has not reached that block included: the page is skipped, and nobody on it counts as gone.
+ * @returns the due owners, and the owners whose mandate no longer names this keeper.
+ */
+const readDue = async (owners: readonly Address[], blockNumber: bigint): Promise<{ due: Due[]; gone: Address[] }> => {
   const due: Due[] = [];
   const gone: Address[] = [];
   for (const page of chunks(owners, pageSize)) {
     try {
       const mandates = await publicClient.multicall({
-        allowFailure: true,
+        allowFailure: false,
+        blockNumber,
         contracts: page.map((owner) => ({ address: rebalancer, abi, functionName: "mandates", args: [owner] }) as const),
       });
       const dues = await publicClient.multicall({
         allowFailure: true,
+        blockNumber,
         contracts: page.map((owner) => ({ address: rebalancer, abi, functionName: "isDue", args: [owner] }) as const),
       });
       page.forEach((owner, i) => {
-        const mandateResult = mandates[i];
         const dueResult = dues[i];
-        if (mandateResult.status !== "success") return;
-        const [targetBps, lastExecutedAt, unfinished, appointed] = mandateResult.result;
+        const [targetBps, lastExecutedAt, unfinished, appointed] = mandates[i];
         const mandate: Mandate = { targetBps, lastExecutedAt, unfinished, keeper: appointed };
         if (!mayRun(mandate, owner, keeper)) {
           gone.push(owner);
@@ -372,14 +390,14 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  const found = await findOwners();
+  // One block for the whole run: the search ends there, and the owners it found are read there.
+  const latest = await publicClient.getBlockNumber();
+  const found = await findOwners(latest);
   const owners = mergeOwners(listedOwners, found?.owners ?? []);
-  const { due, gone } = await readDue(owners);
+  const { due, gone } = await readDue(owners, latest);
   if (found !== undefined && gone.length > 0) writeFileSync(ownersStateFile, formatOwnersState(withoutOwners(found, gone)));
   console.log(`${owners.length} owners known, ${gone.length} no longer name this keeper, ${due.length} due`);
 
-  let cooldowns: CooldownState = existsSync(cooldownFile) ? parseCooldownState(readFileSync(cooldownFile, "utf8")) : {};
-  cooldowns = pruneExpired(cooldowns, nowSec(), cooldownPolicy.maxSeconds);
   const counts: Record<Outcome, number> = { executed: 0, simulated: 0, skipped: 0, cooldown: 0, stop: 0 };
   try {
     for (const item of due) {
@@ -395,7 +413,7 @@ const main = async (): Promise<void> => {
       if (outcome === "stop") break;
     }
   } finally {
-    writeFileSync(cooldownFile, `${JSON.stringify(cooldowns, null, 2)}\n`);
+    saveCooldowns();
   }
   console.log(
     `Done: ${counts.executed} executed, ${counts.simulated} simulated, ${counts.skipped} skipped, ${counts.cooldown} put on cool-down.`,
