@@ -83,8 +83,9 @@ except Exception:
 }
 
 # True when everything that determines the bytecode is, in this working tree, the same as in commit $1.
-# A commit that is not in this clone counts as different.
-same_build_inputs() { git diff --quiet "$1" -- src script lib foundry.toml; }
+# A commit that is not in this clone counts as different. --ignore-submodules=none, so that a personal git setting
+# (diff.ignoreSubmodules) cannot switch off the check on lib/.
+same_build_inputs() { git diff --quiet --ignore-submodules=none "$1" -- src script lib foundry.toml; }
 
 # Lower case with tr: the bash 3.2 that macOS ships has no ${x,,}.
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
