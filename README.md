@@ -49,10 +49,11 @@ The order matters. A keeper that sees your `stop()` before it lands can still pl
 | What | Address | Note |
 |---|---|---|
 | Rebalancer (live) | `0x0C83C3785deF69B25c08b190C607D5890dfACE66` | Live since 1 October 2026, block 52,034,272, tx `0x08c18b0ac3e77c8bec825287867d28ba23e72f5d41823990f87fbfe554731ae2`. Code: `src/` at tag `audit-2026-10-01`. |
+| Rebalancer (retired) | `0x5071C5Bbb4d6A107da98db9b24285836E1AB0396` | Deployed on 1 October 2026, block 52,034,252, tx `0xa404fe85af38271d673ebcc1d5d471ac3eb4ef77b2cdd629e00abb4768b2376f`, just before the live contract and from the same commit. Retired: `retired()` returns `true`, so it can no longer trade. |
 
 **Audit.** [softstack](https://softstack.io/audits/bitburo) audited `src/Rebalancer.sol` and `keeper/keeper.ts` at commit `b5ed2cb` (tag `audit-2026-10-01`), completed on 6 October 2026: 4 findings, 1 low and 3 informational. The report records how each finding was handled. Code that changed after that tag is outside the audit.
 
-**Check it yourself.** The deployed runtime bytecode (6,794 bytes) is identical to a build of the tag apart from the six immutables. Build it with solc `0.8.37`, `via_ir = true`, optimizer 1,000 runs, `evm_version = cancun`, OpenZeppelin Contracts `v5.6.1` and Foundry `1.5.1` (see [Development](#development)).
+**Check it yourself.** The deployed runtime bytecode (6,794 bytes) is identical to a build of the tag apart from the six immutables. Build it with solc `0.8.37`, `via_ir = true`, optimizer 1,000 runs, `evm_version = cancun`, OpenZeppelin Contracts `v5.6.1` and Foundry `1.5.1` (see [Development](#development)). Foundry `1.5.1` is the version the live contract was built with; the test suite also runs on `1.8.5`.
 
 ### External contracts
 
@@ -77,9 +78,9 @@ All on Base, all passed to the constructor and immutable afterwards. The constru
 | `setMandate(targetBps, keeper)` | Set or change your own mandate: the cbBTC share you want (`500`–`9500` bps) and the address that may run your wallet besides yourself (`address(0)` = only you). Does not shorten the interval. Reverts with `ContractRetired` after `retire`. |
 | `stop()` | Revoke your mandate. Always works, also after `retire`. |
 | `execute(owner, minAmountOut) → swapOutput` | One rebalance run. Only `owner` or the keeper that owner appointed; anyone else gets `NotOwnerOrKeeper`. `minAmountOut` can only make the price bound stricter (0 = only the Chainlink bound). Returns what the swap delivered (cbBTC for a buy, USDC before the fee for a sell), so a keeper can simulate with 0 and demand that amount in the transaction. |
-| `isDue(owner) → (bool, int256)` | Would `execute` trade now, and how much USDC (+ buy, − sell, at the Chainlink price)? Same code path as `execute`. Reverts, like `execute`, when the sequencer or the price feed fails. It does not look at the pool: whether the price bound holds only shows when the swap runs, so simulate `execute` before sending it. |
+| `isDue(owner) → (bool, int256)` | Would `execute` trade now, and how much USDC (+ buy, − sell, at the Chainlink price)? It applies the same rule as `execute` (both call `_plan`), but not the checks `execute` does before it: it does not look at who calls, and where `execute` reverts (retired, no mandate, less than a day since the last run, nothing to do) it answers `(false, 0)`. Reverts, like `execute`, when the sequencer or the price feed fails. It does not look at the pool: whether the price bound holds only shows when the swap runs, so simulate `execute` before sending it. |
 | `quote() → uint256` | Chainlink price in USDC base units per cbBTC, with USDC counted as one dollar. |
-| `mandates(owner) → (targetBps, lastExecutedAt, unfinished, keeper)` | The stored mandate. `targetBps` 0 = none. `unfinished` = the last run left at least 2 USDC of its correction undone. |
+| `mandates(owner) → (targetBps, lastExecutedAt, unfinished, keeper)` | The stored mandate. `targetBps` 0 = none. `unfinished` = the last run left at least 2 USDC of its correction undone. The flag stays stored until the next run, `setMandate` or `stop`, but the rule ignores it once two days have passed since that run. |
 | `sweep(token)` | Forwards the contract's whole balance of `token` to the treasury: the collected USDC fees, or tokens sent there by mistake. Anyone may call it. |
 | `retire()` / `retired()` | Irreversible kill switch, only `TREASURY`. After it `execute` and `setMandate` revert and `isDue` reports nothing; `stop` and `sweep` keep working. It cannot touch funds or allowances. |
 
@@ -149,7 +150,11 @@ bun test            # the pure logic in selection.ts and the lock
 bun run typecheck
 ```
 
-One run of the script: find the owners that named this keeper (the `MandateSet` events from `FROM_BLOCK`, remembered in `keeper-owners.json`, plus an optional `OWNERS_FILE`), ask `mandates` and `isDue` per page in a Multicall3 (owners that no longer name this keeper are forgotten, so that events naming it for empty or foreign wallets do not make the list grow for ever), simulate `execute(owner, 0)` for every due owner, and send `execute(owner, simulated output − TOLERANCE_BPS)` as a plain transaction. Market and oracle conditions and a state that changed since `isDue` are skipped until the next run; any other revert, and a transaction that ran out of `GAS_LIMIT`, puts the owner on a cool-down that doubles per failure (`keeper-cooldowns.json`). One run at a time (`keeper.lock`), and nothing is sent while an earlier transaction of the key is still pending. The contract allows one run per owner per day, so every 10 to 60 minutes is plenty. All settings: the header of `keeper/keeper.ts`.
+One run of the script: find the owners that named this keeper (the `MandateSet` events from `FROM_BLOCK`, remembered in `keeper-owners.json`, plus an optional `OWNERS_FILE`), read `mandates` and `isDue` for them in two multicalls per page of owners (Multicall3; viem splits a large one over several requests), both at the block the event search runs up to (owners that no longer name this keeper are forgotten, so that events naming it for empty or foreign wallets do not make the list grow for ever; when the node has not reached that block yet, the read fails and the page is skipped for this run instead of its owners being forgotten), simulate `execute(owner, 0)` for every due owner, and send `execute(owner, simulated output − TOLERANCE_BPS)` as a plain transaction. Market and oracle conditions and a state that changed since `isDue` are skipped until the next run, and `ContractRetired` ends the run; every other revert, also one the keeper cannot decode (an error of a token, the router or a feed), and a transaction that ran out of `GAS_LIMIT`, puts the owner on a cool-down that doubles per failure (`keeper-cooldowns.json`). One run at a time (`keeper.lock`), and nothing is sent while an earlier transaction of the key is still pending. The contract allows one run per owner per day, so every 10 to 60 minutes is plenty. All settings: the header of `keeper/keeper.ts`.
+
+`keeper-owners.json` belongs to one contract and one keeper: it stores both addresses next to the owners and the block the search continues from. A run with another `REBALANCER` or another keeper refuses the file and stops, as it does with a file from an earlier version of the script, which holds no addresses. After a redeploy or a change of keeper, delete the file or point `OWNERS_STATE_FILE` at a new one; the search then starts at `FROM_BLOCK` again, which only counts while there is no such file.
+
+The first command above is a dry run (`DRY_RUN=1`). It needs no key, sends nothing and writes nothing: it reads `keeper-owners.json` and `keeper-cooldowns.json` but leaves both as they are, and it takes no lock, so it can run next to a real run. Because it does not save how far it searched, every dry run searches the events again from the position in `keeper-owners.json` (from `FROM_BLOCK` without that file), for at most `SEARCH_SECONDS`.
 
 The script was run end to end against a local anvil fork of Base on 17 September 2026 (real router, pool and feeds): it found the owner from the event, ran a buy of 1,000 USDC and a sell of 0.02 cbBTC, found nothing to do in the next run, and forgot an owner that called `stop()`.
 
@@ -179,7 +184,7 @@ FOUNDRY_INVARIANT_RUNS=1000 FOUNDRY_INVARIANT_DEPTH=100 ~/.foundry/bin/forge tes
 cd keeper && bun install && bun test && bunx tsc --noEmit
 ```
 
-The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`). Fork tests that need an honest run to pass skip themselves when the pool stands more than 0.40% from the feed at that block. Under `via_ir` Solidity caches `block.timestamp` within a test function, so after `vm.warp` use `vm.getBlockTimestamp()`.
+The fork suite reads `BASE_RPC_URL` (default `https://mainnet.base.org`). Fork tests that need an honest run to pass skip themselves when the pool stands too far from the feed at that block: more than 0.40% in general, and more than 0.20% for the buy of 100,000 USDC, which needs room for its own price impact. Under `via_ir` Solidity caches `block.timestamp` within a test function, so after `vm.warp` use `vm.getBlockTimestamp()`.
 
 ### Deploying
 
@@ -191,7 +196,13 @@ DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh go
 DEPLOYER_ACCOUNT=bitburo-deployer bash deploy-mainnet.sh verify
 ```
 
-`dry` runs the on-chain checks the constructor does not do and prints `quote()` and the treasury as the contract would store it. `go` refuses as long as there is already a deploy in `broadcast/`; use `FORCE_REDEPLOY=1` for a deliberate new deployment. `verify` refuses on another commit than the deployed one or with uncommitted changes in `src/` or `script/`. A test deployment with `forge script --broadcast` against a local fork with chain id 8453 also writes `broadcast/Deploy.s.sol/8453/run-latest.json`, the record `verify` relies on; point `FOUNDRY_BROADCAST` and `FOUNDRY_CACHE_PATH` somewhere else for that.
+`dry` runs the on-chain checks the constructor does not do and prints `quote()` and the treasury as the contract would store it. A deploy record in `broadcast/` that exists but cannot be read, or holds no contract address, stops `go` and `verify`.
+
+`go` deploys for real. It refuses when `src/`, `script/`, `lib/` or `foundry.toml` differ from HEAD, because the deploy record names HEAD as the deployed source (files that were never added to git are not seen). It also refuses when `broadcast/` already holds a deploy, unless `REPLACES=<address>` names the contract in that record. After a successful `go` the record holds the new address, so the same command is refused the next time. A new contract does not switch the old one off: the old contract keeps working for the owner or the keeper that owner appointed until the treasury calls `retire()` on it. Replacing it means `retire()` on the old one, the new address in the app and in this README, and a new mandate from every user.
+
+`verify` refuses when `src/`, `script/`, `lib/` or `foundry.toml` in the working tree differ from the commit in the deploy record, or when that commit is not in the clone; the checked-out commit itself does not have to be that one. For the live contract `verify` is refused on the current code, because `foundry.toml` has changed since the deploy: check out commit `c2e5eb0`, the commit in the deploy record, and run it there.
+
+A test deployment with `forge script --broadcast` against a local fork with chain id 8453 also writes `broadcast/Deploy.s.sol/8453/run-latest.json`, the record `go` and `verify` rely on; point `FOUNDRY_BROADCAST` and `FOUNDRY_CACHE_PATH` somewhere else for that.
 
 ## Security
 
