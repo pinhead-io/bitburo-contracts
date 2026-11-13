@@ -1,7 +1,7 @@
 /**
  * Pure logic of the keeper script: no network, no files, no clock. Everything here is covered by `selection.test.ts`.
  */
-import { type Address, isAddress } from "viem";
+import { type Address, getAddress, isAddress } from "viem";
 
 export const BPS = 10_000n;
 
@@ -9,8 +9,8 @@ const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCas
 
 // ─── Which owners ──────────────────────────────────────────────────────────────────────────────────────────────
 
-/** `mandates(owner)` of the Rebalancer. `targetBps` 0 = no mandate. */
-export type Mandate = { targetBps: number; lastExecutedAt: bigint; unfinished: boolean; keeper: Address };
+/** The part of `mandates(owner)` of the Rebalancer that decides who may run. `targetBps` 0 = no mandate. */
+export type Mandate = { targetBps: number; keeper: Address };
 
 /** The contract's own rule: `execute(owner, …)` only accepts the owner or the keeper that owner appointed. */
 export const mayRun = (mandate: Mandate, owner: Address, caller: Address): boolean =>
@@ -50,6 +50,12 @@ export const mergeOwners = (...lists: readonly (readonly Address[])[]): Address[
   return out;
 };
 
+/** An environment setting that is a whole number >= 0. Empty, negative, decimal or non-numeric text is an error. */
+export const parseWholeNumber = (name: string, text: string): bigint => {
+  if (!/^\d+$/.test(text)) throw new Error(`${name} must be a whole number >= 0`);
+  return BigInt(text);
+};
+
 export const chunks = <T>(items: readonly T[], size: number): T[][] => {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
@@ -58,20 +64,39 @@ export const chunks = <T>(items: readonly T[], size: number): T[][] => {
 
 // ─── Finding owners in the MandateSet events ───────────────────────────────────────────────────────────────────
 
-/** What the keeper remembers between runs: the owners it found and the first block it has not searched yet. */
-export type OwnersState = { nextBlock: bigint; owners: Address[] };
+/**
+ * What the keeper remembers between runs: the owners it found and the first block it has not searched yet, for one
+ * contract and one keeper. The search only looks at the events of that pair, so the position means nothing for another.
+ */
+export type OwnersState = { rebalancer: Address; keeper: Address; nextBlock: bigint; owners: Address[] };
 
-/** State from the file, or a fresh state that starts at `fromBlock`. Garbage is an error: never search from 0 by accident. */
-export const parseOwnersState = (json: string | undefined, fromBlock: bigint): OwnersState => {
-  if (json === undefined) return { nextBlock: fromBlock, owners: [] };
+/**
+ * State from the file. Garbage is an error: never search from 0 by accident. A file of another contract or keeper
+ * (or one that names neither) is an error too: continuing from its `nextBlock` would never read the earlier events of
+ * this pair, and those owners would silently not be served.
+ */
+export const parseOwnersState = (json: string, expected: { rebalancer: Address; keeper: Address }): OwnersState => {
   const parsed: unknown = JSON.parse(json);
   if (parsed === null || typeof parsed !== "object") throw new Error("owners state file is not a JSON object");
-  const { nextBlock, owners } = parsed as { nextBlock?: unknown; owners?: unknown };
+  const { rebalancer, keeper, nextBlock, owners } = parsed as Record<string, unknown>;
+  const is = (value: unknown, address: Address): boolean =>
+    typeof value === "string" && isAddress(value, { strict: false }) && getAddress(value) === getAddress(address);
+  if (!is(rebalancer, expected.rebalancer) || !is(keeper, expected.keeper)) {
+    throw new Error(
+      `owners state file is not for contract ${expected.rebalancer} and keeper ${expected.keeper}: ` +
+        "delete the file or set OWNERS_STATE_FILE to another one",
+    );
+  }
   if (typeof nextBlock !== "string" || !/^\d+$/.test(nextBlock)) throw new Error("owners state file: invalid nextBlock");
   if (!Array.isArray(owners) || !owners.every((o) => typeof o === "string" && isAddress(o, { strict: false }))) {
     throw new Error("owners state file: invalid owners");
   }
-  return { nextBlock: BigInt(nextBlock), owners: owners as Address[] };
+  return {
+    rebalancer: expected.rebalancer,
+    keeper: expected.keeper,
+    nextBlock: BigInt(nextBlock),
+    owners: owners as Address[],
+  };
 };
 
 /**
@@ -81,11 +106,11 @@ export const parseOwnersState = (json: string | undefined, fromBlock: bigint): O
  */
 export const withoutOwners = (state: OwnersState, gone: readonly Address[]): OwnersState => {
   const drop = new Set(gone.map((owner) => owner.toLowerCase()));
-  return { nextBlock: state.nextBlock, owners: state.owners.filter((owner) => !drop.has(owner.toLowerCase())) };
+  return { ...state, owners: state.owners.filter((owner) => !drop.has(owner.toLowerCase())) };
 };
 
 export const formatOwnersState = (state: OwnersState): string =>
-  `${JSON.stringify({ nextBlock: state.nextBlock.toString(), owners: state.owners }, null, 2)}\n`;
+  `${JSON.stringify({ ...state, nextBlock: state.nextBlock.toString() }, null, 2)}\n`;
 
 /** Inclusive block ranges of at most `step` blocks from `from` up to and including `to`. Empty if `from` > `to`. */
 export const logRanges = (from: bigint, to: bigint, step: bigint): { fromBlock: bigint; toBlock: bigint }[] => {
@@ -111,8 +136,14 @@ export const minAmountOut = (simulatedOut: bigint, toleranceBps: bigint): bigint
 
 // ─── What to do after a failure ────────────────────────────────────────────────────────────────────────────────
 
-/** A failed simulation or transaction: the decoded contract error, a revert reason string, or neither (node error). */
-export type Failure = { errorName?: string; reason?: string };
+/**
+ * A failed simulation or transaction.
+ * - "node": the node reported no revert (network, rate limit, timeout);
+ * - "contract": a revert with an error the keeper can name;
+ * - "revert": every other revert: a plain `revert("…")` with its reason, or an error the keeper cannot decode (of a
+ *   token, the router or a feed), which has none.
+ */
+export type Failure = { kind: "node" } | { kind: "contract"; errorName: string } | { kind: "revert"; reason?: string };
 
 /**
  * - "skip": nothing is wrong with the owner, try again next run. Market and oracle conditions (the price bound, a
@@ -120,7 +151,8 @@ export type Failure = { errorName?: string; reason?: string };
  *   into the band, the owner replaced the keeper), and node errors.
  * - "stop": the contract has been retired; no run will ever succeed again.
  * - "cooldown": everything else reverts for a reason that will not go away by itself (a blacklisted owner, a paused
- *   token); the owner is skipped for a while, doubling per failure, so that it does not cost a simulation every run.
+ *   token), or for a reason the keeper cannot read; the owner is skipped for a while, doubling per failure, so that
+ *   it does not cost a simulation every run.
  */
 export type FailureAction = "skip" | "stop" | "cooldown";
 
@@ -137,16 +169,18 @@ const SKIP_ERRORS: readonly string[] = [
 /** Uniswap's own message when `amountOutMinimum` is not met: the same condition as OutsidePriceBounds. */
 const SKIP_REASONS: readonly string[] = ["Too little received"];
 
-/** viem decodes a plain `revert("…")` as the built-in error `Error(string)`: the name says nothing, the reason does. */
-const STRING_REVERT = "Error";
-
 export const failureAction = (failure: Failure): FailureAction => {
-  if (failure.errorName === "ContractRetired") return "stop";
-  if (failure.errorName !== undefined && failure.errorName !== STRING_REVERT) {
-    return SKIP_ERRORS.includes(failure.errorName) ? "skip" : "cooldown";
+  switch (failure.kind) {
+    case "node":
+      return "skip";
+    case "contract":
+      if (failure.errorName === "ContractRetired") return "stop";
+      return SKIP_ERRORS.includes(failure.errorName) ? "skip" : "cooldown";
+    case "revert": {
+      const reason = failure.reason ?? "";
+      return SKIP_REASONS.some((skip) => reason.includes(skip)) ? "skip" : "cooldown";
+    }
   }
-  if (failure.reason !== undefined) return SKIP_REASONS.some((r) => failure.reason?.includes(r)) ? "skip" : "cooldown";
-  return failure.errorName === undefined ? "skip" : "cooldown";
 };
 
 /** Is one of our own transactions still pending? Then a new one would queue behind it; send nothing this run. */
@@ -232,8 +266,8 @@ export type LockInfo = { pid: number; startedAt: number };
 
 export const formatLock = (lock: LockInfo): string => `${JSON.stringify(lock)}\n`;
 
-/** Lock from the file. Unreadable content gives `startedAt` = `fallbackStartedAt` (the file's mtime), so it has an age. */
-export const parseLock = (text: string, fallbackStartedAt: number): LockInfo => {
+/** Lock from the file, or `undefined` if the content is not a lock (empty, cut off, anything else). */
+export const parseLock = (text: string): LockInfo | undefined => {
   try {
     const parsed: unknown = JSON.parse(text);
     if (
@@ -245,10 +279,9 @@ export const parseLock = (text: string, fallbackStartedAt: number): LockInfo => 
       return { pid: (parsed as LockInfo).pid, startedAt: (parsed as LockInfo).startedAt };
     }
   } catch {
-    // garbage
+    // not JSON
   }
-  const pid = Number(text.trim());
-  return { pid: Number.isInteger(pid) ? pid : 0, startedAt: fallbackStartedAt };
+  return undefined;
 };
 
 /**

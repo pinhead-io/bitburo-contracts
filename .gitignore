@@ -10,19 +10,15 @@ broadcast/
 
 # Node / Bun
 node_modules/
-dist/
-*.wasm
-.cre_build_tmp.*
 
 # OS / editors
 .DS_Store
 
-# Agent-skills (lokaal, niet in de repo)
+# Agent skills (local, not in the repo)
 .agents/
 .claude/
 skills-lock.json
 .mcp.json
 
-*.sh
 # Slither MCP cache
 artifacts/

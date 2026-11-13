@@ -21,6 +21,7 @@ import {
   parseLock,
   parseOwnersFile,
   parseOwnersState,
+  parseWholeNumber,
   withoutOwners,
   pruneExpired,
   recordFailure,
@@ -30,11 +31,12 @@ import {
 const OWNER = "0xAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
 const OTHER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
 const KEEPER = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
+const REBALANCER = "0xdddddddddddddddddddddddddddddddddddddddd" as Address;
 const ZERO = "0x0000000000000000000000000000000000000000" as Address;
 const policy = { baseSeconds: 3600, maxSeconds: 86_400 };
 
 describe("which owners", () => {
-  const mandate = (targetBps: number, keeper: Address): Mandate => ({ targetBps, lastExecutedAt: 0n, unfinished: false, keeper });
+  const mandate = (targetBps: number, keeper: Address): Mandate => ({ targetBps, keeper });
 
   test("mayRun follows the contract: the owner or the keeper the owner appointed, and only with a mandate", () => {
     expect(mayRun(mandate(8000, KEEPER), OWNER, KEEPER)).toBe(true);
@@ -79,24 +81,47 @@ describe("finding owners in the events", () => {
     expect(() => logRanges(0n, 10n, 0n)).toThrow("at least 1 block");
   });
 
-  test("the state file round-trips; without a file the search starts at FROM_BLOCK", () => {
-    const state = { nextBlock: 51_500_000n, owners: [getAddress(OWNER), OTHER] };
-    expect(parseOwnersState(formatOwnersState(state), 1n)).toEqual(state);
-    expect(parseOwnersState(undefined, 51_400_000n)).toEqual({ nextBlock: 51_400_000n, owners: [] });
+  const pair = { rebalancer: getAddress(REBALANCER), keeper: getAddress(KEEPER) };
+  const state = { ...pair, nextBlock: 51_500_000n, owners: [getAddress(OWNER), OTHER] };
+  const file = (fields: object): string => JSON.stringify({ ...pair, nextBlock: "12", owners: [], ...fields });
+  const REFUSED = "delete the file or set OWNERS_STATE_FILE";
+
+  test("the state file round-trips, however its contract and keeper are spelled", () => {
+    expect(parseOwnersState(formatOwnersState(state), pair)).toEqual(state);
+    // Compared as addresses, not as text: lower case in the file or in the configuration is the same pair.
+    expect(parseOwnersState(file({ rebalancer: REBALANCER, keeper: KEEPER }), pair)).toEqual({ ...pair, nextBlock: 12n, owners: [] });
+    expect(parseOwnersState(formatOwnersState(state), { rebalancer: REBALANCER, keeper: KEEPER }).nextBlock).toBe(51_500_000n);
   });
 
-  test("owners that no longer name this keeper are forgotten; the search position stays", () => {
-    const state = { nextBlock: 51_500_000n, owners: [getAddress(OWNER), OTHER] };
-    expect(withoutOwners(state, [OWNER.toLowerCase() as Address])).toEqual({ nextBlock: 51_500_000n, owners: [OTHER] });
+  test("a state file of another contract is refused: its search position says nothing about this one", () => {
+    expect(() => parseOwnersState(formatOwnersState(state), { ...pair, rebalancer: OTHER })).toThrow(REFUSED);
+    expect(() => parseOwnersState(file({ rebalancer: "0x123" }), pair)).toThrow(REFUSED);
+  });
+
+  test("a state file of another keeper is refused", () => {
+    expect(() => parseOwnersState(formatOwnersState(state), { ...pair, keeper: OTHER })).toThrow(REFUSED);
+    expect(() => parseOwnersState(file({ keeper: 12 }), pair)).toThrow(REFUSED);
+  });
+
+  test("a state file that names no contract and keeper is refused the same way", () => {
+    expect(() => parseOwnersState('{"nextBlock":"12","owners":[]}', pair)).toThrow(REFUSED);
+    expect(() => parseOwnersState(file({ keeper: undefined }), pair)).toThrow(REFUSED);
+  });
+
+  test("owners that no longer name this keeper are forgotten; contract, keeper and search position stay", () => {
+    expect(withoutOwners(state, [OWNER.toLowerCase() as Address])).toEqual({ ...pair, nextBlock: 51_500_000n, owners: [OTHER] });
     expect(withoutOwners(state, [])).toEqual(state);
+    // What is written after forgetting is still accepted for the same contract and keeper.
+    expect(parseOwnersState(formatOwnersState(withoutOwners(state, [OTHER])), pair).owners).toEqual([getAddress(OWNER)]);
   });
 
   test("a damaged state file is an error, never a silent search from block 0", () => {
-    expect(() => parseOwnersState("null", 1n)).toThrow("not a JSON object");
-    expect(() => parseOwnersState('{"nextBlock":12,"owners":[]}', 1n)).toThrow("invalid nextBlock");
-    expect(() => parseOwnersState('{"nextBlock":"-1","owners":[]}', 1n)).toThrow("invalid nextBlock");
-    expect(() => parseOwnersState('{"nextBlock":"12","owners":["0x123"]}', 1n)).toThrow("invalid owners");
-    expect(() => parseOwnersState("not json", 1n)).toThrow();
+    expect(() => parseOwnersState("null", pair)).toThrow("not a JSON object");
+    expect(() => parseOwnersState(file({ nextBlock: 12 }), pair)).toThrow("invalid nextBlock");
+    expect(() => parseOwnersState(file({ nextBlock: "-1" }), pair)).toThrow("invalid nextBlock");
+    expect(() => parseOwnersState(file({ nextBlock: "" }), pair)).toThrow("invalid nextBlock");
+    expect(() => parseOwnersState(file({ owners: ["0x123"] }), pair)).toThrow("invalid owners");
+    expect(() => parseOwnersState("not json", pair)).toThrow();
   });
 });
 
@@ -114,42 +139,50 @@ describe("the price the keeper demands", () => {
   });
 });
 
+describe("whole-number settings", () => {
+  test("digits only are accepted", () => {
+    expect(parseWholeNumber("FROM_BLOCK", "0")).toBe(0n);
+    expect(parseWholeNumber("FROM_BLOCK", "52034272")).toBe(52_034_272n);
+  });
+
+  test("empty, negative, decimal, hex and padded text are errors that name the setting", () => {
+    for (const text of ["", "-1", "1.5", "0x10", "1e3", " 5", "ten"]) {
+      expect(() => parseWholeNumber("TOLERANCE_BPS", text)).toThrow("TOLERANCE_BPS must be a whole number >= 0");
+    }
+  });
+});
+
 describe("what to do after a failure", () => {
   test("market and oracle conditions are skipped until the next run, without a cool-down", () => {
     for (const errorName of ["OutsidePriceBounds", "StaleFeed", "SequencerDown", "InvalidFeedAnswer"]) {
-      expect(failureAction({ errorName })).toBe("skip");
+      expect(failureAction({ kind: "contract", errorName })).toBe("skip");
     }
-    expect(failureAction({ reason: "Too little received" })).toBe("skip");
-  });
-
-  test("a plain revert string is judged by its reason: viem names every one of them Error", () => {
-    expect(failureAction({ errorName: "Error", reason: "Too little received" })).toBe("skip");
-    expect(failureAction({ errorName: "Error", reason: "Blacklistable: account is blacklisted" })).toBe("cooldown");
-    expect(failureAction({ errorName: "Error" })).toBe("cooldown");
-    expect(failureAction({ errorName: "Panic", reason: "Arithmetic operation resulted in underflow or overflow." })).toBe(
-      "cooldown",
-    );
+    expect(failureAction({ kind: "revert", reason: "Too little received" })).toBe("skip");
   });
 
   test("a state that changed since isDue is skipped: someone else ran it, the band, a replaced keeper", () => {
     for (const errorName of ["NotDue", "NothingToDo", "Inactive", "NotOwnerOrKeeper"]) {
-      expect(failureAction({ errorName })).toBe("skip");
+      expect(failureAction({ kind: "contract", errorName })).toBe("skip");
     }
   });
 
   test("a retired contract stops the run", () => {
-    expect(failureAction({ errorName: "ContractRetired" })).toBe("stop");
+    expect(failureAction({ kind: "contract", errorName: "ContractRetired" })).toBe("stop");
   });
 
   test("a revert that will not go away by itself gets a cool-down", () => {
-    expect(failureAction({ reason: "Blacklistable: account is blacklisted" })).toBe("cooldown");
-    expect(failureAction({ reason: "Pausable: paused" })).toBe("cooldown");
-    expect(failureAction({ errorName: "SafeERC20FailedOperation" })).toBe("cooldown");
-    expect(failureAction({ errorName: "SomethingNew" })).toBe("cooldown");
+    expect(failureAction({ kind: "revert", reason: "Blacklistable: account is blacklisted" })).toBe("cooldown");
+    expect(failureAction({ kind: "revert", reason: "Pausable: paused" })).toBe("cooldown");
+    expect(failureAction({ kind: "contract", errorName: "InvalidTarget" })).toBe("cooldown");
+    expect(failureAction({ kind: "contract", errorName: "Panic" })).toBe("cooldown");
+  });
+
+  test("a revert the keeper cannot decode gets a cool-down too: it has no name and no reason", () => {
+    expect(failureAction({ kind: "revert" })).toBe("cooldown");
   });
 
   test("a node error is not the owner's fault", () => {
-    expect(failureAction({})).toBe("skip");
+    expect(failureAction({ kind: "node" })).toBe("skip");
   });
 
   test("with an own transaction still pending nothing new is sent", () => {
@@ -221,11 +254,12 @@ describe("cool-down", () => {
 describe("lock", () => {
   const alive = (pids: number[]) => (pid: number) => pids.includes(pid);
 
-  test("the lock stores pid and start time and reads back; unreadable content gets the file time", () => {
+  test("the lock stores pid and start time and reads back; anything else is not a lock", () => {
     const lock = { pid: 4242, startedAt: 1_789_600_000 };
-    expect(parseLock(formatLock(lock), 0)).toEqual(lock);
-    expect(parseLock("4242\n", 1_789_500_000)).toEqual({ pid: 4242, startedAt: 1_789_500_000 });
-    expect(parseLock("garbage", 7)).toEqual({ pid: 0, startedAt: 7 });
+    expect(parseLock(formatLock(lock))).toEqual(lock);
+    for (const text of ["", "garbage", "4242\n", '{"pid":4242}', '{"pid":4242,"startedAt":']) {
+      expect(parseLock(text)).toBeUndefined();
+    }
   });
 
   test("a young lock of a live pid holds; of a dead pid it is stale", () => {

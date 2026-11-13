@@ -34,8 +34,8 @@ abstract contract RebalancerTestBase is Test {
         vm.warp(1_790_000_000);
         usdc = new MockERC20("USD Coin", "USDC", 6);
         cbbtc = new MockERC20("Coinbase Wrapped BTC", "cbBTC", 8);
-        feed = new MockAggregator(8, "cbBTC / USD");
-        sequencer = new MockAggregator(0, "L2 Sequencer Uptime Status Feed");
+        feed = new MockAggregator(8);
+        sequencer = new MockAggregator(0);
         router = new MockRouter(address(usdc), address(cbbtc), PRICE);
         _setPrice(PRICE);
         r = _deploy();
@@ -118,17 +118,17 @@ contract RebalancerTest is RebalancerTestBase {
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedDecimals.selector, address(cbbtc)));
         new Rebalancer(address(cbbtc), address(usdc), address(router), address(feed), address(sequencer), treasury);
 
-        MockAggregator feed18 = new MockAggregator(18, "cbBTC / USD");
+        MockAggregator feed18 = new MockAggregator(18);
         vm.expectRevert(abi.encodeWithSelector(Rebalancer.UnexpectedDecimals.selector, address(feed18)));
         new Rebalancer(address(usdc), address(cbbtc), address(router), address(feed18), address(sequencer), treasury);
     }
 
     function test_constructor_rejectsDeadFeeds() public {
-        MockAggregator silent = new MockAggregator(8, "cbBTC / USD"); // answer 0, never updated
+        MockAggregator silent = new MockAggregator(8); // answer 0, never updated
         vm.expectRevert(Rebalancer.InvalidFeedAnswer.selector);
         new Rebalancer(address(usdc), address(cbbtc), address(router), address(silent), address(sequencer), treasury);
 
-        MockAggregator noSequencer = new MockAggregator(0, "uptime"); // startedAt 0
+        MockAggregator noSequencer = new MockAggregator(0); // startedAt 0
         vm.expectRevert(Rebalancer.SequencerDown.selector);
         new Rebalancer(address(usdc), address(cbbtc), address(router), address(feed), address(noSequencer), treasury);
 
@@ -1079,7 +1079,8 @@ contract ReentrantToken {
 
 // ─── Invariants ────────────────────────────────────────────────────────────────────────────────────────────
 
-/// @dev Random owners, callers, prices, pool deviations, allowances, donations, sweeps and (optionally) `retire`.
+/// @dev Random owners, callers, prices, pool deviations, partial fills, a router that skips its minimum, allowances,
+///      donations, sweeps and (optionally) `retire`.
 contract RebalancerHandler is Test {
     uint256 internal constant BPS = 10_000;
 
@@ -1100,7 +1101,6 @@ contract RebalancerHandler is Test {
     uint256 public donatedBtc;
     uint256 public sweptUsdc;
     uint256 public sweptBtc;
-    uint256 public runs;
     mapping(address owner => uint256) internal lastRunAt;
     bool public strangerRan;
     bool public intervalBroken;
@@ -1194,7 +1194,6 @@ contract RebalancerHandler is Test {
         vm.recordLogs();
         vm.prank(caller);
         try R.execute(owner, minOutSeed % 3 == 0 ? 0 : minOutSeed % 1000) {
-            runs++;
             if (caller != owner && caller != appointed) strangerRan = true;
             if (wasRetired) ranAfterRetire = true;
             uint256 nowTs = vm.getBlockTimestamp();
@@ -1237,6 +1236,17 @@ contract RebalancerHandler is Test {
     /// @dev The pool away from the feed, in either direction, also beyond the bound.
     function setPoolDeviation(int256 bps) external {
         ROUTER.setWorseBps(bound(bps, -75, 75));
+    }
+
+    /// @dev A pool that runs dry and takes only part of the input. No run may get through then, so three in four
+    ///      calls put the pool back to taking all of it, otherwise most sequences would stop trading.
+    function setPoolFill(uint256 bps, uint8 rarely) external {
+        ROUTER.setFillBps(rarely % 4 == 0 ? bound(bps, 0, BPS - 1) : BPS);
+    }
+
+    /// @dev A router that does not enforce the minimum output: only the contract's own bound stands in the way.
+    function setRouterIgnoresMinimum(bool value) external {
+        ROUTER.setIgnoreMinimum(value);
     }
 
     function warp(uint256 dt) external {

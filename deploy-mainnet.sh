@@ -3,8 +3,14 @@
 #
 # Modes:
 #   dry     simulates the deploy, sends nothing
-#   go      deploys for real; refuses if there is already a deploy in broadcast/
-#   verify  verifies the latest broadcast on Basescan
+#   go      deploys for real. Refuses when broadcast/ already holds a deploy, unless
+#           REPLACES=<address> names the contract in that record, and when src, script,
+#           lib or foundry.toml differ from HEAD
+#   verify  verifies the latest broadcast on Basescan. Refuses when src, script, lib or
+#           foundry.toml differ from the commit in the deploy record
+#
+# A deploy record that exists but cannot be read, or holds no contract address, stops
+# go and verify: it is not treated as "no deploy".
 #
 # The treasury address comes from the environment: BITBURO_TREASURY=0x…
 #
@@ -45,20 +51,23 @@ fi
 
 # ─── Helper functions ───────────────────────────────────────────────────────
 
-# The address from the latest broadcast, or empty if no deploy has been recorded.
+# The address in the deploy record. Fails when the record cannot be read or holds no contract address.
 deployed_address() {
-  [ -f "$BROADCAST" ] || return 0
   python3 -c "
 import json, sys
-try:
-    d = json.load(open('$BROADCAST'))
-except Exception:
-    sys.exit(0)
-for t in d.get('transactions', []):
+for t in json.load(open('$BROADCAST'))['transactions']:
     if t.get('contractAddress'):
         print(t['contractAddress'])
-        break
+        sys.exit(0)
+sys.exit(1)
 " 2>/dev/null
+}
+
+# A record that is there but cannot be used says nothing about what is on chain, so the script stops.
+unusable_record() {
+  echo "$BROADCAST exists, but it cannot be read or holds no contract address." >&2
+  echo "Restore the record first; this script does not guess what was deployed." >&2
+  exit 1
 }
 
 # The commit from which the latest broadcast was run.
@@ -73,6 +82,13 @@ except Exception:
 " 2>/dev/null
 }
 
+# True when everything that determines the bytecode is, in this working tree, the same as in commit $1.
+# A commit that is not in this clone counts as different.
+same_build_inputs() { git diff --quiet "$1" -- src script lib foundry.toml; }
+
+# Lower case with tr: the bash 3.2 that macOS ships has no ${x,,}.
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 # ─── Modes ──────────────────────────────────────────────────────────────────
 
 if [ "$MODE" = "dry" ]; then
@@ -82,8 +98,16 @@ if [ "$MODE" = "dry" ]; then
 fi
 
 if [ "$MODE" = "go" ]; then
-  EXISTING="$(deployed_address)"
-  if [ -n "$EXISTING" ] && [ "${FORCE_REDEPLOY:-}" != "1" ]; then
+  EXISTING=""
+  # -L too: a symlink whose target is gone is a record that cannot be read, not "no deploy".
+  if [ -e "$BROADCAST" ] || [ -L "$BROADCAST" ]; then
+    EXISTING="$(deployed_address)" || unusable_record
+  fi
+  if [ -n "$EXISTING" ] && [ "$(lower "${REPLACES:-}")" != "$(lower "$EXISTING")" ]; then
+    if [ -n "${REPLACES:-}" ]; then
+      echo "REPLACES names $REPLACES, which is not the contract in the deploy record." >&2
+      echo >&2
+    fi
     cat >&2 <<MSG
 There is already a deploy in $BROADCAST:
 
@@ -91,21 +115,31 @@ There is already a deploy in $BROADCAST:
   commit  $(deployed_commit)
 
 This mode is not idempotent: running it again puts a second, separate contract on
-mainnet that knows nothing about the first. Users keep their allowance on the
-old address, which remains permissionlessly executable.
+mainnet that knows nothing about the first. The old contract keeps working: for
+every wallet with a mandate, the owner or the keeper that owner appointed can
+still run it, until the treasury calls retire() on it.
 
-If you really want a new contract, it needs a plan (see issue #7):
-the new address in the app, the old one in legacy_addresses, and users who
-approve again. Write down $EXISTING somewhere outside this machine first; the
-broadcast/ directory is in .gitignore.
+A new contract means: retire() on the old one, the new address in the app and in
+README.md, and every user giving a new mandate to the new contract. Write down
+the old address somewhere outside this machine first; the broadcast/ directory
+is in .gitignore.
 
-Then: FORCE_REDEPLOY=1 bash deploy-mainnet.sh go
+If that is what you want, name the contract you replace:
+
+  REPLACES=$EXISTING bash deploy-mainnet.sh go
 MSG
     exit 1
   fi
 
+  # The deploy record names HEAD as the deployed source; verify later compares against that commit.
+  if ! same_build_inputs HEAD; then
+    echo "src, script, lib or foundry.toml differ from HEAD; the deploy record would then name a commit" >&2
+    echo "that is not the deployed source. Commit or undo those changes first." >&2
+    exit 1
+  fi
+
   echo "== Real deploy to Base mainnet"
-  [ -n "$EXISTING" ] && echo "   (FORCE_REDEPLOY=1; the existing $EXISTING simply stays on chain)"
+  [ -n "$EXISTING" ] && echo "   (replaces $EXISTING, which stays on chain and keeps working until the treasury calls retire() on it)"
   VERIFY=()
   if [ -n "$BASESCAN_API_KEY" ]; then
     VERIFY=(--verify)
@@ -130,25 +164,21 @@ if [ "$MODE" = "verify" ]; then
     exit 1
   fi
 
-  # Basescan compares the submitted source code with the bytecode on chain. If we compile
-  # a different commit than the one that was deployed, that comparison cannot match.
+  deployed_address >/dev/null || unusable_record
+
+  # Basescan compares the submitted source code with the bytecode on chain. That can only match
+  # when everything that determines the bytecode is here as it was at the deploy.
   WANT="$(deployed_commit)"
-  HAVE="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  if [ -n "$WANT" ] && [ "${WANT#"$HAVE"}" = "$WANT" ] && [ "${HAVE#"$WANT"}" = "$HAVE" ]; then
+  if ! same_build_inputs "$WANT"; then
     cat >&2 <<MSG
-The broadcast is from commit $WANT, but you are on $HAVE. Verifying from this
-source code submits bytecode that does not match what is on chain.
+The deploy record names commit '$WANT'. Either that commit is not in this clone, or
+src, script, lib or foundry.toml in this working tree differ from it. Verifying from
+this source code submits bytecode that does not match what is on chain.
 
-Check out the right commit first:
-
-  git stash        # if you have uncommitted work
-  git checkout $WANT
-  bash deploy-mainnet.sh verify
+Check out that commit, or any commit that leaves those paths as they were, without
+uncommitted changes in them (and run 'git submodule update' if lib differs), then
+run verify again.
 MSG
-    exit 1
-  fi
-  if [ -n "$(git status --porcelain src/ script/ 2>/dev/null)" ]; then
-    echo "src/ or script/ has uncommitted changes; the bytecode then differs from the deploy." >&2
     exit 1
   fi
 
