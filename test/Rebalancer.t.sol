@@ -144,10 +144,9 @@ contract RebalancerTest is RebalancerTestBase {
         emit Rebalancer.MandateSet(alice, 8000, keeper);
         vm.prank(alice);
         r.setMandate(8000, keeper);
-        (uint16 target, uint64 last, bool unfinished, address k) = r.mandates(alice);
+        (uint16 target, uint64 last, address k) = r.mandates(alice);
         assertEq(target, 8000);
         assertEq(last, 0);
-        assertFalse(unfinished);
         assertEq(k, keeper);
     }
 
@@ -168,7 +167,7 @@ contract RebalancerTest is RebalancerTestBase {
         vm.prank(alice);
         if (!valid) vm.expectRevert(Rebalancer.InvalidTarget.selector);
         r.setMandate(target, anyKeeper);
-        (uint16 stored,,, address k) = r.mandates(alice);
+        (uint16 stored,, address k) = r.mandates(alice);
         assertEq(stored, valid ? target : 0);
         assertEq(k, valid ? anyKeeper : address(0));
     }
@@ -177,7 +176,7 @@ contract RebalancerTest is RebalancerTestBase {
         _setUser(alice, 1000e6, 0, 8000);
         vm.prank(bob);
         r.setMandate(2000, stranger);
-        (uint16 target,,, address k) = r.mandates(alice);
+        (uint16 target,, address k) = r.mandates(alice);
         assertEq(target, 8000);
         assertEq(k, keeper);
     }
@@ -198,7 +197,7 @@ contract RebalancerTest is RebalancerTestBase {
         r.stop();
         r.setMandate(8000, keeper);
         vm.stopPrank();
-        (, uint64 last,,) = r.mandates(alice);
+        (, uint64 last,) = r.mandates(alice);
         assertEq(last, vm.getBlockTimestamp());
         vm.expectRevert(Rebalancer.NotDue.selector);
         _execute(alice);
@@ -278,7 +277,7 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(usdc.balanceOf(address(r)), fee, "fee stays in the contract");
         assertEq(cbbtc.balanceOf(address(r)), 0);
         assertEq(usdc.balanceOf(treasury), 0);
-        (, uint64 last,,) = r.mandates(alice);
+        (, uint64 last,) = r.mandates(alice);
         assertEq(last, vm.getBlockTimestamp());
     }
 
@@ -323,12 +322,10 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(delta, 1001e6);
         _execute(alice);
         assertEq(usdc.balanceOf(alice), 2000e6);
-        (,, bool unfinished,) = r.mandates(alice);
-        assertFalse(unfinished);
         assertApproxEqAbs(_shareBps(alice), 8000, 1, "only the fee short of the target");
         _warp(1 days);
         (bool due,) = r.isDue(alice);
-        assertFalse(due, "nothing left to follow up");
+        assertFalse(due, "nothing left for a next run");
     }
 
     function test_execute_sellTakesARemainderBelowTheMinimum() public {
@@ -338,40 +335,29 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(delta, -1001e6);
         _execute(alice);
         assertEq(cbbtc.balanceOf(alice), 6_250_000, "a position of exactly 5,000 USDC");
-        (,, bool unfinished,) = r.mandates(alice);
-        assertFalse(unfinished);
         _warp(1 days);
         (bool due,) = r.isDue(alice);
-        assertFalse(due, "nothing left to follow up");
+        assertFalse(due, "nothing left for a next run");
     }
 
-    function test_execute_remainderOfExactlyTheMinimumIsLeftToTheNextRun() public {
-        // Drift 1,002 = cap + minimum: the 2 USDC left is a run of its own, so this run stays at the cap.
+    function test_execute_remainderOfExactlyTheMinimumStaysWithTheCap() public {
+        // Drift 1,002 = cap + minimum: the 2 USDC left is not below the minimum, so this run stays at the cap.
         _setUser(alice, 3002e6, 8_747_500, 8000);
         (, int256 delta) = r.isDue(alice);
         assertEq(delta, 1000e6);
         _execute(alice);
-        (,, bool unfinished,) = r.mandates(alice);
-        assertTrue(unfinished);
-        _warp(1 days);
-        (bool due,) = r.isDue(alice);
-        assertTrue(due, "the next day finishes it");
+        assertEq(usdc.balanceOf(alice), 2002e6);
     }
 
     function test_execute_sellRoundingCanLeaveJustUnderTheMinimum() public {
         // 10,000.0008 USDC of value, target 50%: drift 1,002.0004 = cap 1,000.00008 + 2.00032, so the run stays at
         // the cap. Rounded up to whole satoshi it sells 1,250,001 sats, worth 1,000.0008: 0.00072 more than the cap,
-        // which leaves 1.9996 USDC of the drift. Less than the minimum, so it is not followed up.
+        // which leaves 1.9996 USDC of the drift: just under the minimum.
         _setUser(alice, 3998e6, 7_502_501, 5000);
         (, int256 delta) = r.isDue(alice);
         assertEq(delta, -1_000_000_800);
         _execute(alice);
         assertEq(cbbtc.balanceOf(alice), 7_502_501 - 1_250_001);
-        (,, bool unfinished,) = r.mandates(alice);
-        assertFalse(unfinished, "1.9996 USDC left: just under the minimum");
-        _warp(1 days);
-        (bool due,) = r.isDue(alice);
-        assertFalse(due, "nothing left to follow up");
     }
 
     function test_execute_takingTheRemainderIsStillBoundedByAllowance() public {
@@ -382,17 +368,7 @@ contract RebalancerTest is RebalancerTestBase {
         (, int256 delta) = r.isDue(alice);
         assertEq(delta, 1000.5e6);
         _execute(alice);
-        (,, bool unfinished,) = r.mandates(alice);
-        assertFalse(unfinished, "0.50 USDC left: less than the minimum, not followed up");
-
-        _setUser(bob, 3001e6, 8_748_750, 8000);
-        vm.prank(bob);
-        usdc.approve(address(r), 500e6);
-        (, delta) = r.isDue(bob);
-        assertEq(delta, 500e6);
-        _execute(bob);
-        (,, unfinished,) = r.mandates(bob);
-        assertTrue(unfinished, "501 USDC left: followed up");
+        assertEq(usdc.balanceOf(alice), 3001e6 - 1000.5e6);
     }
 
     function test_execute_nothingToDoInsideAndOnTheBand() public {
@@ -444,9 +420,9 @@ contract RebalancerTest is RebalancerTestBase {
         assertFalse(due);
     }
 
-    function test_execute_correctionLargerThanTheCapIsFinishedOnTheNextDays() public {
-        // All cash, target 71%: seven runs of 10% bring the wallet to ~70%, inside the band. The correction still
-        // continues to the target, because the run before it left part of the correction undone.
+    function test_execute_cappedCorrectionStopsInsideTheBandAndResumesOutsideIt() public {
+        // All cash, target 71%: seven runs of 10% bring the wallet to 69.89%, inside the band, and there the correction
+        // stops. The rule looks at the wallet as it is, not at what earlier runs left undone.
         _setUser(alice, 10_000e6, 0, 7100);
         uint256 runs;
         for (; runs < 20; runs++) {
@@ -455,63 +431,18 @@ contract RebalancerTest is RebalancerTestBase {
             _execute(alice);
             _warp(1 days);
         }
-        assertEq(runs, 8);
-        assertApproxEqAbs(_shareBps(alice), 7100, 25, "fees leave the share a fraction short of the target");
-        (,, bool unfinished,) = r.mandates(alice);
-        assertFalse(unfinished);
-    }
-
-    function test_execute_unfinishedCorrectionExpiresAfterTwoIntervals() public {
-        _setUser(alice, 10_000e6, 0, 7100);
-        for (uint256 i; i < 7; i++) {
-            _execute(alice);
-            _warp(1 days);
-        }
-        (,, bool unfinished,) = r.mandates(alice);
-        assertTrue(unfinished);
-        assertLt(_shareBps(alice), 7100 - 50, "short of the target");
-        assertGt(_shareBps(alice), 7100 - 200, "inside the band");
-        (bool due,) = r.isDue(alice);
-        assertTrue(due, "the day after: follow-up run");
-        _warp(1 days); // two days after the last run: the band applies again
-        (due,) = r.isDue(alice);
-        assertFalse(due);
+        assertEq(runs, 7);
+        assertEq(_shareBps(alice), 6989, "1.11 points short of the target: inside the band");
         vm.expectRevert(Rebalancer.NothingToDo.selector);
         _execute(alice);
-    }
 
-    function test_setMandate_startsFromTheBandAgain() public {
-        _setUser(alice, 10_000e6, 0, 7100);
-        for (uint256 i; i < 7; i++) {
-            _execute(alice);
-            _warp(1 days);
-        }
-        vm.prank(alice);
-        r.setMandate(7100, keeper);
-        (,, bool unfinished,) = r.mandates(alice);
-        assertFalse(unfinished);
-        (bool due,) = r.isDue(alice);
-        assertFalse(due);
-    }
-
-    function test_execute_followUpGoesToTheTargetFromEitherSide() public {
-        // A follow-up ignores the band and trades towards the target at that day's price, so after a price move it can
-        // trade back: day 1 buys 1,000 of the 1,030 USDC the wallet is short (the cap); cbBTC rises 3%; day 2 sells
-        // 43.26 USDC of cbBTC although the wallet is only 0.43% from its target. Without a follow-up it is not due.
-        _setUser(alice, 6030e6, 4_962_500, 5000); // 10,000 USDC of value, 39.7% cbBTC
+        // cbBTC falls 10%: the wallet is outside the band again, and the next run takes it to the target.
+        _setPrice(PRICE * 90 / 100);
+        assertEq(_shareBps(alice), 6763);
+        (bool dueAgain,) = r.isDue(alice);
+        assertTrue(dueAgain);
         _execute(alice);
-        (,, bool unfinished,) = r.mandates(alice);
-        assertTrue(unfinished);
-
-        _warp(1 days);
-        _setPrice(PRICE * 103 / 100);
-        (bool due, int256 delta) = r.isDue(alice);
-        assertTrue(due);
-        assertEq(delta, -43_263_296, "sells 43.26 USDC of cbBTC");
-        _setUser(bob, usdc.balanceOf(alice), cbbtc.balanceOf(alice), 5000);
-        (due,) = r.isDue(bob);
-        assertFalse(due, "the same wallet without a follow-up");
-        _execute(alice);
+        assertApproxEqAbs(_shareBps(alice), 7100, 1, "only the fee short of the target");
     }
 
     function test_execute_tinyWalletMayTradeMostOfItself() public {
@@ -602,7 +533,7 @@ contract RebalancerTest is RebalancerTestBase {
         vm.prank(keeper);
         vm.expectRevert("Too little received");
         r.execute(alice, 0);
-        (, uint64 last,,) = r.mandates(alice);
+        (, uint64 last,) = r.mandates(alice);
         assertEq(last, 0);
         router.setWorseBps(0);
         _execute(alice);
@@ -846,9 +777,37 @@ contract RebalancerTest is RebalancerTestBase {
         // A run beyond the cap took the whole drift: it finishes the correction, and only the fee and one satoshi
         // stand between the wallet and its target.
         if (run > cap + price / 1e8 + 1) {
-            (,, bool unfinished,) = r.mandates(alice);
-            assertFalse(unfinished, "a run beyond the cap is unfinished");
             assertApproxEqAbs(shareAfter, target, satBps + run * r.FEE_BPS() / total + 1, "short of the target");
+        }
+    }
+
+    function testFuzz_isDueIsEqualForEqualWalletsWhateverTheirHistory(
+        uint256 cash,
+        uint256 btc,
+        uint16 target,
+        uint256 price,
+        uint256 moves
+    ) public {
+        _setPrice(bound(price, 1_000e6, 1_000_000e6));
+        cash = bound(cash, 0, 1e13);
+        btc = bound(btc, 0, 1e11);
+        target = uint16(bound(target, 500, 9500));
+        _setUser(alice, cash, btc, target);
+
+        // Ten days. Every day a twin gets Alice's balances and target without her history, and must get her answer.
+        // Then Alice runs when she is due, a day passes and the price moves up to 5% either way. Her last run is
+        // always at least a day old, so the interval does not stand between the two.
+        for (uint256 i; i < 10; i++) {
+            address twin = makeAddr(string.concat("twin", vm.toString(i)));
+            _setUser(twin, usdc.balanceOf(alice), cbbtc.balanceOf(alice), target);
+            (bool due, int256 delta) = r.isDue(alice);
+            (bool twinDue, int256 twinDelta) = r.isDue(twin);
+            assertEq(due, twinDue, "due");
+            assertEq(delta, twinDelta, "amount");
+
+            if (due) _execute(alice);
+            _warp(1 days);
+            _setPrice(router.price() * (9500 + (moves >> (i * 16)) % 1001) / BPS);
         }
     }
 
@@ -1045,7 +1004,7 @@ contract RebalancerTest is RebalancerTestBase {
         r.setMandate(8000, keeper);
         vm.prank(alice);
         r.stop();
-        (uint16 target,,,) = r.mandates(alice);
+        (uint16 target,,) = r.mandates(alice);
         assertEq(target, 0);
 
         r.sweep(IERC20(address(usdc)));
@@ -1107,6 +1066,7 @@ contract RebalancerHandler is Test {
     bool public lossBoundBroken;
     bool public ranAfterRetire;
     bool public capBroken;
+    bool public ranInsideTheBand;
 
     constructor(
         Rebalancer r,
@@ -1183,7 +1143,7 @@ contract RebalancerHandler is Test {
     }
 
     function _execute(address owner, uint8 callerKind, uint256 minOutSeed) internal {
-        (,,, address appointed) = R.mandates(owner);
+        (,, address appointed) = R.mandates(owner);
         address caller = callerKind == 0 ? owner : callerKind == 4 ? stranger : KEEPER;
         uint256 price = R.quote();
         uint256 usdcBefore = USDC.balanceOf(owner);
@@ -1196,6 +1156,7 @@ contract RebalancerHandler is Test {
         try R.execute(owner, minOutSeed % 3 == 0 ? 0 : minOutSeed % 1000) {
             if (caller != owner && caller != appointed) strangerRan = true;
             if (wasRetired) ranAfterRetire = true;
+            if (!_outsideTheBand(owner, usdcBefore, btcBefore, price)) ranInsideTheBand = true;
             uint256 nowTs = vm.getBlockTimestamp();
             if (lastRunAt[owner] != 0 && nowTs < lastRunAt[owner] + 1 days) intervalBroken = true;
             lastRunAt[owner] = nowTs;
@@ -1210,10 +1171,18 @@ contract RebalancerHandler is Test {
             uint256 minTrade = R.MIN_TRADE_USDC();
             uint256 cap = total / 10 > minTrade ? total / 10 : minTrade;
             if (run > cap + minTrade + price / 1e8 || run + price / 1e8 < minTrade) capBroken = true;
-            // Beyond the cap only to take the rest of the drift, so such a run leaves nothing to follow up.
-            (,, bool unfinished,) = R.mandates(owner);
-            if (run > cap + price / 1e8 && unfinished) capBroken = true;
         } catch {}
+    }
+
+    /// @dev Was a wallet with these balances outside the band? Measured as the contract does: times BPS, so that
+    ///      rounding plays no part. A run does not change the target, so reading it after the run is fine.
+    function _outsideTheBand(address owner, uint256 cash, uint256 btc, uint256 price) internal view returns (bool) {
+        (uint16 target,,) = R.mandates(owner);
+        uint256 position = btc * price / 1e8;
+        uint256 total = cash + position;
+        uint256 drift =
+            position * BPS > total * target ? position * BPS - total * target : total * target - position * BPS;
+        return drift > total * R.BAND_BPS();
     }
 
     function _feeOf(Vm.Log[] memory logs) internal pure returns (uint256 fee) {
@@ -1264,7 +1233,7 @@ contract RebalancerHandler is Test {
     ///      back to the maximum, so that they do not cut that run short.
     function driftJustPastTheCap(uint256 seed, uint256 total, uint256 excess, bool isBuy) external {
         address owner = _owner(seed);
-        (uint16 target,,,) = R.mandates(owner);
+        (uint16 target,,) = R.mandates(owner);
         if (target == 0) return;
         uint256 price = ROUTER.price();
         total = bound(total, 1_000e6, 200_000e6); // cap = total / 10, above the minimum
@@ -1362,6 +1331,10 @@ contract RebalancerInvariantTest is RebalancerTestBase {
 
     function invariant_runWithinMinimumAndCap() public view {
         assertFalse(handler.capBroken());
+    }
+
+    function invariant_everyRunStartsOutsideTheBand() public view {
+        assertFalse(handler.ranInsideTheBand());
     }
 
     function invariant_noRunAfterRetire() public view {

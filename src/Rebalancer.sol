@@ -25,11 +25,12 @@ import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
  *      revoke the mandate at any time.
  *
  *      The rule. position = cbBTC balance at the Chainlink price, total = USDC balance + position,
- *      drift = |position − total × target|. A correction starts when drift > BAND_BPS of the total. One run corrects
+ *      drift = |position − total × target|. A run is made only while drift > BAND_BPS of the total. One run corrects
  *      the drift, at most max(MAX_CORRECTION_BPS of the total, MIN_TRADE_USDC); when that would leave less than
  *      MIN_TRADE_USDC of the drift, the run takes the whole drift instead. Balance and allowance cap it, it is never
- *      less than MIN_TRADE_USDC, and it runs at most once per INTERVAL. A run that leaves at least MIN_TRADE_USDC of
- *      its correction undone is followed up on the next days until the target is reached, also inside the band.
+ *      less than MIN_TRADE_USDC, and it runs at most once per INTERVAL. The rule looks at the wallet as it is and
+ *      remembers nothing of earlier runs: a correction larger than one run continues on the next days while the
+ *      wallet is outside the band, and ends when a run brings it inside.
  *
  *      Price bound. The output the contract actually receives must lie within MAX_DEVIATION_BPS of the Chainlink
  *      value of the input, pool fee included, in both directions. The lower bound caps what a run can lose to a
@@ -58,10 +59,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     /// @notice Per run, share of the total value. A run that this cap would leave less than MIN_TRADE_USDC short of
     ///         the target takes that remainder too, so it can exceed the cap by just under MIN_TRADE_USDC.
     uint256 public constant MAX_CORRECTION_BPS = 1000;
-    /// @notice The smallest run that is worth making, the smallest remainder the cap leaves for a next run (on a sell
-    ///         up to one satoshi less, see `_plan`), and the step that separates a finished correction from an
-    ///         unfinished one in `_plan`. It has to be strictly positive: at 0 a run that finishes its correction would
-    ///         still mark itself unfinished, which drops the band for the next day and never stops.
+    /// @notice The smallest run that is worth making, and the smallest remainder the cap leaves (on a sell up to one
+    ///         satoshi less, see `_plan`).
     /// @dev 2 USDC, which is set by the rounding rather than by the economics. A run is measured in whole satoshi,
     ///      so the single unit a swap can round away is worth `price / 1e8` — a share of the run that grows as the
     ///      run shrinks and as cbBTC gets dearer. It has to stay well inside MAX_DEVIATION_BPS, which the pool's own
@@ -88,7 +87,6 @@ contract Rebalancer is ReentrancyGuardTransient {
     struct Mandate {
         uint16 targetBps; // cbBTC share of the total value
         uint64 lastExecutedAt;
-        bool unfinished; // the last run left at least MIN_TRADE_USDC of its correction undone
         address keeper; // may call `execute` for this owner, next to the owner; address(0) = only the owner
     }
 
@@ -170,12 +168,10 @@ contract Rebalancer is ReentrancyGuardTransient {
         _setMandate(0, address(0));
     }
 
-    /// @dev Leaves `lastExecutedAt` alone: changing a mandate does not shorten INTERVAL. A new mandate starts from
-    ///      the band again.
+    /// @dev Leaves `lastExecutedAt` alone: changing a mandate does not shorten INTERVAL.
     function _setMandate(uint16 targetBps, address keeper) private {
         Mandate storage m = mandates[msg.sender];
         m.targetBps = targetBps;
-        m.unfinished = false;
         m.keeper = keeper;
         emit MandateSet(msg.sender, targetBps, keeper);
     }
@@ -190,7 +186,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         Mandate memory m = mandates[owner];
         if (retired || m.targetBps == 0 || block.timestamp < m.lastExecutedAt + INTERVAL) return (false, 0);
         uint256 price = _quote();
-        (bool isBuy, uint256 amountIn,,) = _plan(owner, m.targetBps, _finishing(m), price);
+        (bool isBuy, uint256 amountIn,) = _plan(owner, m.targetBps, price);
         if (amountIn == 0) return (false, 0);
         uint256 value = isBuy ? amountIn : amountIn * price / CBBTC_UNIT;
         // The value of a wallet is far below 2^255, so the casts cannot truncate.
@@ -219,10 +215,9 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (block.timestamp < m.lastExecutedAt + INTERVAL) revert NotDue();
 
         uint256 price = _quote();
-        (bool isBuy, uint256 amountIn, uint256 total, bool unfinished) = _plan(owner, targetBps, _finishing(m), price);
+        (bool isBuy, uint256 amountIn, uint256 total) = _plan(owner, targetBps, price);
         if (amountIn == 0) revert NothingToDo();
         m.lastExecutedAt = uint64(block.timestamp);
-        m.unfinished = unfinished;
 
         uint256 fee;
         uint256 amountOut;
@@ -280,21 +275,15 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (price == 0) revert InvalidFeedAnswer(); // a price that rounds to 0 is as unusable as a negative one
     }
 
-    /// @dev Is this run the follow-up of a correction that the previous run left undone? Only on the next days:
-    ///      after two INTERVALs without a run a correction starts from the band again.
-    function _finishing(Mandate memory m) internal view returns (bool) {
-        return m.unfinished && block.timestamp < m.lastExecutedAt + 2 * INTERVAL;
-    }
-
-    /// @dev The rule from the contract header. `finishing`: this run follows up an unfinished correction, so the band
-    ///      does not apply. `amountIn` is in the input token (USDC for a buy, cbBTC for a sell); 0 = do nothing.
-    ///      `unfinished`: at least MIN_TRADE_USDC of the drift is left after this run. The cap never leaves a smaller
-    ///      remainder: the run then takes the whole drift. A sell, rounded up to whole satoshi, can leave up to one
-    ///      satoshi less; balance and allowance come after, so they can leave less too. Neither is followed up.
-    function _plan(address owner, uint256 targetBps, bool finishing, uint256 price)
+    /// @dev The rule from the contract header: a function of the owner's balances and allowances, the target and the
+    ///      price, and of nothing else. `amountIn` is in the input token (USDC for a buy, cbBTC for a sell); 0 = do
+    ///      nothing. The cap never leaves a remainder smaller than MIN_TRADE_USDC: the run then takes the whole drift.
+    ///      A sell, rounded up to whole satoshi, can leave up to one satoshi less; balance and allowance come after,
+    ///      so they can leave less too.
+    function _plan(address owner, uint256 targetBps, uint256 price)
         internal
         view
-        returns (bool isBuy, uint256 amountIn, uint256 total, bool unfinished)
+        returns (bool isBuy, uint256 amountIn, uint256 total)
     {
         uint256 cash = USDC.balanceOf(owner);
         uint256 btc = CBBTC.balanceOf(owner);
@@ -304,7 +293,7 @@ contract Rebalancer is ReentrancyGuardTransient {
         // Times BPS, so that the comparison with the band is exact and does not depend on rounding.
         isBuy = position * BPS < total * targetBps;
         uint256 drift = isBuy ? total * targetBps - position * BPS : position * BPS - total * targetBps;
-        if (!finishing && drift <= total * BAND_BPS) return (isBuy, 0, total, false);
+        if (drift <= total * BAND_BPS) return (isBuy, 0, total);
         drift /= BPS;
         uint256 run = Math.min(drift, Math.max(total * MAX_CORRECTION_BPS / BPS, MIN_TRADE_USDC));
         if (drift - run < MIN_TRADE_USDC) run = drift; // a remainder too small for a run of its own is taken now
@@ -319,8 +308,7 @@ contract Rebalancer is ReentrancyGuardTransient {
             amountIn = Math.min(amountIn, Math.min(btc, CBBTC.allowance(owner, address(this))));
             value = amountIn * price / CBBTC_UNIT;
         }
-        if (value < MIN_TRADE_USDC) return (isBuy, 0, total, false);
-        unfinished = drift >= value + MIN_TRADE_USDC;
+        if (value < MIN_TRADE_USDC) amountIn = 0;
     }
 
     /// @dev Swaps `amountIn` through the USDC/cbBTC pool into this contract and enforces the price bound on what

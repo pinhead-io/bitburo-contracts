@@ -86,7 +86,7 @@ import {
 } from "./selection";
 
 const abi = parseAbi([
-  "function mandates(address owner) view returns (uint16 targetBps, uint64 lastExecutedAt, bool unfinished, address keeper)",
+  "function mandates(address owner) view returns (uint16 targetBps, uint64 lastExecutedAt, address keeper)",
   "function isDue(address owner) view returns (bool due, int256 usdcDelta)",
   "function execute(address owner, uint256 minAmountOut) returns (uint256 swapOutput)",
   "function retired() view returns (bool)",
@@ -306,7 +306,7 @@ const readDue = async (owners: readonly Address[], blockNumber: bigint): Promise
       });
       page.forEach((owner, i) => {
         const dueResult = dues[i];
-        const [targetBps, , , appointed] = mandates[i];
+        const [targetBps, , appointed] = mandates[i];
         const mandate: Mandate = { targetBps, keeper: appointed };
         if (!mayRun(mandate, owner, keeper)) {
           gone.push(owner);
