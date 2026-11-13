@@ -165,7 +165,8 @@ if (
     nowSeconds: startSeconds,
     maxAgeSeconds: lockMaxSeconds,
     isAlive: pidAlive,
-    onStaleRemoved: (lock) => console.warn(`stale lock removed (pid ${lock.pid}, ${startSeconds - lock.startedAt} s old)`),
+    onStaleRemoved: (lock) =>
+      console.warn(`stale lock removed (${lock ? `pid ${lock.pid}, ${startSeconds - lock.startedAt} s old` : "unreadable"})`),
   })
 ) {
   console.warn(`Another keeper run is still running (${lockFile}); this run stops.`);
@@ -173,7 +174,7 @@ if (
 }
 process.on("exit", () => {
   try {
-    if (parseLock(readFileSync(lockFile, "utf8"), 0).pid === process.pid) unlinkSync(lockFile);
+    if (parseLock(readFileSync(lockFile, "utf8"))?.pid === process.pid) unlinkSync(lockFile);
   } catch {
     // already gone
   }

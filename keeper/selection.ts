@@ -260,8 +260,8 @@ export type LockInfo = { pid: number; startedAt: number };
 
 export const formatLock = (lock: LockInfo): string => `${JSON.stringify(lock)}\n`;
 
-/** Lock from the file. Unreadable content gives `startedAt` = `fallbackStartedAt` (the file's mtime), so it has an age. */
-export const parseLock = (text: string, fallbackStartedAt: number): LockInfo => {
+/** Lock from the file, or `undefined` if the content is not a lock (empty, cut off, anything else). */
+export const parseLock = (text: string): LockInfo | undefined => {
   try {
     const parsed: unknown = JSON.parse(text);
     if (
@@ -273,10 +273,9 @@ export const parseLock = (text: string, fallbackStartedAt: number): LockInfo => 
       return { pid: (parsed as LockInfo).pid, startedAt: (parsed as LockInfo).startedAt };
     }
   } catch {
-    // garbage
+    // not JSON
   }
-  const pid = Number(text.trim());
-  return { pid: Number.isInteger(pid) ? pid : 0, startedAt: fallbackStartedAt };
+  return undefined;
 };
 
 /**

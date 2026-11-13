@@ -240,11 +240,12 @@ describe("cool-down", () => {
 describe("lock", () => {
   const alive = (pids: number[]) => (pid: number) => pids.includes(pid);
 
-  test("the lock stores pid and start time and reads back; unreadable content gets the file time", () => {
+  test("the lock stores pid and start time and reads back; anything else is not a lock", () => {
     const lock = { pid: 4242, startedAt: 1_789_600_000 };
-    expect(parseLock(formatLock(lock), 0)).toEqual(lock);
-    expect(parseLock("4242\n", 1_789_500_000)).toEqual({ pid: 4242, startedAt: 1_789_500_000 });
-    expect(parseLock("garbage", 7)).toEqual({ pid: 0, startedAt: 7 });
+    expect(parseLock(formatLock(lock))).toEqual(lock);
+    for (const text of ["", "garbage", "4242\n", '{"pid":4242}', '{"pid":4242,"startedAt":']) {
+      expect(parseLock(text)).toBeUndefined();
+    }
   });
 
   test("a young lock of a live pid holds; of a dead pid it is stale", () => {
