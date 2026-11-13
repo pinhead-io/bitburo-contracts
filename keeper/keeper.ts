@@ -19,9 +19,9 @@
  * 4. Send `execute(owner, minAmountOut)` as a plain transaction from the keeper's own key and wait for the receipt.
  *    Send it straight to the sequencer: a relayer or bundler that wraps the call can trade around it.
  *
- * Failures: market and oracle conditions and a state that changed since `isDue` are skipped until the next run;
- * anything else, a transaction that ran out of GAS_LIMIT included, puts the owner on a cool-down that doubles per
- * failure (COOLDOWN_FILE). See `failureAction`.
+ * Failures: node errors, market and oracle conditions and a state that changed since `isDue` are skipped until the
+ * next run; every other revert, one the keeper cannot decode and a transaction that ran out of GAS_LIMIT included,
+ * puts the owner on a cool-down that doubles per failure (COOLDOWN_FILE). See `failureAction`.
  * One run at a time (LOCK_FILE); nothing is sent while an earlier transaction of this key is still pending.
  *
  * The contract allows one run per owner per day, so running this every 10 to 60 minutes is plenty.
@@ -195,11 +195,16 @@ const revertOf = (error: unknown): ContractFunctionRevertedError | undefined => 
   return reverted instanceof ContractFunctionRevertedError ? reverted : undefined;
 };
 
-/** The contract error or revert reason, if the node reported a revert; otherwise an empty failure (node error). */
+/**
+ * What failed. viem decodes a plain `revert("…")` as the built-in error `Error(string)`: the name says nothing, the
+ * reason does. A revert with an error outside the ABI has no name and no reason.
+ */
 const failureOf = (error: unknown): Failure => {
   const reverted = revertOf(error);
-  if (reverted === undefined) return {};
-  return { errorName: reverted.data?.errorName, reason: reverted.reason };
+  if (reverted === undefined) return { kind: "node" };
+  const errorName = reverted.data?.errorName;
+  if (errorName === undefined || errorName === "Error") return { kind: "revert", reason: reverted.reason };
+  return { kind: "contract", errorName };
 };
 
 /** First line of an error, with the contract error if there is one. Never the RPC URL (it may hold an API key). */
@@ -207,6 +212,8 @@ const describeError = (error: unknown): string => {
   const reverted = revertOf(error);
   if (reverted?.data?.errorName) return `${reverted.data.errorName}(${(reverted.data.args ?? []).join(", ")})`;
   if (reverted?.reason) return reverted.reason;
+  // An error outside the ABI: viem puts its selector on the second line of the message, and only the first is kept.
+  if (reverted?.signature) return `unknown error ${reverted.signature}`;
   if (error instanceof BaseError) return redactRpcUrl(error.shortMessage, rpcUrl);
   return redactRpcUrl(String((error as Error)?.message ?? error).split("\n")[0], rpcUrl);
 };

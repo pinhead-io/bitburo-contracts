@@ -141,39 +141,34 @@ describe("the price the keeper demands", () => {
 describe("what to do after a failure", () => {
   test("market and oracle conditions are skipped until the next run, without a cool-down", () => {
     for (const errorName of ["OutsidePriceBounds", "StaleFeed", "SequencerDown", "InvalidFeedAnswer"]) {
-      expect(failureAction({ errorName })).toBe("skip");
+      expect(failureAction({ kind: "contract", errorName })).toBe("skip");
     }
-    expect(failureAction({ reason: "Too little received" })).toBe("skip");
-  });
-
-  test("a plain revert string is judged by its reason: viem names every one of them Error", () => {
-    expect(failureAction({ errorName: "Error", reason: "Too little received" })).toBe("skip");
-    expect(failureAction({ errorName: "Error", reason: "Blacklistable: account is blacklisted" })).toBe("cooldown");
-    expect(failureAction({ errorName: "Error" })).toBe("cooldown");
-    expect(failureAction({ errorName: "Panic", reason: "Arithmetic operation resulted in underflow or overflow." })).toBe(
-      "cooldown",
-    );
+    expect(failureAction({ kind: "revert", reason: "Too little received" })).toBe("skip");
   });
 
   test("a state that changed since isDue is skipped: someone else ran it, the band, a replaced keeper", () => {
     for (const errorName of ["NotDue", "NothingToDo", "Inactive", "NotOwnerOrKeeper"]) {
-      expect(failureAction({ errorName })).toBe("skip");
+      expect(failureAction({ kind: "contract", errorName })).toBe("skip");
     }
   });
 
   test("a retired contract stops the run", () => {
-    expect(failureAction({ errorName: "ContractRetired" })).toBe("stop");
+    expect(failureAction({ kind: "contract", errorName: "ContractRetired" })).toBe("stop");
   });
 
   test("a revert that will not go away by itself gets a cool-down", () => {
-    expect(failureAction({ reason: "Blacklistable: account is blacklisted" })).toBe("cooldown");
-    expect(failureAction({ reason: "Pausable: paused" })).toBe("cooldown");
-    expect(failureAction({ errorName: "SafeERC20FailedOperation" })).toBe("cooldown");
-    expect(failureAction({ errorName: "SomethingNew" })).toBe("cooldown");
+    expect(failureAction({ kind: "revert", reason: "Blacklistable: account is blacklisted" })).toBe("cooldown");
+    expect(failureAction({ kind: "revert", reason: "Pausable: paused" })).toBe("cooldown");
+    expect(failureAction({ kind: "contract", errorName: "InvalidTarget" })).toBe("cooldown");
+    expect(failureAction({ kind: "contract", errorName: "Panic" })).toBe("cooldown");
+  });
+
+  test("a revert the keeper cannot decode gets a cool-down too: it has no name and no reason", () => {
+    expect(failureAction({ kind: "revert" })).toBe("cooldown");
   });
 
   test("a node error is not the owner's fault", () => {
-    expect(failureAction({})).toBe("skip");
+    expect(failureAction({ kind: "node" })).toBe("skip");
   });
 
   test("with an own transaction still pending nothing new is sent", () => {
