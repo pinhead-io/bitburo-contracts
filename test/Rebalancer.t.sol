@@ -371,6 +371,22 @@ contract RebalancerTest is RebalancerTestBase {
         assertEq(usdc.balanceOf(alice), 3001e6 - 1000.5e6);
     }
 
+    function test_execute_takingTheRemainderBringsASmallWalletInsideTheBand() public {
+        // 50 USDC of value, 63% cbBTC, target 50%: drift 6.50 against a cap of 5. The cap would leave 1.50 USDC of the
+        // drift: more than the band of this wallet, 2% of 50 = 1 USDC, and less than the minimum of 2, so no later run
+        // could take it and the wallet would stay outside the band. Taking the remainder now is what prevents that.
+        _setUser(alice, 18.5e6, 39_375, 5000);
+        assertEq(_valueOf(alice), 50e6);
+        (, int256 delta) = r.isDue(alice);
+        assertEq(delta, -6.5e6, "the whole drift, not the cap of 5 USDC");
+        _execute(alice);
+        assertEq(cbbtc.balanceOf(alice), 31_250, "a position of exactly 25 USDC");
+        assertEq(_shareBps(alice), 5001, "inside the band: only the fee off the target");
+        _warp(1 days);
+        (bool due,) = r.isDue(alice);
+        assertFalse(due, "nothing left for a next run");
+    }
+
     function test_execute_nothingToDoInsideAndOnTheBand() public {
         _setUser(alice, 2200e6, 0.0975e8, 8000); // exactly 78% cbBTC: drift == band
         vm.expectRevert(Rebalancer.NothingToDo.selector);

@@ -296,7 +296,9 @@ contract Rebalancer is ReentrancyGuardTransient {
         if (drift <= total * BAND_BPS) return (isBuy, 0, total);
         drift /= BPS;
         uint256 run = Math.min(drift, Math.max(total * MAX_CORRECTION_BPS / BPS, MIN_TRADE_USDC));
-        if (drift - run < MIN_TRADE_USDC) run = drift; // a remainder too small for a run of its own is taken now
+        // A remainder too small for a run of its own is taken now: in a small wallet it can still lie outside the
+        // band, where no later run could correct it.
+        if (drift - run < MIN_TRADE_USDC) run = drift;
 
         uint256 value; // of `amountIn`, in USDC at the Chainlink price
         if (isBuy) {
