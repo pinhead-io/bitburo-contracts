@@ -1,7 +1,7 @@
 /**
  * Pure logic of the keeper script: no network, no files, no clock. Everything here is covered by `selection.test.ts`.
  */
-import { type Address, isAddress } from "viem";
+import { type Address, getAddress, isAddress } from "viem";
 
 export const BPS = 10_000n;
 
@@ -58,20 +58,39 @@ export const chunks = <T>(items: readonly T[], size: number): T[][] => {
 
 // ─── Finding owners in the MandateSet events ───────────────────────────────────────────────────────────────────
 
-/** What the keeper remembers between runs: the owners it found and the first block it has not searched yet. */
-export type OwnersState = { nextBlock: bigint; owners: Address[] };
+/**
+ * What the keeper remembers between runs: the owners it found and the first block it has not searched yet, for one
+ * contract and one keeper. The search only looks at the events of that pair, so the position means nothing for another.
+ */
+export type OwnersState = { rebalancer: Address; keeper: Address; nextBlock: bigint; owners: Address[] };
 
-/** State from the file, or a fresh state that starts at `fromBlock`. Garbage is an error: never search from 0 by accident. */
-export const parseOwnersState = (json: string | undefined, fromBlock: bigint): OwnersState => {
-  if (json === undefined) return { nextBlock: fromBlock, owners: [] };
+/**
+ * State from the file. Garbage is an error: never search from 0 by accident. A file of another contract or keeper
+ * (or one that names neither) is an error too: continuing from its `nextBlock` would never read the earlier events of
+ * this pair, and those owners would silently not be served.
+ */
+export const parseOwnersState = (json: string, expected: { rebalancer: Address; keeper: Address }): OwnersState => {
   const parsed: unknown = JSON.parse(json);
   if (parsed === null || typeof parsed !== "object") throw new Error("owners state file is not a JSON object");
-  const { nextBlock, owners } = parsed as { nextBlock?: unknown; owners?: unknown };
+  const { rebalancer, keeper, nextBlock, owners } = parsed as Record<string, unknown>;
+  const is = (value: unknown, address: Address): boolean =>
+    typeof value === "string" && isAddress(value, { strict: false }) && getAddress(value) === getAddress(address);
+  if (!is(rebalancer, expected.rebalancer) || !is(keeper, expected.keeper)) {
+    throw new Error(
+      `owners state file is not for contract ${expected.rebalancer} and keeper ${expected.keeper}: ` +
+        "delete the file or set OWNERS_STATE_FILE to another one",
+    );
+  }
   if (typeof nextBlock !== "string" || !/^\d+$/.test(nextBlock)) throw new Error("owners state file: invalid nextBlock");
   if (!Array.isArray(owners) || !owners.every((o) => typeof o === "string" && isAddress(o, { strict: false }))) {
     throw new Error("owners state file: invalid owners");
   }
-  return { nextBlock: BigInt(nextBlock), owners: owners as Address[] };
+  return {
+    rebalancer: expected.rebalancer,
+    keeper: expected.keeper,
+    nextBlock: BigInt(nextBlock),
+    owners: owners as Address[],
+  };
 };
 
 /**
@@ -81,11 +100,11 @@ export const parseOwnersState = (json: string | undefined, fromBlock: bigint): O
  */
 export const withoutOwners = (state: OwnersState, gone: readonly Address[]): OwnersState => {
   const drop = new Set(gone.map((owner) => owner.toLowerCase()));
-  return { nextBlock: state.nextBlock, owners: state.owners.filter((owner) => !drop.has(owner.toLowerCase())) };
+  return { ...state, owners: state.owners.filter((owner) => !drop.has(owner.toLowerCase())) };
 };
 
 export const formatOwnersState = (state: OwnersState): string =>
-  `${JSON.stringify({ nextBlock: state.nextBlock.toString(), owners: state.owners }, null, 2)}\n`;
+  `${JSON.stringify({ ...state, nextBlock: state.nextBlock.toString() }, null, 2)}\n`;
 
 /** Inclusive block ranges of at most `step` blocks from `from` up to and including `to`. Empty if `from` > `to`. */
 export const logRanges = (from: bigint, to: bigint, step: bigint): { fromBlock: bigint; toBlock: bigint }[] => {

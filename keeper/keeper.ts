@@ -9,7 +9,8 @@
  * One run:
  * 1. Owners: the addresses in OWNERS_FILE, plus every owner that ever named this keeper in a `MandateSet` event
  *    (searched from FROM_BLOCK in ranges of LOG_RANGE_BLOCKS, for at most SEARCH_SECONDS; OWNERS_STATE_FILE remembers
- *    where the next run continues).
+ *    where the next run continues). That file belongs to one contract and one keeper: a run for another REBALANCER
+ *    or keeper refuses it, because continuing from its position would miss the earlier events of the new pair.
  * 2. One Multicall3 per PAGE_SIZE owners: `mandates(owner)` (still ours?) and `isDue(owner)`. Owners that no longer
  *    name this keeper are forgotten; a new `MandateSet` event brings them back.
  * 3. Per due owner: simulate `execute(owner, 0)` with `eth_call`. It returns what the swap yields right now; the
@@ -53,6 +54,7 @@ import {
   type CooldownState,
   type Failure,
   type Mandate,
+  type OwnersState,
   chunks,
   clearFailure,
   failureAction,
@@ -212,9 +214,11 @@ const describeError = (error: unknown): string => {
 // ─── 1. Owners ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Owners that named this keeper, from the events. Continues where the previous run stopped. */
-const findOwners = async (): Promise<Address[]> => {
-  if (fromBlock === undefined && !existsSync(ownersStateFile)) return [];
-  let state = parseOwnersState(existsSync(ownersStateFile) ? readFileSync(ownersStateFile, "utf8") : undefined, fromBlock ?? 0n);
+const findOwners = async (): Promise<OwnersState | undefined> => {
+  let state: OwnersState;
+  if (existsSync(ownersStateFile)) state = parseOwnersState(readFileSync(ownersStateFile, "utf8"), { rebalancer, keeper });
+  else if (fromBlock !== undefined) state = { rebalancer, keeper, nextBlock: fromBlock, owners: [] };
+  else return undefined;
   const latest = await publicClient.getBlockNumber();
   for (const range of logRanges(state.nextBlock, latest, logRangeBlocks)) {
     if (nowSec() - startSeconds >= searchSeconds) {
@@ -230,14 +234,14 @@ const findOwners = async (): Promise<Address[]> => {
         toBlock: range.toBlock,
       });
       const found = logs.map((log) => log.args.owner).filter((owner): owner is Address => owner !== undefined);
-      state = { nextBlock: range.toBlock + 1n, owners: mergeOwners(state.owners, found) };
+      state = { ...state, nextBlock: range.toBlock + 1n, owners: mergeOwners(state.owners, found) };
     } catch (error) {
       console.warn(`reading events from block ${range.fromBlock} failed: ${describeError(error)}; the next run continues there`);
       break;
     }
   }
   writeFileSync(ownersStateFile, formatOwnersState(state));
-  return state.owners;
+  return state;
 };
 
 // ─── 2. Who is due ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -360,12 +364,10 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  const owners = mergeOwners(listedOwners, await findOwners());
+  const found = await findOwners();
+  const owners = mergeOwners(listedOwners, found?.owners ?? []);
   const { due, gone } = await readDue(owners);
-  if (gone.length > 0 && existsSync(ownersStateFile)) {
-    const state = parseOwnersState(readFileSync(ownersStateFile, "utf8"), 0n);
-    writeFileSync(ownersStateFile, formatOwnersState(withoutOwners(state, gone)));
-  }
+  if (found !== undefined && gone.length > 0) writeFileSync(ownersStateFile, formatOwnersState(withoutOwners(found, gone)));
   console.log(`${owners.length} owners known, ${gone.length} no longer name this keeper, ${due.length} due`);
 
   let cooldowns: CooldownState = existsSync(cooldownFile) ? parseCooldownState(readFileSync(cooldownFile, "utf8")) : {};

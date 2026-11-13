@@ -30,6 +30,7 @@ import {
 const OWNER = "0xAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
 const OTHER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Address;
 const KEEPER = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
+const REBALANCER = "0xdddddddddddddddddddddddddddddddddddddddd" as Address;
 const ZERO = "0x0000000000000000000000000000000000000000" as Address;
 const policy = { baseSeconds: 3600, maxSeconds: 86_400 };
 
@@ -79,24 +80,47 @@ describe("finding owners in the events", () => {
     expect(() => logRanges(0n, 10n, 0n)).toThrow("at least 1 block");
   });
 
-  test("the state file round-trips; without a file the search starts at FROM_BLOCK", () => {
-    const state = { nextBlock: 51_500_000n, owners: [getAddress(OWNER), OTHER] };
-    expect(parseOwnersState(formatOwnersState(state), 1n)).toEqual(state);
-    expect(parseOwnersState(undefined, 51_400_000n)).toEqual({ nextBlock: 51_400_000n, owners: [] });
+  const pair = { rebalancer: getAddress(REBALANCER), keeper: getAddress(KEEPER) };
+  const state = { ...pair, nextBlock: 51_500_000n, owners: [getAddress(OWNER), OTHER] };
+  const file = (fields: object): string => JSON.stringify({ ...pair, nextBlock: "12", owners: [], ...fields });
+  const REFUSED = "delete the file or set OWNERS_STATE_FILE";
+
+  test("the state file round-trips, however its contract and keeper are spelled", () => {
+    expect(parseOwnersState(formatOwnersState(state), pair)).toEqual(state);
+    // Compared as addresses, not as text: lower case in the file or in the configuration is the same pair.
+    expect(parseOwnersState(file({ rebalancer: REBALANCER, keeper: KEEPER }), pair)).toEqual({ ...pair, nextBlock: 12n, owners: [] });
+    expect(parseOwnersState(formatOwnersState(state), { rebalancer: REBALANCER, keeper: KEEPER }).nextBlock).toBe(51_500_000n);
   });
 
-  test("owners that no longer name this keeper are forgotten; the search position stays", () => {
-    const state = { nextBlock: 51_500_000n, owners: [getAddress(OWNER), OTHER] };
-    expect(withoutOwners(state, [OWNER.toLowerCase() as Address])).toEqual({ nextBlock: 51_500_000n, owners: [OTHER] });
+  test("a state file of another contract is refused: its search position says nothing about this one", () => {
+    expect(() => parseOwnersState(formatOwnersState(state), { ...pair, rebalancer: OTHER })).toThrow(REFUSED);
+    expect(() => parseOwnersState(file({ rebalancer: "0x123" }), pair)).toThrow(REFUSED);
+  });
+
+  test("a state file of another keeper is refused", () => {
+    expect(() => parseOwnersState(formatOwnersState(state), { ...pair, keeper: OTHER })).toThrow(REFUSED);
+    expect(() => parseOwnersState(file({ keeper: 12 }), pair)).toThrow(REFUSED);
+  });
+
+  test("a state file that names no contract and keeper is refused the same way", () => {
+    expect(() => parseOwnersState('{"nextBlock":"12","owners":[]}', pair)).toThrow(REFUSED);
+    expect(() => parseOwnersState(file({ keeper: undefined }), pair)).toThrow(REFUSED);
+  });
+
+  test("owners that no longer name this keeper are forgotten; contract, keeper and search position stay", () => {
+    expect(withoutOwners(state, [OWNER.toLowerCase() as Address])).toEqual({ ...pair, nextBlock: 51_500_000n, owners: [OTHER] });
     expect(withoutOwners(state, [])).toEqual(state);
+    // What is written after forgetting is still accepted for the same contract and keeper.
+    expect(parseOwnersState(formatOwnersState(withoutOwners(state, [OTHER])), pair).owners).toEqual([getAddress(OWNER)]);
   });
 
   test("a damaged state file is an error, never a silent search from block 0", () => {
-    expect(() => parseOwnersState("null", 1n)).toThrow("not a JSON object");
-    expect(() => parseOwnersState('{"nextBlock":12,"owners":[]}', 1n)).toThrow("invalid nextBlock");
-    expect(() => parseOwnersState('{"nextBlock":"-1","owners":[]}', 1n)).toThrow("invalid nextBlock");
-    expect(() => parseOwnersState('{"nextBlock":"12","owners":["0x123"]}', 1n)).toThrow("invalid owners");
-    expect(() => parseOwnersState("not json", 1n)).toThrow();
+    expect(() => parseOwnersState("null", pair)).toThrow("not a JSON object");
+    expect(() => parseOwnersState(file({ nextBlock: 12 }), pair)).toThrow("invalid nextBlock");
+    expect(() => parseOwnersState(file({ nextBlock: "-1" }), pair)).toThrow("invalid nextBlock");
+    expect(() => parseOwnersState(file({ nextBlock: "" }), pair)).toThrow("invalid nextBlock");
+    expect(() => parseOwnersState(file({ owners: ["0x123"] }), pair)).toThrow("invalid owners");
+    expect(() => parseOwnersState("not json", pair)).toThrow();
   });
 });
 
