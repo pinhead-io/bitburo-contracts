@@ -30,7 +30,8 @@ import {IV3SwapRouter} from "./interfaces/IV3SwapRouter.sol";
  *      MIN_TRADE_USDC of the drift, the run takes the whole drift instead. Balance and allowance cap it, it is never
  *      less than MIN_TRADE_USDC, and it runs at most once per INTERVAL. The rule looks at the wallet as it is and
  *      remembers nothing of earlier runs: a correction larger than one run continues on the next days while the
- *      wallet is outside the band, and ends when a run brings it inside.
+ *      wallet is outside the band, and ends when a run brings it inside, or when what is left is worth less than
+ *      MIN_TRADE_USDC.
  *
  *      Price bound. The output the contract actually receives must lie within MAX_DEVIATION_BPS of the Chainlink
  *      value of the input, pool fee included, in both directions. The lower bound caps what a run can lose to a
@@ -57,7 +58,8 @@ contract Rebalancer is ReentrancyGuardTransient {
     uint256 public constant MAX_TARGET_BPS = 9500;
     uint256 public constant BAND_BPS = 200;
     /// @notice Per run, share of the total value. A run that this cap would leave less than MIN_TRADE_USDC short of
-    ///         the target takes that remainder too, so it can exceed the cap by just under MIN_TRADE_USDC.
+    ///         the target takes that remainder too, so it can exceed the cap by just under MIN_TRADE_USDC (a sell,
+    ///         rounded up to whole satoshi, by up to one satoshi more).
     uint256 public constant MAX_CORRECTION_BPS = 1000;
     /// @notice The smallest run that is worth making, and the smallest remainder the cap leaves (on a sell up to one
     ///         satoshi less, see `_plan`).
