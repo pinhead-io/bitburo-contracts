@@ -22,9 +22,6 @@ contract MockRouter is IV3SwapRouter {
     /// @dev Share of `amountIn` the pool can absorb; below 10,000 the rest stays with the caller, as in a real pool
     ///      that runs out of liquidity before the input is used up.
     uint256 public fillBps = 10_000;
-    uint256 public calls;
-    address public lastRecipient;
-    uint256 public lastAmountIn;
     uint256 public lastAmountOutMinimum;
 
     constructor(address usdc, address cbbtc, uint256 price_) {
@@ -67,9 +64,6 @@ contract MockRouter is IV3SwapRouter {
         require(MockERC20(p.tokenIn).transferFrom(msg.sender, address(this), used), "MockRouter: transferFrom");
         MockERC20(p.tokenOut).mint(p.recipient, amountOut);
 
-        calls++;
-        lastRecipient = p.recipient;
-        lastAmountIn = p.amountIn;
         lastAmountOutMinimum = p.amountOutMinimum;
     }
 }
