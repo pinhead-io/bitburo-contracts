@@ -31,7 +31,10 @@
  *
  * Usage:
  *   RPC_URL=https://mainnet.base.org REBALANCER=0x… KEEPER_PRIVATE_KEY=0x… FROM_BLOCK=<deploy block> bun run keeper.ts
- * Dry run (no key, sends nothing): DRY_RUN=1 KEEPER_ADDRESS=0x…
+ * Dry run: DRY_RUN=1 KEEPER_ADDRESS=0x… It needs no key, sends nothing and writes nothing: it reads OWNERS_STATE_FILE
+ * and COOLDOWN_FILE but leaves both as they are, and it takes no lock, so it can run next to a real run. Because it
+ * does not save how far it searched, every dry run searches again from the position in OWNERS_STATE_FILE (FROM_BLOCK
+ * without that file).
  * Optional: OWNERS_FILE=./owners.txt  OWNERS_STATE_FILE=./keeper-owners.json  LOG_RANGE_BLOCKS=5000
  *           SEARCH_SECONDS=120  PAGE_SIZE=50  TOLERANCE_BPS=10  GAS_LIMIT=500000  TX_WAIT_SECONDS=120
  *           COOLDOWN_FILE=./keeper-cooldowns.json  COOLDOWN_SECONDS=3600  COOLDOWN_MAX_SECONDS=86400
@@ -163,33 +166,40 @@ const pidAlive = (pid: number): boolean => {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 };
-if (
-  !acquireLock(lockFile, {
-    pid: process.pid,
-    nowSeconds: startSeconds,
-    maxAgeSeconds: lockMaxSeconds,
-    isAlive: pidAlive,
-    onStaleRemoved: (lock) =>
-      console.warn(`stale lock removed (${lock ? `pid ${lock.pid}, ${startSeconds - lock.startedAt} s old` : "unreadable"})`),
-  })
-) {
-  console.warn(`Another keeper run is still running (${lockFile}); this run stops.`);
-  process.exit(0);
-}
-process.on("exit", () => {
-  try {
-    if (parseLock(readFileSync(lockFile, "utf8"))?.pid === process.pid) unlinkSync(lockFile);
-  } catch {
-    // already gone
+// A dry run sends nothing and writes no file, so it has nothing to guard: it takes no lock and leaves the lock file
+// of a real run alone.
+if (!dryRun) {
+  if (
+    !acquireLock(lockFile, {
+      pid: process.pid,
+      nowSeconds: startSeconds,
+      maxAgeSeconds: lockMaxSeconds,
+      isAlive: pidAlive,
+      onStaleRemoved: (lock) =>
+        console.warn(`stale lock removed (${lock ? `pid ${lock.pid}, ${startSeconds - lock.startedAt} s old` : "unreadable"})`),
+    })
+  ) {
+    console.warn(`Another keeper run is still running (${lockFile}); this run stops.`);
+    process.exit(0);
   }
-});
+  process.on("exit", () => {
+    try {
+      if (parseLock(readFileSync(lockFile, "utf8"))?.pid === process.pid) unlinkSync(lockFile);
+    } catch {
+      // already gone
+    }
+  });
+}
 /** Read under the lock and before any network work: a damaged file stops the run here, not after the search. */
 let cooldowns: CooldownState = pruneExpired(
   existsSync(cooldownFile) ? parseCooldownState(readFileSync(cooldownFile, "utf8")) : {},
   nowSec(),
   cooldownPolicy.maxSeconds,
 );
-const saveCooldowns = (): void => writeFileSync(cooldownFile, `${JSON.stringify(cooldowns, null, 2)}\n`);
+/** A dry run keeps its cool-downs to itself: written, they would hold the real keeper back from those owners. */
+const saveCooldowns = (): void => {
+  if (!dryRun) writeFileSync(cooldownFile, `${JSON.stringify(cooldowns, null, 2)}\n`);
+};
 // A run that hangs stops itself before its lock expires. `process.exit` skips the `finally` in `main`, so the
 // cool-downs of this run are saved here: without the one for too little gas, every run would waste a transaction.
 setTimeout(() => {
@@ -266,7 +276,7 @@ const findOwners = async (latest: bigint): Promise<OwnersState | undefined> => {
       break;
     }
   }
-  writeFileSync(ownersStateFile, formatOwnersState(state));
+  if (!dryRun) writeFileSync(ownersStateFile, formatOwnersState(state));
   return state;
 };
 
@@ -399,7 +409,9 @@ const main = async (): Promise<void> => {
   const found = await findOwners(latest);
   const owners = mergeOwners(listedOwners, found?.owners ?? []);
   const { due, gone } = await readDue(owners, latest);
-  if (found !== undefined && gone.length > 0) writeFileSync(ownersStateFile, formatOwnersState(withoutOwners(found, gone)));
+  if (!dryRun && found !== undefined && gone.length > 0) {
+    writeFileSync(ownersStateFile, formatOwnersState(withoutOwners(found, gone)));
+  }
   console.log(`${owners.length} owners known, ${gone.length} no longer name this keeper, ${due.length} due`);
 
   const counts = { executed: 0, simulated: 0, skipped: 0, cooldown: 0 };
