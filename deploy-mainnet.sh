@@ -99,7 +99,8 @@ fi
 
 if [ "$MODE" = "go" ]; then
   EXISTING=""
-  if [ -e "$BROADCAST" ]; then
+  # -L too: a symlink whose target is gone is a record that cannot be read, not "no deploy".
+  if [ -e "$BROADCAST" ] || [ -L "$BROADCAST" ]; then
     EXISTING="$(deployed_address)" || unusable_record
   fi
   if [ -n "$EXISTING" ] && [ "$(lower "${REPLACES:-}")" != "$(lower "$EXISTING")" ]; then
